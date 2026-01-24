@@ -1,0 +1,120 @@
+✅ Canonical Billing Mapping (single source of truth)
+
+Use this exact mapping everywhere (backend + mobile + docs):
+
+{
+  "stripe": {
+    "products": {
+      "pro": "prod_ToJSAadjhmPJLG",
+      "business": "prod_ToJVsJcIp7EUu7"
+    },
+    "prices": {
+      "pro_monthly": "price_1SqkFdHJoA5voVUkUuiVbdu6",
+      "business_monthly": "price_1SqgsVHJoA5voVUkmt0f6Qfi"
+    }
+  },
+  "apple": {
+    "subscription_group": "sendforge_subscriptions",
+    "pro_monthly": "sendforge.pro.monthly",
+    "business_monthly": "sendforge.business.monthly"
+  },
+  "google": {
+    "pro_monthly": "pro_monthly",
+    "business_monthly": "business_monthly"
+  }
+}
+
+✅ Final Stripe IDs (LOCKED)
+Pro (Monthly $29):
+price_1SqkFdHJoA5voVUkUuiVbdu6
+
+Business (Monthly $79):
+price_1SqgsVHJoA5voVUkmt0f6Qfi
+
+
+7) Backend constants (drop-in)
+export const PLAN = {
+  FREE: "free",
+  PRO: "pro",
+  BUSINESS: "business",
+};
+
+export const INTL_CAPS_CENTS = {
+  pro: { soft_per_blast: 1000, hard_accum: 2000 },
+  business: { soft_per_blast: 3000, hard_accum: 5000 },
+};
+
+export const INTL_MULTIPLIERS = {
+  tier1: 1.3,
+  tier2: 1.6,
+};
+
+3️⃣ Backend Plan Definition (authoritative)
+export const PLANS = {
+  free: {
+    monthlyFee: 0,
+    recipientsIncluded: 25,
+    intlAllowed: false,
+    perBlastSoftCap: 0,
+    accumulatedHardCap: 0,
+  },
+
+  pro: {
+    monthlyFee: 29,
+    stripePriceId: process.env.STRIPE_PRICE_PRO_MONTHLY,
+    recipientsIncluded: 1000,
+    intlAllowed: true,
+    perBlastSoftCap: 10,   // USD
+    accumulatedHardCap: 20,
+  },
+
+  business: {
+    monthlyFee: 79,
+    stripePriceId: process.env.STRIPE_PRICE_BUSINESS_MONTHLY,
+    recipientsIncluded: 5000,
+    intlAllowed: true,
+    perBlastSoftCap: 30,
+    accumulatedHardCap: 50,
+  },
+};
+
+8️⃣ Stripe API — Exact Backend Pattern
+await stripe.invoiceItems.create({
+  customer,
+  amount: Math.round(costUsd * 100),
+  currency: "usd",
+  description: "International SMS usage",
+});
+
+const invoice = await stripe.invoices.create({
+  customer,
+  auto_advance: true,
+  collection_method: "charge_automatically",
+});
+
+await stripe.invoices.finalizeInvoice(invoice.id);
+
+9️⃣ Redis Keys (USAGE + SAFETY)
+// Monthly counters
+usage:{userId}:intl_usd
+usage:{userId}:sms_count
+
+// Cached pricing
+twilio:pricing:{countryCode}
+
+// Trust state
+billing:{userId}:last_payment_success
+
+1️⃣1️⃣ UI Copy (FINAL)
+
+Before send
+
+“This blast includes international recipients and may incur additional charges.”
+
+High-cost confirmation
+
+“Estimated international SMS cost: ~$12.40. Continue?”
+
+Billing transparency
+
+“International messages are billed at carrier cost and charged automatically when thresholds are exceeded.”

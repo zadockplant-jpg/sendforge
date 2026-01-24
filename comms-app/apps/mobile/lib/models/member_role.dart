@@ -1,0 +1,4 @@
+enum MemberRole {
+  admin,
+  member,
+}
