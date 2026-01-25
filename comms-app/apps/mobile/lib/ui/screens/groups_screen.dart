@@ -29,6 +29,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
     setState(() => busy = true);
     final api = GroupsApi(widget.appState);
     final data = await api.list();
+    if (!mounted) return;
     setState(() {
       groups = data;
       busy = false;
@@ -40,8 +41,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Groups'),
-
-        /// ✅ NEW: Create Group action
         actions: [
           IconButton(
             icon: const Icon(Icons.add),
@@ -53,7 +52,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
                   builder: (_) => CreateGroupScreen(appState: widget.appState),
                 ),
               );
-              // refresh list when returning
               _load();
             },
           ),
@@ -78,11 +76,14 @@ class _GroupsScreenState extends State<GroupsScreen> {
                             onPressed: () => Navigator.push(
                               context,
                               MaterialPageRoute(
-                                builder: (_) => GroupDetailScreen(appState: widget.appState, group: g),
-
+                                builder: (_) => GroupDetailScreen(
+                                  appState: widget.appState,
+                                  group: g,
+                                ),
                               ),
                             ),
-                            icon: const Icon(SFIcons.groups),
+                            // ✅ FIX: remove const to avoid “Not a constant expression”
+                            icon: Icon(SFIcons.groups),
                             label: const Text('Open'),
                           ),
                         ),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../core/app_state.dart';
 import 'ui/colors.dart';
 import 'ui/screens/home_screen.dart';
+import 'ui/theme/sf_input_theme.dart';
 
 class SendForgeApp extends StatefulWidget {
   const SendForgeApp({super.key});
@@ -21,27 +22,21 @@ class _SendForgeAppState extends State<SendForgeApp> {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
           title: 'SendForge',
+
           theme: ThemeData(
             useMaterial3: true,
             colorSchemeSeed: SFColors.primaryBlue,
             scaffoldBackgroundColor: SFColors.background,
+
             appBarTheme: const AppBarTheme(
               backgroundColor: SFColors.primaryBlue,
               foregroundColor: Colors.white,
             ),
-            inputDecorationTheme: InputDecorationTheme(
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Colors.black12),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Colors.black12),
-              ),
-            ),
+
+            // 🔗 GLOBAL INPUT STYLING (this is the hook)
+            inputDecorationTheme: sfInputTheme(),
           ),
+
           home: HomeScreen(appState: appState),
         );
       },

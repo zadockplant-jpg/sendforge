@@ -24,6 +24,10 @@ class SFColors {
   static const Color warning = Color(0xFFF59E0B);
   static const Color error = Color(0xFFD32F2F);
 
+  // UPDATED UI
+  static const Color headerBlueDark = Color(0xFF1C3FAA);
+  static const Color headerBlueLight = Color(0xFF2E6AF0);
+
   /// ICON DEFAULTS
   static const Color iconPrimary = primaryBlue;
   static const Color iconSecondary = secondarySlate;
