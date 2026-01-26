@@ -195,24 +195,39 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
                   title: 'Channels',
                   subtitle: 'Select one or both (SMS + Email)',
                   child: Wrap(
-                    spacing: 8,
-                    children: Channel.values.map((c) {
-                      final selected = _channels.contains(c);
-                      return FilterChip(
-                        selected: selected,
-                        label: Text(c == Channel.sms ? 'SMS' : 'Email'),
-                        avatar: Icon(
-                          c == Channel.sms ? SFIcons.sms : SFIcons.email,
-                          size: 18,
-                        ),
-                        onSelected: (v) {
-                          setState(() {
-                            v ? _channels.add(c) : _channels.remove(c);
-                          });
-                        },
-                      );
-                    }).toList(),
-                  ),
+  spacing: 12,
+  children: Channel.values.map((c) {
+    final selected = _channels.contains(c);
+    final label = c == Channel.sms ? 'SMS' : 'Email';
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () {
+        setState(() {
+          selected ? _channels.remove(c) : _channels.add(c);
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: selected ? SFColors.primaryBlue : Colors.white,
+          border: Border.all(
+            color: selected ? SFColors.primaryBlue : SFColors.cardBorder,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: selected ? Colors.white : SFColors.textPrimary,
+          ),
+        ),
+      ),
+    );
+  }).toList(),
+),
+
                 ),
 
                 const SizedBox(height: 14),

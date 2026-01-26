@@ -3,7 +3,6 @@ import cors from "cors";
 
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
-import { contactsRouter } from "./routes/contacts.routes.js";
 import { groupsRouter } from "./routes/groups.routes.js";
 import { templatesRouter } from "./routes/templates.routes.js";
 import { blastsRouter } from "./routes/blasts.routes.js";
@@ -11,7 +10,7 @@ import { billingRouter } from "./routes/billing.routes.js";
 import { webhooksRouter } from "./routes/webhooks.routes.js";
 import { threadsRouter } from "./routes/threads.routes.js";
 import { usageRouter } from "./routes/usage.routes.js";
-
+import contactsImportRoutes from "./routes/contacts.import.routes.js";
 // ✅ KEEP dot-based blast routes (final canonical versions)
 import { blastsQuoteRouter } from "./routes/blasts.quote.routes.js";
 import { blastsSendRouter } from "./routes/blasts.send.routes.js";
@@ -38,7 +37,7 @@ app.use(
 // ----- CORE ROUTES -----
 app.use("/health", healthRouter);
 app.use("/v1/auth", authRouter);
-app.use("/v1/contacts", contactsRouter);
+app.use("/v1/contacts", contactsImportRoutes);
 app.use("/v1/groups", groupsRouter);
 app.use("/v1/templates", templatesRouter);
 app.use("/v1/blasts", blastsRouter);

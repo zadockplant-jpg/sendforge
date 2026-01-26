@@ -7,22 +7,22 @@ const router = express.Router();
  * POST /v1/contacts/import
  * Body:
  * {
- *   method: "google" | "csv" | "manual",
+ *   method: "google" | "csv" | "device" | "manual",
  *   contacts: [{ name, phone, email, sourceMeta? }]
  * }
+ *
+ * For now: accepts payload + validates + inserts/upserts.
+ * OAuth/CSV parsing/permissions happen BEFORE this endpoint later.
  */
 router.post("/import", async (req, res) => {
   try {
+    // Temporary: allow dev without auth middleware
     const userId =
       req.header("x-user-id") ||
       req.body.userId ||
       "dev-user";
 
     const { method, contacts } = req.body || {};
-
-    if (!Array.isArray(contacts)) {
-      throw new Error("contacts must be an array");
-    }
 
     const result = await importContacts({
       userId,

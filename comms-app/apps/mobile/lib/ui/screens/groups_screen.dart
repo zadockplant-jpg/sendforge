@@ -1,97 +1,65 @@
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
-import '../../models/group.dart';
-import '../../services/groups_api.dart';
 import '../components/sf_card.dart';
-import '../icons.dart';
-import 'group_detail_screen.dart';
+import '../colors.dart';
 import 'create_group_screen.dart';
+import 'groups_list_screen.dart';
+import 'import_contacts_screen.dart';
 
-class GroupsScreen extends StatefulWidget {
+class GroupsScreen extends StatelessWidget {
   final AppState appState;
   const GroupsScreen({super.key, required this.appState});
 
   @override
-  State<GroupsScreen> createState() => _GroupsScreenState();
-}
-
-class _GroupsScreenState extends State<GroupsScreen> {
-  bool busy = true;
-  List<Group> groups = [];
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    setState(() => busy = true);
-    final api = GroupsApi(widget.appState);
-    final data = await api.list();
-    if (!mounted) return;
-    setState(() {
-      groups = data;
-      busy = false;
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Groups'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            tooltip: 'Create Group',
-            onPressed: () async {
-              await Navigator.push(
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          SFCard(
+            title: 'Create Group',
+            subtitle: 'Start a new messaging group',
+            child: ElevatedButton(
+              onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => CreateGroupScreen(appState: widget.appState),
+                  builder: (_) => CreateGroupScreen(appState: appState),
                 ),
-              );
-              _load();
-            },
+              ),
+              child: const Text('Create Group'),
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          SFCard(
+            title: 'Manage Groups',
+            subtitle: 'View and edit existing groups',
+            child: ElevatedButton(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => GroupsListScreen(appState: appState),
+                ),
+              ),
+              child: const Text('Open Groups'),
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          SFCard(
+            title: 'Import Contacts',
+            subtitle: 'Google · CSV · Device · Add manually',
+            child: ElevatedButton(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ImportContactsScreen(appState: appState),
+                ),
+              ),
+              child: const Text('Open Import Menu'),
+            ),
           ),
         ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: busy
-            ? const Center(child: CircularProgressIndicator())
-            : ListView.separated(
-                itemCount: groups.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 12),
-                itemBuilder: (context, i) {
-                  final g = groups[i];
-                  return SFCard(
-                    title: g.name,
-                    subtitle: '${g.members.length} members',
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => GroupDetailScreen(
-                                  appState: widget.appState,
-                                  group: g,
-                                ),
-                              ),
-                            ),
-                            // ✅ FIX: remove const to avoid “Not a constant expression”
-                            icon: Icon(SFIcons.groups),
-                            label: const Text('Open'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
       ),
     );
   }
