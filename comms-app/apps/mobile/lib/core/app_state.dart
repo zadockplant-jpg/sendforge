@@ -50,4 +50,38 @@ class AppState extends ChangeNotifier {
 
     return contacts.where((c) => memberIds.contains(c.id)).toList();
   }
+
+  /// ✅ Adds a mock thread + first message when a blast is queued.
+  /// This makes Threads tab testable immediately.
+  void addQueuedBlastAsThread({
+    required String blastId,
+    required String body,
+  }) {
+    final now = DateTime.now();
+
+    final root = Message(
+      id: blastId,
+      sender: 'You',
+      body: body,
+      incoming: false,
+      timestamp: now,
+    );
+
+    // Put newest at top
+    threads.insert(0, root);
+
+    messagesByThread.putIfAbsent(blastId, () => []);
+    messagesByThread[blastId]!.insert(
+      0,
+      Message(
+        id: '${blastId}_m1',
+        sender: 'You',
+        body: body,
+        incoming: false,
+        timestamp: now,
+      ),
+    );
+
+    notifyListeners();
+  }
 }

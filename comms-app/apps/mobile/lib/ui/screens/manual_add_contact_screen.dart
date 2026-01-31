@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../../core/app_state.dart';
 import '../../models/contact.dart';
 import '../../services/api_client.dart';
@@ -14,49 +15,46 @@ class ManualAddContactScreen extends StatefulWidget {
 
 class _ManualAddContactScreenState extends State<ManualAddContactScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _name = TextEditingController();
-  final _phone = TextEditingController();
-  final _email = TextEditingController();
+  final _nameCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
 
   bool busy = false;
   String? status;
 
   @override
   void dispose() {
-    _name.dispose();
-    _phone.dispose();
-    _email.dispose();
+    _nameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _emailCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     setState(() => status = null);
+
     if (!_formKey.currentState!.validate()) return;
 
     setState(() => busy = true);
+
     try {
+      final api = ApiClient(baseUrl: widget.appState.baseUrl);
+      final svc = ContactImportService(api);
+
       final c = Contact(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        name: _name.text.trim(),
-        phone: _phone.text.trim().isEmpty ? null : _phone.text.trim(),
-        email: _email.text.trim().isEmpty ? null : _email.text.trim(),
+        id: 'manual_${DateTime.now().millisecondsSinceEpoch}',
+        name: _nameCtrl.text.trim(),
+        phone: _phoneCtrl.text.trim().isEmpty ? null : _phoneCtrl.text.trim(),
+        email: _emailCtrl.text.trim().isEmpty ? null : _emailCtrl.text.trim(),
       );
 
-      final api = ApiClient(baseUrl: widget.appState.baseUrl);
-      final service = ContactImportService(api);
+      final resp = await svc.importContacts(method: 'manual', contacts: [c]);
 
-      await service.importContacts(method: 'manual', contacts: [c]);
-
-      widget.appState.contacts.add(c);
-
-      if (!mounted) return;
-      setState(() => status = 'Saved ✅');
-      Navigator.pop(context);
+      setState(() => status = 'Added ✅ (added: ${resp['added'] ?? 1})');
     } catch (e) {
-      if (!mounted) return;
-      setState(() => status = 'Failed: $e');
+      setState(() => status = 'Error: $e');
     } finally {
-      if (mounted) setState(() => busy = false);
+      setState(() => busy = false);
     }
   }
 
@@ -69,21 +67,20 @@ class _ManualAddContactScreenState extends State<ManualAddContactScreen> {
         child: Form(
           key: _formKey,
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               TextFormField(
-                controller: _name,
+                controller: _nameCtrl,
                 decoration: const InputDecoration(labelText: 'Name'),
                 validator: (v) => (v == null || v.trim().isEmpty) ? 'Name required' : null,
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               TextFormField(
-                controller: _phone,
+                controller: _phoneCtrl,
                 decoration: const InputDecoration(labelText: 'Phone (optional)'),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               TextFormField(
-                controller: _email,
+                controller: _emailCtrl,
                 decoration: const InputDecoration(labelText: 'Email (optional)'),
               ),
               const SizedBox(height: 16),
@@ -91,18 +88,14 @@ class _ManualAddContactScreenState extends State<ManualAddContactScreen> {
                 width: double.infinity,
                 child: FilledButton(
                   onPressed: busy ? null : _save,
-                  style: FilledButton.styleFrom(
+                  child: Align(
                     alignment: Alignment.centerLeft,
-                    padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
-                  ),
-                  child: Text(
-                    busy ? 'Saving…' : 'Save Contact',
-                    style: const TextStyle(fontWeight: FontWeight.w700),
+                    child: Text(busy ? 'Saving…' : 'Save Contact'),
                   ),
                 ),
               ),
               if (status != null) ...[
-                const SizedBox(height: 10),
+                const SizedBox(height: 12),
                 Text(status!),
               ],
             ],

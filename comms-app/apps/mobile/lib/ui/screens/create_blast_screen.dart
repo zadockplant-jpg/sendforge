@@ -4,12 +4,13 @@ import '../../core/app_state.dart';
 import '../../models/blast.dart';
 import '../../services/blast_api.dart';
 import '../../services/api_client.dart';
-import '../../models/group.dart';
-
 import '../colors.dart';
 import '../icons.dart';
 import '../components/sf_card.dart';
 import '../components/sf_primary_button.dart';
+import '../../models/group.dart';
+import '../../models/message.dart';
+import 'threads_screen.dart';
 
 class CreateBlastScreen extends StatefulWidget {
   final AppState appState;
@@ -47,60 +48,26 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
     super.dispose();
   }
 
-  // ✅ FIX: Bottom sheet must be able to rebuild itself.
-  // We wrap the sheet in StatefulBuilder and update both:
-  // - the sheet state (so checkmarks paint immediately)
-  // - the parent state (so selected count is preserved)
   void _openGroupPicker() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       builder: (_) {
+        // ✅ Important: local modal state so checkmarks update immediately
         return StatefulBuilder(
-          builder: (context, sheetSetState) {
-            return SafeArea(
-              child: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  const Text(
-                    'Select Groups',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 12),
-                  ...widget.appState.groups.map((g) {
-                    final isSelected = _selectedGroupIds.contains(g.id);
-                    return ListTile(
-                      leading: Icon(
-                        Icons.group,
-                        color: isSelected ? SFColors.primaryBlue : Colors.grey,
-                      ),
-                      title: Text(g.name),
-                      trailing: isSelected ? const Icon(Icons.check_circle) : null,
-                      onTap: () {
-                        // update sheet immediately
-                        sheetSetState(() {
-                          isSelected
-                              ? _selectedGroupIds.remove(g.id)
-                              : _selectedGroupIds.add(g.id);
-                        });
-                        // also update parent
-                        setState(() {});
-                      },
-                    );
-                  }),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text(
-                        'Done',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+          builder: (context, modalSetState) {
+            return _GroupPicker(
+              groups: widget.appState.groups,
+              selected: _selectedGroupIds,
+              onToggle: (id) {
+                // update both modal UI + main screen state
+                modalSetState(() {});
+                setState(() {
+                  _selectedGroupIds.contains(id)
+                      ? _selectedGroupIds.remove(id)
+                      : _selectedGroupIds.add(id);
+                });
+              },
             );
           },
         );
@@ -138,6 +105,7 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
 
   // ============================================================
   // 🚀 Send flow: validate → quote → confirm → send
+  // PLUS: mock thread creation so Threads tab is testable
   // ============================================================
   Future<void> _send() async {
     setState(() => status = null);
@@ -167,12 +135,13 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       final apiClient = ApiClient(baseUrl: widget.appState.baseUrl);
       final blastsApi = BlastsApi(apiClient);
 
-      // TEMP until auth is wired
+      // TEMP until auth is wired (keeps the feature flow intact)
       const userId = 'dev-user';
 
-      // NOTE: still using placeholder recipients (as in your current file)
+      // MVP recipients: treat each selected group as a recipient token
       final recipients = _selectedGroupIds.map((id) => '+1555000$id').toList();
 
+      // 1️⃣ Quote
       final quote = await blastsApi.quote(
         userId: userId,
         recipients: recipients,
@@ -187,6 +156,7 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       final intlCount = (quote['intlCount'] ?? 0) as int;
       final requiresConfirm = quote['requiresConfirm'] == true;
 
+      // 2️⃣ Confirm international charges if required
       if (requiresConfirm && intlCount > 0) {
         final est = quote['estimatedIntlUsd']?.toString() ?? '0.00';
         final chargeNow = quote['requiresImmediateCharge'] == true;
@@ -195,6 +165,7 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
         if (!ok) return;
       }
 
+      // 3️⃣ Send
       final resp = await blastsApi.send(
         userId: userId,
         recipients: recipients,
@@ -202,7 +173,23 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
         quote: quote,
       );
 
-      setState(() => status = 'Queued ✅ (${resp['blastId'] ?? ''})');
+      final blastId = (resp['blastId'] ?? DateTime.now().millisecondsSinceEpoch.toString()).toString();
+      setState(() => status = 'Queued ✅ ($blastId)');
+
+      // ✅ Create local “thread” immediately so Threads tab becomes testable
+      widget.appState.addQueuedBlastAsThread(
+        blastId: blastId,
+        body: draft.body,
+      );
+
+      // Optional: jump user directly into Threads
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ThreadsScreen(appState: widget.appState),
+        ),
+      );
     } catch (e) {
       setState(() => status = 'Error: $e');
     } finally {
@@ -370,6 +357,50 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// ============================================================
+/// GROUP PICKER (single definition only)
+/// ============================================================
+
+class _GroupPicker extends StatelessWidget {
+  final List<Group> groups;
+  final Set<String> selected;
+  final ValueChanged<String> onToggle;
+
+  const _GroupPicker({
+    required this.groups,
+    required this.selected,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Select Groups',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          ...groups.map((g) {
+            final isSelected = selected.contains(g.id);
+            return ListTile(
+              leading: Icon(
+                Icons.group,
+                color: isSelected ? SFColors.primaryBlue : Colors.grey,
+              ),
+              title: Text(g.name),
+              trailing: isSelected ? const Icon(Icons.check_circle) : null,
+              onTap: () => onToggle(g.id),
+            );
+          }),
+        ],
       ),
     );
   }

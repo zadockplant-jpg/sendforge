@@ -3,21 +3,15 @@ import '../../core/app_state.dart';
 import '../colors.dart';
 import '../theme/sf_theme.dart';
 import 'add_contact_screen.dart';
+import 'contacts_import_screen.dart'; // ✅ real CSV import screen
 
 class GroupImportMenuScreen extends StatelessWidget {
   final AppState appState;
   const GroupImportMenuScreen({super.key, required this.appState});
 
-  void _toast(BuildContext context, String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg)),
-    );
-  }
-
   Widget _menuButton({
     required BuildContext context,
     required String title,
-    required String subtitle,
     required VoidCallback onTap,
   }) {
     return Container(
@@ -36,25 +30,12 @@ class GroupImportMenuScreen extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    style: const TextStyle(
-                      color: SFColors.textMuted,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15,
+                ),
               ),
             ),
             const Icon(Icons.chevron_right_rounded, color: SFColors.textMuted),
@@ -67,7 +48,6 @@ class GroupImportMenuScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // Match your global header style: gradient AppBar like HomeScreen
       appBar: AppBar(
         elevation: 0,
         flexibleSpace: Container(
@@ -88,35 +68,51 @@ class GroupImportMenuScreen extends StatelessWidget {
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _menuButton(
               context: context,
-              title: 'Import from Google Contacts',
-              subtitle: 'OAuth + sync later (UI ready now)',
-              onTap: () => _toast(context, 'Google import UI only (logic later)'),
+              title: 'Import from Device',
+              onTap: () {
+                // PASS 2: device permissions + picker
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Device contacts coming next')),
+                );
+              },
+            ),
+            _menuButton(
+              context: context,
+              title: 'Import from Google',
+              onTap: () {
+                // PASS 2: OAuth
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Google Contacts OAuth coming next')),
+                );
+              },
             ),
             _menuButton(
               context: context,
               title: 'Import CSV',
-              subtitle: 'File parsing later (UI ready now)',
-              onTap: () => _toast(context, 'CSV import UI only (logic later)'),
-            ),
-            _menuButton(
-              context: context,
-              title: 'Import Device Contacts',
-              subtitle: 'Permissions later (UI ready now)',
-              onTap: () => _toast(context, 'Device contacts UI only (logic later)'),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ContactsImportScreen(appState: appState),
+                  ),
+                );
+              },
             ),
             _menuButton(
               context: context,
               title: 'Add Contact',
-              subtitle: 'Manual contact entry',
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => AddContactScreen(appState: appState),
-                ),
-              ),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => AddContactScreen(appState: appState),
+                  ),
+                );
+              },
             ),
           ],
         ),
