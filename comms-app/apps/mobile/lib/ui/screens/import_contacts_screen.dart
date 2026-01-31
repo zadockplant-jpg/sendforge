@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
-import '../components/sf_card.dart';
+import 'csv_import_screen.dart';
+import 'device_contacts_import_screen.dart';
+import 'google_contacts_import_screen.dart';
+import 'manual_add_contact_screen.dart';
 
 class ImportContactsScreen extends StatelessWidget {
   final AppState appState;
@@ -13,46 +16,65 @@ class ImportContactsScreen extends StatelessWidget {
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SFCard(
-              title: 'Import from Google',
-              subtitle: 'Sync contacts from Google account',
-              child: ElevatedButton(
-                onPressed: () {},
-                child: const Text('Connect Google'),
+            _button(
+              label: 'Import from Device',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => DeviceContactsImportScreen(appState: appState),
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-
-            SFCard(
-              title: 'Import CSV',
-              subtitle: 'Upload a CSV file',
-              child: ElevatedButton(
-                onPressed: () {},
-                child: const Text('Upload CSV'),
+            const SizedBox(height: 10),
+            _button(
+              label: 'Import from Google',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => GoogleContactsImportScreen(appState: appState),
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-
-            SFCard(
-              title: 'Import Device Contacts',
-              subtitle: 'Use phone contact list',
-              child: ElevatedButton(
-                onPressed: () {},
-                child: const Text('Select Contacts'),
+            const SizedBox(height: 10),
+            _button(
+              label: 'Import CSV',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => CsvImportScreen(appState: appState),
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-
-            SFCard(
-              title: 'Add Contact',
-              subtitle: 'Enter contact manually',
-              child: ElevatedButton(
-                onPressed: () {},
-                child: const Text('Add Contact'),
+            const SizedBox(height: 10),
+            _button(
+              label: 'Add Contact',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ManualAddContactScreen(appState: appState),
+                ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _button({required String label, required VoidCallback onTap}) {
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton(
+        onPressed: onTap,
+        style: FilledButton.styleFrom(
+          alignment: Alignment.centerLeft, // left align label inside button
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w700),
         ),
       ),
     );

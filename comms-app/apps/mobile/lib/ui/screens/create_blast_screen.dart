@@ -4,6 +4,8 @@ import '../../core/app_state.dart';
 import '../../models/blast.dart';
 import '../../services/blast_api.dart';
 import '../../services/api_client.dart';
+import '../../models/group.dart';
+
 import '../colors.dart';
 import '../icons.dart';
 import '../components/sf_card.dart';
@@ -45,21 +47,64 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
     super.dispose();
   }
 
+  // ✅ FIX: Bottom sheet must be able to rebuild itself.
+  // We wrap the sheet in StatefulBuilder and update both:
+  // - the sheet state (so checkmarks paint immediately)
+  // - the parent state (so selected count is preserved)
   void _openGroupPicker() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (_) => _GroupPicker(
-        groups: mockGroups,
-        selected: _selectedGroupIds,
-        onToggle: (id) {
-          setState(() {
-            _selectedGroupIds.contains(id)
-                ? _selectedGroupIds.remove(id)
-                : _selectedGroupIds.add(id);
-          });
-        },
-      ),
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (context, sheetSetState) {
+            return SafeArea(
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  const Text(
+                    'Select Groups',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 12),
+                  ...widget.appState.groups.map((g) {
+                    final isSelected = _selectedGroupIds.contains(g.id);
+                    return ListTile(
+                      leading: Icon(
+                        Icons.group,
+                        color: isSelected ? SFColors.primaryBlue : Colors.grey,
+                      ),
+                      title: Text(g.name),
+                      trailing: isSelected ? const Icon(Icons.check_circle) : null,
+                      onTap: () {
+                        // update sheet immediately
+                        sheetSetState(() {
+                          isSelected
+                              ? _selectedGroupIds.remove(g.id)
+                              : _selectedGroupIds.add(g.id);
+                        });
+                        // also update parent
+                        setState(() {});
+                      },
+                    );
+                  }),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text(
+                        'Done',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -119,18 +164,15 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
     setState(() => busy = true);
 
     try {
-      // ✅ Do NOT store apiClient in AppState yet — keep AppState clean
       final apiClient = ApiClient(baseUrl: widget.appState.baseUrl);
       final blastsApi = BlastsApi(apiClient);
 
-      // TEMP until auth is wired (keeps the feature flow intact)
+      // TEMP until auth is wired
       const userId = 'dev-user';
 
-      // MVP recipients: for now, treat each selected group as one “recipient”
-      // (We’ll replace this with real: resolveRecipientsForGroups() when AppState is expanded.)
+      // NOTE: still using placeholder recipients (as in your current file)
       final recipients = _selectedGroupIds.map((id) => '+1555000$id').toList();
 
-      // 1️⃣ Quote
       final quote = await blastsApi.quote(
         userId: userId,
         recipients: recipients,
@@ -145,7 +187,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       final intlCount = (quote['intlCount'] ?? 0) as int;
       final requiresConfirm = quote['requiresConfirm'] == true;
 
-      // 2️⃣ Confirm international charges if required
       if (requiresConfirm && intlCount > 0) {
         final est = quote['estimatedIntlUsd']?.toString() ?? '0.00';
         final chargeNow = quote['requiresImmediateCharge'] == true;
@@ -154,7 +195,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
         if (!ok) return;
       }
 
-      // 3️⃣ Send
       final resp = await blastsApi.send(
         userId: userId,
         recipients: recipients,
@@ -195,39 +235,38 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
                   title: 'Channels',
                   subtitle: 'Select one or both (SMS + Email)',
                   child: Wrap(
-  spacing: 12,
-  children: Channel.values.map((c) {
-    final selected = _channels.contains(c);
-    final label = c == Channel.sms ? 'SMS' : 'Email';
+                    spacing: 12,
+                    children: Channel.values.map((c) {
+                      final selected = _channels.contains(c);
+                      final label = c == Channel.sms ? 'SMS' : 'Email';
 
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: () {
-        setState(() {
-          selected ? _channels.remove(c) : _channels.add(c);
-        });
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          color: selected ? SFColors.primaryBlue : Colors.white,
-          border: Border.all(
-            color: selected ? SFColors.primaryBlue : SFColors.cardBorder,
-          ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontWeight: FontWeight.w700,
-            color: selected ? Colors.white : SFColors.textPrimary,
-          ),
-        ),
-      ),
-    );
-  }).toList(),
-),
-
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () {
+                          setState(() {
+                            selected ? _channels.remove(c) : _channels.add(c);
+                          });
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(12),
+                            color: selected ? SFColors.primaryBlue : Colors.white,
+                            border: Border.all(
+                              color: selected ? SFColors.primaryBlue : SFColors.cardBorder,
+                            ),
+                          ),
+                          child: Text(
+                            label,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: selected ? Colors.white : SFColors.textPrimary,
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
                 ),
 
                 const SizedBox(height: 14),
@@ -331,50 +370,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// ============================================================
-/// GROUP PICKER
-/// ============================================================
-
-class _GroupPicker extends StatelessWidget {
-  final List<_MockGroup> groups;
-  final Set<String> selected;
-  final ValueChanged<String> onToggle;
-
-  const _GroupPicker({
-    required this.groups,
-    required this.selected,
-    required this.onToggle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const Text(
-            'Select Groups',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 12),
-          ...groups.map((g) {
-            final isSelected = selected.contains(g.id);
-            return ListTile(
-              leading: Icon(
-                Icons.group,
-                color: isSelected ? SFColors.primaryBlue : Colors.grey,
-              ),
-              title: Text(g.name),
-              trailing: isSelected ? const Icon(Icons.check_circle) : null,
-              onTap: () => onToggle(g.id),
-            );
-          }),
-        ],
       ),
     );
   }
@@ -487,18 +482,3 @@ class _StatusBanner extends StatelessWidget {
     );
   }
 }
-
-/// ============================================================
-/// TEMP MOCK GROUPS (REMOVE LATER)
-/// ============================================================
-
-class _MockGroup {
-  final String id;
-  final String name;
-  const _MockGroup(this.id, this.name);
-}
-
-const mockGroups = <_MockGroup>[
-  _MockGroup('g1', 'Test Group A'),
-  _MockGroup('g2', 'Test Group B'),
-];
