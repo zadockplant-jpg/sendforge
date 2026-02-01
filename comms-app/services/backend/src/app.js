@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-
+import { env } from "./config/env.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { groupsRouter } from "./routes/groups.routes.js";
@@ -20,10 +20,17 @@ import { stripeWebhooksRouter } from "./routes/stripe.webhooks.routes.js";
 
 export const app = express();
 
-app.set("trust proxy", true); // important for Twilio signature behind Render
+app.set("trust proxy", 1); // important for Twilio signature behind Render
 
 app.use(express.urlencoded({ extended: false })); // Twilio form posts
-app.use(cors());
+app.use(
+  cors({
+    origin: env.nodeEnv === "production"
+      ? "https://comms-app-1w0o.onrender.com"
+      : true,
+    credentials: true,
+  })
+);
 
 // keep rawBody for SendGrid signature verification
 app.use(
@@ -60,6 +67,3 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true });
-});
