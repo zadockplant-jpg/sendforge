@@ -1,6 +1,6 @@
 import { dedupeContacts } from "./dedupe.service.js";
 import { auditLog } from "./audit.service.js";
-import db from "../db/db.js";
+import db from "../config/db.js";
 
 export async function importContacts({ userId, method, contacts }) {
   const normalized = contacts
