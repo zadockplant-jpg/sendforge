@@ -44,7 +44,7 @@ class ApiError implements Exception {
 /*class ApiClient {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://localhost:3000',
+    defaultValue: 'https://comms-app-1wo0.onrender.com',
   );
 
   ApiClient();
