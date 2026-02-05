@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+
 import '../../core/app_state.dart';
+import '../../models/contact.dart';
+import '../../services/api_client.dart';
+import '../../services/contact_import_service.dart';
 import '../colors.dart';
 import '../theme/sf_theme.dart';
 
@@ -17,6 +21,8 @@ class _AddContactScreenState extends State<AddContactScreen> {
   final _phone = TextEditingController();
   final _email = TextEditingController();
 
+  bool _busy = false;
+
   @override
   void dispose() {
     _name.dispose();
@@ -25,13 +31,48 @@ class _AddContactScreenState extends State<AddContactScreen> {
     super.dispose();
   }
 
-  void _save() {
+  Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Saved (UI only). Wiring comes next.')),
+    final name = _name.text.trim();
+    final phone = _phone.text.trim();
+    final email = _email.text.trim();
+
+    final c = Contact(
+      id: 'manual_${DateTime.now().millisecondsSinceEpoch}',
+      name: name,
+      phone: phone.isEmpty ? null : phone,
+      email: email.isEmpty ? null : email,
     );
-    Navigator.pop(context);
+
+    setState(() => _busy = true);
+
+    try {
+      final api = ApiClient(baseUrl: widget.appState.baseUrl);
+      final svc = ContactImportService(api);
+
+      await svc.importContacts(
+        method: 'manual',
+        contacts: [c],
+      );
+
+      // local update
+      widget.appState.contacts.add(c);
+      widget.appState.notifyListeners();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Contact saved ✅')),
+      );
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Save failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   @override
@@ -48,10 +89,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
             ),
           ),
         ),
-        title: const Text(
-          'Add Contact',
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
+        title: const Text('Add Contact', style: TextStyle(fontWeight: FontWeight.w700)),
         foregroundColor: Colors.white,
       ),
       body: Padding(
@@ -63,8 +101,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
               TextFormField(
                 controller: _name,
                 decoration: const InputDecoration(labelText: 'Name'),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Name required' : null,
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Name required' : null,
               ),
               const SizedBox(height: 12),
               TextFormField(
@@ -85,7 +122,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
-                  onPressed: _save,
+                  onPressed: _busy ? null : _save,
                   style: FilledButton.styleFrom(
                     backgroundColor: SFColors.primaryBlue,
                     foregroundColor: Colors.white,
@@ -94,9 +131,9 @@ class _AddContactScreenState extends State<AddContactScreen> {
                     ),
                     padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
-                  child: const Text(
-                    'Save Contact',
-                    style: TextStyle(fontWeight: FontWeight.w800),
+                  child: Text(
+                    _busy ? 'Saving…' : 'Save Contact',
+                    style: const TextStyle(fontWeight: FontWeight.w800),
                   ),
                 ),
               ),

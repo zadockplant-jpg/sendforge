@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
 import 'csv_import_screen.dart';
-import 'device_contacts_import_screen.dart';
+import 'device_import_screen.dart';
 import 'google_contacts_import_screen.dart';
 import 'manual_add_contact_screen.dart';
 

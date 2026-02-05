@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+
 import '../../core/app_state.dart';
 import '../colors.dart';
 import '../theme/sf_theme.dart';
 import 'add_contact_screen.dart';
-import 'contacts_import_screen.dart'; // ✅ real CSV import screen
+import 'contacts_import_screen.dart';
+import 'device_import_screen.dart';
+import 'google_csv_instructions_screen.dart';
 
 class GroupImportMenuScreen extends StatelessWidget {
   final AppState appState;
@@ -12,6 +15,7 @@ class GroupImportMenuScreen extends StatelessWidget {
   Widget _menuButton({
     required BuildContext context,
     required String title,
+    required String subtitle,
     required VoidCallback onTap,
   }) {
     return Container(
@@ -30,12 +34,19 @@ class GroupImportMenuScreen extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                title,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w800,
-                  fontSize: 15,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(color: SFColors.textMuted, fontSize: 12),
+                  ),
+                ],
               ),
             ),
             const Icon(Icons.chevron_right_rounded, color: SFColors.textMuted),
@@ -59,10 +70,7 @@ class GroupImportMenuScreen extends StatelessWidget {
             ),
           ),
         ),
-        title: const Text(
-          'Import Contacts',
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
+        title: const Text('Import Contacts', style: TextStyle(fontWeight: FontWeight.w700)),
         foregroundColor: Colors.white,
       ),
       body: Padding(
@@ -73,26 +81,33 @@ class GroupImportMenuScreen extends StatelessWidget {
             _menuButton(
               context: context,
               title: 'Import from Device',
+              subtitle: 'Reads contacts from your phone (permission required)',
               onTap: () {
-                // PASS 2: device permissions + picker
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Device contacts coming next')),
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => DeviceContactsImportScreen(appState: appState),
+                  ),
                 );
               },
             ),
             _menuButton(
               context: context,
               title: 'Import from Google',
+              subtitle: 'OAuth deferred → export CSV from Google Contacts',
               onTap: () {
-                // PASS 2: OAuth
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Google Contacts OAuth coming next')),
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => GoogleCsvInstructionsScreen(appState: appState),
+                  ),
                 );
               },
             ),
             _menuButton(
               context: context,
               title: 'Import CSV',
+              subtitle: 'Pick a CSV file → preview → import to SendForge',
               onTap: () {
                 Navigator.push(
                   context,
@@ -105,6 +120,7 @@ class GroupImportMenuScreen extends StatelessWidget {
             _menuButton(
               context: context,
               title: 'Add Contact',
+              subtitle: 'Manual entry (writes to backend)',
               onTap: () {
                 Navigator.push(
                   context,

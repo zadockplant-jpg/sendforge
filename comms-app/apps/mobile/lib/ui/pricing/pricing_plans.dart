@@ -34,9 +34,7 @@ class PricingPlans {
     monthlyUsd: 29,
     tagline: 'For growing teams and creators',
     bullets: [
-      'Up to 5,000 messages / month',
-      'CSV contact import',
-      'Scheduled blasts',
+      'Up to 2,000 messages / month',
       'Priority support',
     ],
   );
@@ -47,18 +45,12 @@ class PricingPlans {
     monthlyUsd: 79,
     tagline: 'High-volume messaging at scale',
     bullets: [
-      'Up to 25,000 messages / month',
-      'Google & device contact sync',
-      'Advanced analytics',
+      'Up to 5,000 messages / month',
       'Dedicated support',
     ],
   );
 
-  static const List<PricingPlan> all = [
-    free,
-    pro,
-    business,
-  ];
+  static const List<PricingPlan> all = [free, pro, business];
 
   static PricingPlan byTier(String tier) {
     return all.firstWhere(
