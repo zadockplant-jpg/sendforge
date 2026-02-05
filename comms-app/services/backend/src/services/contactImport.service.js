@@ -1,4 +1,4 @@
-import { dedupeContacts } from "./dedupe.service.js";
+import { dedupeDestinations as dedupeContacts } from "./dedupe.service.js";
 import { auditLog } from "./audit.service.js";
 import { db } from "../config/db.js";
 
