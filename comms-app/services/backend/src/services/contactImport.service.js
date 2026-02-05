@@ -1,11 +1,9 @@
 import { dedupeContacts } from "./dedupe.service.js";
-import auditLog from "./audit.service.js";
+import { auditLog } from "./audit.service.js";
 import db from "../config/db.js";
 
 export async function importContacts({ userId, method, contacts }) {
-  const normalized = contacts
-    .map(normalize)
-    .filter(Boolean);
+  const normalized = contacts.map(normalize).filter(Boolean);
 
   const { unique, duplicates } = dedupeContacts(normalized);
 
