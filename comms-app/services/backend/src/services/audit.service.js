@@ -28,3 +28,19 @@ export async function auditLog(userId, action, metadata = {}) {
     created_at: new Date(),
   });
 }
+export async function auditLog(userId, eventType, payload = {}) {
+  try {
+    // reuse message_events table if it exists
+    await db("message_events").insert({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      blast_id: null,
+      blast_recipient_id: null,
+      event_type: eventType,
+      payload: JSON.stringify(payload),
+    });
+  } catch (e) {
+    // don't block imports if audit storage isn't ready
+    console.warn("auditLog skipped:", e?.message || e);
+  }
+}
