@@ -1,17 +1,24 @@
 
 // Keep your existing export
-export function dedupeDestinations(destinations) {
+export function dedupeDestinations(list = []) {
   const seen = new Set();
-  const out = [];
-  for (const d of destinations) {
-    const key = String(d || "").trim().toLowerCase();
-    if (!key) continue;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(d);
+  const unique = [];
+  const duplicates = [];
+
+  for (const c of list) {
+    const key = `${c.phone || ""}|${c.email || ""}`;
+
+    if (seen.has(key)) {
+      duplicates.push(c);
+    } else {
+      seen.add(key);
+      unique.push(c);
+    }
   }
-  return out;
+
+  return { unique, duplicates };
 }
+
 
 // ✅ Add this NEW export (used by contactImport.service.js)
 export function dedupeContacts(contacts) {
