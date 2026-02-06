@@ -30,11 +30,13 @@ export async function importContacts({ userId, method, contacts }) {
     duplicates: duplicates.length,
   });
 
-  return {
-    added: inserted,
-    duplicates: duplicates.length,
-    invalid: contacts.length - normalized.length,
-  };
+return {
+  unique,                 // <-- ADD THIS BACK
+  duplicates,             // <-- array, not count
+  added: inserted,
+  invalid: contacts.length - normalized.length,
+};
+
 }
 
 function normalize(c) {
