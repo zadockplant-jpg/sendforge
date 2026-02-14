@@ -23,14 +23,39 @@ class ApiClient {
     return h;
   }
 
-  Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body) async {
+  Future<Map<String, dynamic>> getJson(String path) async {
     final uri = Uri.parse('$baseUrl$path');
-    final res = await http.post(uri, headers: await _headers(), body: jsonEncode(body));
+    final res = await http.get(uri, headers: await _headers());
 
     final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
     if (res.statusCode >= 400) {
-      throw ApiError(message: decoded is Map && decoded['error'] != null ? decoded['error'].toString() : res.body);
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
     }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final res =
+        await http.post(uri, headers: await _headers(), body: jsonEncode(body));
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
     return (decoded as Map<String, dynamic>);
   }
 }
@@ -38,17 +63,7 @@ class ApiClient {
 class ApiError implements Exception {
   final String message;
   ApiError({required this.message});
+
   @override
   String toString() => message;
 }
-/*class ApiClient {
-  static const String baseUrl = String.fromEnvironment(
-    'API_BASE_URL',
-    defaultValue: 'https://comms-app-1wo0.onrender.com',
-  );
-
-  ApiClient();
-
-  // existing methods unchanged
-}
-*/

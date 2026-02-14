@@ -1,10 +1,12 @@
 import '../models/contact.dart';
+import '../core/app_state.dart';
 import 'api_client.dart';
 
 class ContactImportService {
   final ApiClient api;
+  final AppState appState;
 
-  ContactImportService(this.api);
+  ContactImportService(this.api, this.appState);
 
   Future<Map<String, dynamic>> importContacts({
     required String method,
@@ -12,13 +14,21 @@ class ContactImportService {
   }) async {
     final payload = {
       'method': method,
-      'contacts': contacts.map((c) => {
-        'name': c.name,
-        'phone': c.phone,
-        'email': c.email,
-      }).toList(),
+      'contacts': contacts
+          .map((c) => {
+                'name': c.name,
+                'phone': c.phone,
+                'email': c.email,
+              })
+          .toList(),
     };
 
-    return await api.postJson('/v1/contacts/import', payload);
+    final response =
+        await api.postJson('/v1/contacts/import', payload);
+
+    // 🔹 Immediately refresh contacts from backend
+    await appState.loadContacts();
+
+    return response;
   }
 }

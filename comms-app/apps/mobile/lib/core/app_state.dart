@@ -4,6 +4,7 @@ import '../models/group.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
 import '../models/blast.dart';
+import '../services/api_client.dart';
 
 class AppState extends ChangeNotifier {
   // Auth / config
@@ -12,16 +13,15 @@ class AppState extends ChangeNotifier {
 
   // Identity / billing (UI only for now)
   String userId = 'local-user';
-  String planTier = 'free'; // free | pro | business
+  String planTier = 'free';
 
-  // Core data (local MVP state)
+  // Core data
   final List<Group> groups = [];
   final List<Contact> contacts = [];
 
   final List<Message> threads = [];
   final Map<String, List<Message>> messagesByThread = {};
 
-  // Drafts
   BlastDraft? activeBlast;
 
   // ------------------------
@@ -41,6 +41,30 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 🔹 Load contacts from backend
+  Future<void> loadContacts() async {
+    final api = ApiClient(baseUrl: baseUrl);
+
+    final response = await api.getJson('/v1/contacts');
+
+    if (response['contacts'] is List) {
+      contacts.clear();
+
+      for (final item in response['contacts']) {
+        contacts.add(
+          Contact(
+            id: item['id'] ?? '',
+            name: item['name'] ?? 'Unknown',
+            phone: item['phone'],
+            email: item['email'],
+          ),
+        );
+      }
+
+      notifyListeners();
+    }
+  }
+
   /// Utility used by Create Blast
   List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
     final memberIds = groups
@@ -51,8 +75,7 @@ class AppState extends ChangeNotifier {
     return contacts.where((c) => memberIds.contains(c.id)).toList();
   }
 
-  /// ✅ Adds a mock thread + first message when a blast is queued.
-  /// This makes Threads tab testable immediately.
+  /// Adds mock thread when blast queued
   void addQueuedBlastAsThread({
     required String blastId,
     required String body,
@@ -67,7 +90,6 @@ class AppState extends ChangeNotifier {
       timestamp: now,
     );
 
-    // Put newest at top
     threads.insert(0, root);
 
     messagesByThread.putIfAbsent(blastId, () => []);
