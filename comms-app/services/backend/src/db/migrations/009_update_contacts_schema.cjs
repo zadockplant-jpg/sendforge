@@ -1,5 +1,5 @@
 /**
- * 009_update_contacts_schema.js
+ * 009_update_contacts_schema.cjs
  */
 
 exports.up = async function (knex) {
