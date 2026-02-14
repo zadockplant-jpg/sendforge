@@ -56,7 +56,8 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
 
     try {
       final api = ApiClient(baseUrl: widget.appState.baseUrl);
-      final service = ContactImportService(api);
+      final service = ContactImportService(api, widget.appState);
+
 
       final result = await service.importContacts(
         method: 'csv',

@@ -71,7 +71,8 @@ class _DeviceContactsImportScreenState extends State<DeviceContactsImportScreen>
       }
 
       final api = ApiClient(baseUrl: widget.appState.baseUrl);
-      final svc = ContactImportService(api);
+      final svc = ContactImportService(api, widget.appState);
+
 
       final resp = await svc.importContacts(method: 'device', contacts: mapped);
 

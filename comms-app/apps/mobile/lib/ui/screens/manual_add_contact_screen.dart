@@ -39,7 +39,8 @@ class _ManualAddContactScreenState extends State<ManualAddContactScreen> {
 
     try {
       final api = ApiClient(baseUrl: widget.appState.baseUrl);
-      final svc = ContactImportService(api);
+      final svc = ContactImportService(api, widget.appState);
+
 
       final c = Contact(
         id: 'manual_${DateTime.now().millisecondsSinceEpoch}',

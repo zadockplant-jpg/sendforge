@@ -49,7 +49,8 @@ class _AddContactScreenState extends State<AddContactScreen> {
 
     try {
       final api = ApiClient(baseUrl: widget.appState.baseUrl);
-      final svc = ContactImportService(api);
+      final svc = ContactImportService(api, widget.appState);
+
 
       await svc.importContacts(
         method: 'manual',
