@@ -3,6 +3,7 @@ import '../../core/app_state.dart';
 import '../colors.dart';
 import '../icons.dart';
 import '../pricing/pricing_plans.dart';
+import '../../core/auth_state.dart';
 
 class SettingsScreen extends StatelessWidget {
   final AppState appState;
@@ -47,8 +48,13 @@ class SettingsScreen extends StatelessWidget {
             subtitle: const Text('Messages sent this month (MVP local)'),
             onTap: () {},
           ),
-
+ListTile(
+  leading: const Icon(Icons.logout),
+  title: const Text('Logout'),
+  onTap: () async {
+    await appState.auth.logout();
           _SectionHeader('Support'),
+
           ListTile(
             leading: const Icon(Icons.help_outline),
             title: const Text('Help'),
