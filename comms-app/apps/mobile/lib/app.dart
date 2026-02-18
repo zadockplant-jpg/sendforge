@@ -37,7 +37,11 @@ class _SendForgeAppState extends State<SendForgeApp> {
             inputDecorationTheme: sfInputTheme(),
           ),
 
-          home: HomeScreen(appState: appState),
+          home: HomeScreen(
+  appState: appState,
+  auth: authState,
+)
+
         );
       },
     );

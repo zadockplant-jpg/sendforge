@@ -1,13 +1,19 @@
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
+import '../../core/auth_state.dart';
 import '../colors.dart';
 import '../icons.dart';
 import '../pricing/pricing_plans.dart';
-import '../../core/auth_state.dart';
 
 class SettingsScreen extends StatelessWidget {
   final AppState appState;
-  const SettingsScreen({super.key, required this.appState});
+  final AuthState auth;
+
+  const SettingsScreen({
+    super.key,
+    required this.appState,
+    required this.auth,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -38,7 +44,9 @@ class SettingsScreen extends StatelessWidget {
             onTap: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => PricingScreen(appState: appState)),
+                MaterialPageRoute(
+                  builder: (_) => PricingScreen(appState: appState),
+                ),
               );
             },
           ),
@@ -48,13 +56,17 @@ class SettingsScreen extends StatelessWidget {
             subtitle: const Text('Messages sent this month (MVP local)'),
             onTap: () {},
           ),
-ListTile(
-  leading: const Icon(Icons.logout),
-  title: const Text('Logout'),
-  onTap: () async {
-    await appState.auth.logout();
-          _SectionHeader('Support'),
 
+          _SectionHeader('Security'),
+          ListTile(
+            leading: const Icon(Icons.logout),
+            title: const Text('Logout'),
+            onTap: () async {
+              await auth.logout();
+            },
+          ),
+
+          _SectionHeader('Support'),
           ListTile(
             leading: const Icon(Icons.help_outline),
             title: const Text('Help'),
@@ -87,7 +99,11 @@ class PricingScreen extends StatelessWidget {
           return Container(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: selected ? SFColors.primaryBlue : SFColors.cardBorder),
+              border: Border.all(
+                color: selected
+                    ? SFColors.primaryBlue
+                    : SFColors.cardBorder,
+              ),
               color: Colors.white,
             ),
             child: ListTile(
@@ -95,7 +111,9 @@ class PricingScreen extends StatelessWidget {
                 '${p.name} — \$${p.monthlyUsd}/mo',
                 style: TextStyle(
                   fontWeight: FontWeight.w800,
-                  color: selected ? SFColors.primaryBlue : SFColors.textPrimary,
+                  color: selected
+                      ? SFColors.primaryBlue
+                      : SFColors.textPrimary,
                 ),
               ),
               subtitle: Padding(
@@ -113,7 +131,9 @@ class PricingScreen extends StatelessWidget {
               onTap: () {
                 appState.setPlanTier(p.tier);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Selected ${p.name} (UI only for now)')),
+                  SnackBar(
+                    content: Text('Selected ${p.name} (UI only for now)'),
+                  ),
                 );
               },
             ),

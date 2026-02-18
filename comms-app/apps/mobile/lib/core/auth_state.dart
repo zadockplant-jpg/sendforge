@@ -6,6 +6,7 @@ class AuthState extends ChangeNotifier {
   static const _tokenKey = 'auth_token';
 
   String? _token;
+
   bool get isLoggedIn => _token != null;
   String? get token => _token;
 

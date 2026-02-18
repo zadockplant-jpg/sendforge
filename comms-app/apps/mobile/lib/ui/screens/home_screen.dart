@@ -7,18 +7,25 @@ import 'create_blast_screen.dart';
 import 'threads_screen.dart';
 import 'groups_screen.dart';
 import 'settings_screen.dart';
+import '../../core/auth_state.dart';
 
 enum HomeTab { blast, threads, groups }
 
 class HomeScreen extends StatefulWidget {
   final AppState appState;
-  const HomeScreen({super.key, required this.appState});
+  final AuthState auth;
+
+  const HomeScreen({
+    super.key,
+    required this.appState,
+    required this.auth,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<> {
   HomeTab _tab = HomeTab.blast;
 
   Widget _buildBody() {
@@ -66,7 +73,11 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () => Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) => SettingsScreen(appState: widget.appState),
+                builder: (_) => SettingsScreen(
+  appState: widget.appState,
+  auth: widget.auth,
+),
+
               ),
             ),
           ),
