@@ -6,12 +6,15 @@ class AuthState extends ChangeNotifier {
   static const _tokenKey = 'auth_token';
 
   String? _token;
+  bool _initialized = false;
 
   bool get isLoggedIn => _token != null;
+  bool get isInitialized => _initialized;
   String? get token => _token;
 
   Future<void> load() async {
     _token = await _storage.read(key: _tokenKey);
+    _initialized = true;
     notifyListeners();
   }
 

@@ -3,33 +3,42 @@ import 'package:http/http.dart' as http;
 
 class AuthService {
   final String baseUrl;
+
   AuthService(this.baseUrl);
-
-  Future<String> login(String email, String password) async {
-    final res = await http.post(
-      Uri.parse('$baseUrl/auth/login'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'email': email, 'password': password}),
-    );
-
-    if (res.statusCode != 200) {
-      throw Exception('login_failed');
-    }
-
-    return jsonDecode(res.body)['token'];
-  }
 
   Future<String> register(String email, String password) async {
     final res = await http.post(
-      Uri.parse('$baseUrl/auth/register'),
+      Uri.parse('$baseUrl/v1/auth/register'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'email': email, 'password': password}),
+      body: jsonEncode({
+        'email': email,
+        'password': password,
+      }),
     );
 
     if (res.statusCode != 200) {
-      throw Exception('register_failed');
+      throw Exception('Registration failed');
     }
 
-    return jsonDecode(res.body)['token'];
+    final data = jsonDecode(res.body);
+    return data['token'];
+  }
+
+  Future<String> login(String email, String password) async {
+    final res = await http.post(
+      Uri.parse('$baseUrl/v1/auth/login'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'email': email,
+        'password': password,
+      }),
+    );
+
+    if (res.statusCode != 200) {
+      throw Exception('Login failed');
+    }
+
+    final data = jsonDecode(res.body);
+    return data['token'];
   }
 }

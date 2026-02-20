@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
+import '../../core/auth_state.dart';
 import '../colors.dart';
 import '../icons.dart';
 import '../components/sf_top_tab_bar.dart';
@@ -7,7 +8,6 @@ import 'create_blast_screen.dart';
 import 'threads_screen.dart';
 import 'groups_screen.dart';
 import 'settings_screen.dart';
-import '../../core/auth_state.dart';
 
 enum HomeTab { blast, threads, groups }
 
@@ -25,7 +25,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<> {
+class _HomeScreenState extends State<HomeScreen> {
   HomeTab _tab = HomeTab.blast;
 
   Widget _buildBody() {
@@ -58,26 +58,28 @@ class _HomeScreenState extends State<> {
           ),
         ),
         title: Row(
-          children: [
-            const Icon(SFIcons.send, color: Colors.white),
-            const SizedBox(width: 8),
-            const Text(
+          children: const [
+            Icon(SFIcons.send, color: Colors.white),
+            SizedBox(width: 8),
+            Text(
               'SendForge',
-              style: TextStyle(fontWeight: FontWeight.w700),
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+              ),
             ),
           ],
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.settings),
+            icon: const Icon(Icons.settings, color: Colors.white),
             onPressed: () => Navigator.push(
               context,
               MaterialPageRoute(
                 builder: (_) => SettingsScreen(
-  appState: widget.appState,
-  auth: widget.auth,
-),
-
+                  appState: widget.appState,
+                  auth: widget.auth,
+                ),
               ),
             ),
           ),
