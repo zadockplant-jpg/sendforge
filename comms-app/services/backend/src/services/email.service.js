@@ -24,7 +24,10 @@ app.use(express.urlencoded({ extended: false }));
 
 app.use(
   cors({
-    origin: env.nodeEnv === "production" ? env.publicBaseUrl : true,
+    origin:
+      env.nodeEnv === "production"
+        ? "https://comms-app-1w0o.onrender.com"
+        : true,
     credentials: true,
   })
 );
@@ -40,7 +43,7 @@ app.use(
 // ----- CORE ROUTES -----
 app.use("/health", healthRouter);
 app.use("/v1/auth", authRouter);
-app.use("/v1/auth", verificationRouter); // ✅ NEW: /v1/auth/verify
+app.use("/v1/auth", verificationRouter); // ✅ NEW (adds /verify)
 app.use("/v1/contacts", contactsImportRoutes);
 app.use("/v1/groups", groupsRouter);
 app.use("/v1/templates", templatesRouter);

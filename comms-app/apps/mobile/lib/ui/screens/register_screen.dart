@@ -4,7 +4,7 @@ import '../../core/auth_state.dart';
 import '../colors.dart';
 
 class RegisterScreen extends StatefulWidget {
-  final AuthState auth;
+  final AuthState auth; // kept for signature consistency (not used in Option A)
   final AuthService service;
 
   const RegisterScreen({
@@ -23,33 +23,28 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   bool loading = false;
   String? error;
+  bool success = false;
 
   Future<void> submit() async {
     setState(() {
       loading = true;
       error = null;
+      success = false;
     });
 
     try {
-      final token = await widget.service.register(
+      await widget.service.register(
         emailCtrl.text.trim(),
         passCtrl.text.trim(),
       );
 
-      // Safety guard
-      if (token == null || token.isEmpty) {
-        throw Exception("Invalid token received");
-      }
-
-      await widget.auth.login(token);
+      if (!mounted) return;
+      setState(() => success = true);
     } catch (e) {
-      if (mounted) {
-        setState(() => error = "Registration failed");
-      }
+      if (!mounted) return;
+      setState(() => error = "Registration failed");
     } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -84,18 +79,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
                 TextField(
                   controller: emailCtrl,
-                  decoration: const InputDecoration(
-                    labelText: "Email",
-                  ),
+                  decoration: const InputDecoration(labelText: "Email"),
                 ),
                 const SizedBox(height: 16),
 
                 TextField(
                   controller: passCtrl,
                   obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: "Password",
-                  ),
+                  decoration: const InputDecoration(labelText: "Password (8+ chars)"),
                 ),
                 const SizedBox(height: 24),
 
@@ -106,6 +97,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       error!,
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.red),
+                    ),
+                  ),
+
+                if (success)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      "Account created ✅\nCheck your email to verify, then return and log in.",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: SFColors.textPrimary.withOpacity(0.9)),
                     ),
                   ),
 
@@ -126,9 +127,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 const SizedBox(height: 16),
 
                 TextButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                  },
+                  onPressed: () => Navigator.pop(context),
                   child: const Text("Already have an account? Login"),
                 ),
               ],

@@ -24,11 +24,13 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool loading = false;
   String? error;
+  bool needsVerify = false;
 
   Future<void> submit() async {
     setState(() {
       loading = true;
       error = null;
+      needsVerify = false;
     });
 
     try {
@@ -37,17 +39,41 @@ class _LoginScreenState extends State<LoginScreen> {
         passCtrl.text.trim(),
       );
 
-      if (token == null || token.isEmpty) {
-        throw Exception("Invalid token");
-      }
-
       await widget.auth.login(token);
     } catch (e) {
-      setState(() => error = 'Login failed');
+      final msg = e.toString();
+
+      setState(() {
+        // backend throws "Exception: email_not_verified"
+        needsVerify = msg.contains("email_not_verified");
+        error = needsVerify
+            ? "Please verify your email before logging in."
+            : "Login failed";
+      });
     } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> resend() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+
+    try {
+      await widget.service.resendVerification(emailCtrl.text.trim());
+      if (!mounted) return;
+      setState(() {
+        error = "Verification email sent (check inbox/spam).";
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        error = "Couldn’t resend verification.";
+      });
+    } finally {
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -99,15 +125,13 @@ class _LoginScreenState extends State<LoginScreen> {
 
                     TextField(
                       controller: emailCtrl,
-                      decoration:
-                          const InputDecoration(labelText: 'Email'),
+                      decoration: const InputDecoration(labelText: 'Email'),
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: passCtrl,
                       obscureText: true,
-                      decoration:
-                          const InputDecoration(labelText: 'Password'),
+                      decoration: const InputDecoration(labelText: 'Password'),
                     ),
                     const SizedBox(height: 20),
 
@@ -116,7 +140,10 @@ class _LoginScreenState extends State<LoginScreen> {
                         padding: const EdgeInsets.only(bottom: 12),
                         child: Text(
                           error!,
-                          style: const TextStyle(color: Colors.red),
+                          style: TextStyle(
+                            color: needsVerify ? SFColors.textPrimary : Colors.red,
+                          ),
+                          textAlign: TextAlign.center,
                         ),
                       ),
 
@@ -136,6 +163,17 @@ class _LoginScreenState extends State<LoginScreen> {
                             : const Text('Login'),
                       ),
                     ),
+
+                    if (needsVerify) ...[
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton(
+                          onPressed: loading ? null : resend,
+                          child: const Text("Resend verification email"),
+                        ),
+                      ),
+                    ],
 
                     const SizedBox(height: 12),
 
