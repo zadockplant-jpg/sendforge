@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { env } from "./config/env.js";
+import { env } from "../config/env.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { verificationRouter } from "./routes/verification.routes.js"; // ✅ NEW
