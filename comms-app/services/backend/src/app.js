@@ -24,7 +24,7 @@ app.use(express.urlencoded({ extended: false }));
 
 app.use(
   cors({
-    origin: env.nodeEnv === "production" ? env.publicBaseUrl : true,
+    origin: true,
     credentials: true,
   })
 );
