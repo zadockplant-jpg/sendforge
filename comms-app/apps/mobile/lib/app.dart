@@ -23,10 +23,7 @@ class _SendForgeAppState extends State<SendForgeApp> {
   @override
   Widget build(BuildContext context) {
     final authService = AuthService(
-      const String.fromEnvironment(
-        'API_BASE_URL',
-        defaultValue: 'https://YOUR_BACKEND_URL',
-      ),
+      "https://comms-app-1wo0.onrender.com",
     );
 
     return AnimatedBuilder(
