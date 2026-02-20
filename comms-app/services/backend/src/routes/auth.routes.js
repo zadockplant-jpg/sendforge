@@ -103,9 +103,10 @@ authRouter.post("/resend-verification", async (req, res) => {
       verifyUrl,
       publicBaseUrl: env.publicBaseUrl,
     });
-  } catch {
-    return res.status(500).json({ error: "verification_email_failed" });
-  }
+} catch (e) {
+  console.error("REGISTER INSERT ERROR:", e);
+  return res.status(500).json({ error: "db_insert_failed" });
+}
 
   return res.json({ ok: true });
 });
