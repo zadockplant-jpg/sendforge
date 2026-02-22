@@ -2,7 +2,8 @@
 import express from "express";
 import { requireAuth } from "../middleware/auth.js";
 import { importContacts } from "../services/contactImport.service.js";
-
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js"; // adjust path if needed
 const router = express.Router();
 
 /**
@@ -14,6 +15,25 @@ const router = express.Router();
  *   contacts: [{ name, phone, email, sourceMeta? }]
  * }
  */
+router.get("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.sub;
+
+    const rows = await db("contacts")
+      .where({ user_id: userId })
+      .orderBy("created_at", "desc");
+
+    return res.json({
+      ok: true,
+      contacts: rows,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: "failed_to_fetch_contacts",
+    });
+  }
+});
 router.post("/import", requireAuth, async (req, res) => {
   try {
     const userId = req.user?.sub; // UUID from JWT
