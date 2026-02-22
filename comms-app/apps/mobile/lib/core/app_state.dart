@@ -5,6 +5,7 @@ import '../models/contact.dart';
 import '../models/message.dart';
 import '../models/blast.dart';
 import '../services/api_client.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class AppState extends ChangeNotifier {
   // Auth / config
@@ -31,10 +32,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setToken(String? t) {
-    token = t;
-    notifyListeners();
+  Future<void> setToken(String? t) async {
+  token = t;
+
+  final prefs = await SharedPreferences.getInstance();
+
+  if (t == null) {
+    await prefs.remove('token');
+  } else {
+    await prefs.setString('token', t);
   }
+
+  notifyListeners();
+}
 
   void setPlanTier(String tier) {
     planTier = tier;
