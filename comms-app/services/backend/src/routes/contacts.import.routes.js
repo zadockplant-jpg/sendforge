@@ -3,7 +3,6 @@ import express from "express";
 import { requireAuth } from "../middleware/auth.js";
 import { importContacts } from "../services/contactImport.service.js";
 import { db } from "../config/db.js";
-import { requireAuth } from "../middleware/auth.js"; // adjust path if needed
 const router = express.Router();
 
 /**
