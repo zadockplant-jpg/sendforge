@@ -55,10 +55,9 @@ verificationRouter.get("/verify", async (req, res) => {
 
     log("info", "verify_success", { requestId, userId: user.id });
 
-    return res.json({
-      ok: true,
-      message: "Email verified. You can return to the app and log in.",
-    });
+    const redirectUrl = `${env.publicBaseUrl.replace('/v1','')}/#/login?verified=1`;
+return res.redirect(302, redirectUrl);
+
   } catch (e) {
     log("error", "verify_server_error", {
       requestId,

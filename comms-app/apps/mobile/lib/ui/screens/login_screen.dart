@@ -14,11 +14,30 @@ class LoginScreen extends StatefulWidget {
     required this.service,
   });
 
+
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
+  @override
+void initState() {
+  super.initState();
+
+  final uri = Uri.base;
+
+  if (uri.queryParameters["verified"] == "1") {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Email verified successfully ✅"),
+        ),
+      );
+    });
+  }
+}
   final emailCtrl = TextEditingController();
   final passCtrl = TextEditingController();
 

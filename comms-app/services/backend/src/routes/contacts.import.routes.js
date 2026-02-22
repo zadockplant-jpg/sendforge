@@ -1,28 +1,35 @@
+// comms-app/services/backend/src/routes/contacts.import.routes.js
 import express from "express";
+import { requireAuth } from "../middleware/auth.js";
 import { importContacts } from "../services/contactImport.service.js";
 
 const router = express.Router();
 
 /**
  * POST /v1/contacts/import
+ * Auth: Bearer JWT required
  * Body:
  * {
  *   method: "google" | "csv" | "device" | "manual",
  *   contacts: [{ name, phone, email, sourceMeta? }]
  * }
- *
- * For now: accepts payload + validates + inserts/upserts.
- * OAuth/CSV parsing/permissions happen BEFORE this endpoint later.
  */
-router.post("/import", async (req, res) => {
+router.post("/import", requireAuth, async (req, res) => {
   try {
-    // Temporary: allow dev without auth middleware
-    const userId =
-      req.header("x-user-id") ||
-      req.body.userId ||
-      "dev-user";
+    const userId = req.user?.sub; // UUID from JWT
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: "missing_token" });
+    }
 
     const { method, contacts } = req.body || {};
+
+    if (!method || typeof method !== "string") {
+      return res.status(400).json({ ok: false, error: "invalid_method" });
+    }
+
+    if (!Array.isArray(contacts)) {
+      return res.status(400).json({ ok: false, error: "contacts_must_be_array" });
+    }
 
     const result = await importContacts({
       userId,
@@ -35,9 +42,11 @@ router.post("/import", async (req, res) => {
       ...result,
     });
   } catch (err) {
+    // Keep errors useful, but not overly leaky
+    const msg = err?.message || String(err);
     return res.status(400).json({
       ok: false,
-      error: err?.message || String(err),
+      error: msg,
     });
   }
 });

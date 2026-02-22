@@ -1,55 +1,68 @@
-import { dedupeDestinations as dedupeContacts } from "./dedupe.service.js";
+// comms-app/services/backend/src/services/contactImport.service.js
+import { dedupeContacts } from "./dedupe.service.js";
 import { auditLog } from "./audit.service.js";
 import { db } from "../config/db.js";
 
 export async function importContacts({ userId, method, contacts }) {
-  const normalized = contacts.map(normalize).filter(Boolean);
+  if (!userId) throw new Error("missing_user");
+
+  const normalized = (contacts || []).map(normalize).filter(Boolean);
 
   const { unique, duplicates } = dedupeContacts(normalized);
 
   let inserted = 0;
 
+  // Insert best-effort; count actual inserts (not just attempts)
   for (const c of unique) {
-    await db("contacts")
+    const rows = await db("contacts")
       .insert({
         user_id: userId,
         name: c.name,
-        phone: c.phone,
-        email: c.email,
+        phone: c.phone || null,
+        email: c.email || null,
         source: method,
         created_at: new Date(),
       })
       .onConflict(["user_id", "phone", "email"])
-      .ignore();
-    inserted++;
+      .ignore()
+      .returning(["id"]);
+
+    if (Array.isArray(rows) && rows.length > 0) inserted++;
   }
 
-  await auditLog(userId, "contacts_import", {
-    method,
-    inserted,
+  // Audit should never block import success
+  try {
+    await auditLog(userId, "contacts_import", {
+      method,
+      inserted,
+      duplicates: duplicates.length,
+      invalid: (contacts?.length || 0) - normalized.length,
+    });
+  } catch (_) {
+    // ignore
+  }
+
+  return {
+    added: inserted,
     duplicates: duplicates.length,
-  });
-
-return {
-  unique,                 // <-- ADD THIS BACK
-  duplicates,             // <-- array, not count
-  added: inserted,
-  invalid: contacts.length - normalized.length,
-};
-
+    invalid: (contacts?.length || 0) - normalized.length,
+    // keep these if you want them for debugging/UI (safe-ish)
+    unique,
+    duplicatesList: duplicates,
+  };
 }
 
 function normalize(c) {
   if (!c) return null;
 
-  const phone = c.phone?.trim();
-  const email = c.email?.trim();
+  const phone = typeof c.phone === "string" ? c.phone.trim() : "";
+  const email = typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
 
   if (!phone && !email) return null;
 
   return {
-    name: c.name?.trim() || "",
-    phone,
-    email,
+    name: typeof c.name === "string" ? c.name.trim() : "",
+    phone: phone || null,
+    email: email || null,
   };
 }
