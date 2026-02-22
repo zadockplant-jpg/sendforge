@@ -62,13 +62,14 @@ class AppState extends ChangeNotifier {
 
       for (final item in response['contacts']) {
         contacts.add(
-          Contact(
-            id: item['id'] ?? '',
-            name: item['name'] ?? 'Unknown',
-            phone: item['phone'],
-            email: item['email'],
-          ),
-        );
+  Contact(
+    id: item['id'] ?? '',
+    name: item['name'] ?? 'Unknown',
+    phone: item['phone'],
+    email: item['email'],
+    organization: item['organization'],
+  ),
+);
       }
 
       notifyListeners();

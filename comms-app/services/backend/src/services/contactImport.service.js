@@ -2,7 +2,6 @@
 import { dedupeContacts } from "./dedupe.service.js";
 import { auditLog } from "./audit.service.js";
 import { db } from "../config/db.js";
-import { randomUUID } from "crypto";
 
 export async function importContacts({ userId, method, contacts }) {
   if (!userId) throw new Error("missing_user");
@@ -15,19 +14,19 @@ export async function importContacts({ userId, method, contacts }) {
 
   // Insert best-effort; count actual inserts (not just attempts)
   for (const c of unique) {
-    const rows = await db("contacts")
+      const rows = await db("contacts")
   .insert({
-    id: randomUUID(),
     user_id: userId,
     name: c.name,
     phone: c.phone,
     email: c.email,
+    organization: c.organization || null,
     source: method,
     created_at: new Date(),
   })
-      .onConflict(["user_id", "phone", "email"])
-      .ignore()
-      .returning(["id"]);
+  .onConflict(["user_id", "phone", "email"])
+  .ignore()
+  .returning(["id"]);
 
     if (Array.isArray(rows) && rows.length > 0) inserted++;
   }

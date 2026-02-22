@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
-
 import '../../core/app_state.dart';
 import '../../models/group.dart';
 import '../../models/contact.dart';
 import '../../services/groups_api.dart';
-import '../components/sf_card.dart';
-import '../icons.dart';
+import '../components/compact_contact_tile.dart';
 
 class GroupDetailScreen extends StatefulWidget {
   final AppState appState;
@@ -23,122 +21,124 @@ class GroupDetailScreen extends StatefulWidget {
 
 class _GroupDetailScreenState extends State<GroupDetailScreen> {
   late Set<String> _selectedMemberIds;
+  final TextEditingController _search = TextEditingController();
   bool _saving = false;
 
   @override
   void initState() {
     super.initState();
-    _selectedMemberIds = widget.group.members.map((m) => m.id).toSet();
+    _selectedMemberIds =
+        widget.group.members.map((m) => m.id).toSet();
   }
 
   Future<void> _save() async {
     setState(() => _saving = true);
-
     final api = GroupsApi(widget.appState);
     await api.updateMembers(
       widget.group.id,
       _selectedMemberIds.toList(),
     );
-
     if (!mounted) return;
     Navigator.pop(context);
   }
 
   @override
   Widget build(BuildContext context) {
-    final contacts = widget.appState.contacts;
+    final allContacts = widget.appState.contacts;
+    final query = _search.text.toLowerCase();
+
+    final contacts = allContacts.where((c) {
+      return c.name.toLowerCase().contains(query) ||
+          (c.organization ?? '')
+              .toLowerCase()
+              .contains(query);
+    }).toList();
+
+    contacts.sort((a, b) =>
+        a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.group.name),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: _saving
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _search,
+                    decoration: const InputDecoration(
+                      hintText: "Search contacts...",
+                      isDense: true,
+                      border: OutlineInputBorder(),
                     ),
-                  )
-                : const Text(
-                    'Save',
-                    style: TextStyle(color: Colors.white),
+                    onChanged: (_) => setState(() {}),
                   ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _saving ? null : _save,
+                  child: _saving
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2))
+                      : const Text("Save"),
+                )
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: contacts.length,
+              itemBuilder: (context, i) {
+                final c = contacts[i];
+                final selected =
+                    _selectedMemberIds.contains(c.id);
+
+                return CompactContactTile(
+                  contact: c,
+                  selected: selected,
+                  onToggle: () {
+                    setState(() {
+                      selected
+                          ? _selectedMemberIds.remove(c.id)
+                          : _selectedMemberIds.add(c.id);
+                    });
+                  },
+                  onSelectOrganization: () {
+                    final org = c.organization;
+                    if (org == null) return;
+                    final orgContacts = allContacts
+                        .where((x) =>
+                            x.organization == org)
+                        .map((x) => x.id);
+                    setState(() {
+                      _selectedMemberIds.addAll(orgContacts);
+                    });
+                  },
+                  onDeselectOrganization: () {
+                    final org = c.organization;
+                    if (org == null) return;
+                    final orgContacts = allContacts
+                        .where((x) =>
+                            x.organization == org)
+                        .map((x) => x.id);
+                    setState(() {
+                      _selectedMemberIds
+                          .removeAll(orgContacts);
+                    });
+                  },
+                );
+              },
+            ),
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: SFCard(
-          title: 'Members',
-          subtitle: 'Tap to add or remove members',
-          child: ListView(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            children: contacts.map(_contactTile).toList(),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _contactTile(Contact c) {
-    final selected = _selectedMemberIds.contains(c.id);
-
-    return ListTile(
-      leading: const Icon(SFIcons.contacts),
-      title: Text(c.name),
-      subtitle: _capabilityChips(c),
-      trailing: Checkbox(
-        value: selected,
-        onChanged: (v) {
-          setState(() {
-            v == true
-                ? _selectedMemberIds.add(c.id)
-                : _selectedMemberIds.remove(c.id);
-          });
-        },
-      ),
-      onTap: () {
-        setState(() {
-          selected
-              ? _selectedMemberIds.remove(c.id)
-              : _selectedMemberIds.add(c.id);
-        });
-      },
-    );
-  }
-
-  Widget _capabilityChips(Contact c) {
-    final chips = <Widget>[];
-
-    if ((c.phone ?? '').isNotEmpty) {
-      chips.add(_chip('SMS', SFIcons.sms));
-    }
-    if ((c.email ?? '').isNotEmpty) {
-      chips.add(_chip('Email', SFIcons.email));
-    }
-
-    if (chips.isEmpty) {
-      chips.add(
-        const Text(
-          'No delivery methods',
-          style: TextStyle(fontSize: 12, color: Colors.grey),
-        ),
-      );
-    }
-
-    return Wrap(spacing: 8, children: chips);
-  }
-
-  Widget _chip(String label, IconData icon) {
-    return Chip(
-      avatar: Icon(icon, size: 16),
-      label: Text(label),
-      visualDensity: VisualDensity.compact,
     );
   }
 }
