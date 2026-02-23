@@ -1,0 +1,605 @@
+
+==============================
+FILE: comms-app\services\backend\src\routes\groups.routes.js
+==============================
+import { Router } from "express";
+import crypto from "crypto";
+import { db } from "../config/db.js";
+import { getUserId } from "../utils/getUserId.js";
+
+export const groupsRouter = Router();
+
+/**
+ * GET /v1/groups
+ */
+groupsRouter.get("/", async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const groups = await db("groups")
+    .select("id", "name", "reply_mode", "created_at")
+    .where({ user_id: userId })
+    .orderBy("created_at", "desc")
+    .limit(500);
+
+  // member counts (cheap + useful)
+  const counts = await db("group_members")
+    .select("group_id")
+    .count("* as member_count")
+    .whereIn("group_id", groups.map((g) => g.id))
+    .groupBy("group_id");
+
+  const countMap = new Map(counts.map((c) => [c.group_id, Number(c.member_count)]));
+
+  res.json({
+    groups: groups.map((g) => ({
+      ...g,
+      member_count: countMap.get(g.id) ?? 0,
+    })),
+  });
+});
+
+/**
+ * POST /v1/groups
+ * body: { name, replyMode }
+ */
+groupsRouter.post("/", async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const name = String(req.body?.name ?? "").trim();
+  const replyMode = String(req.body?.replyMode ?? "private"); // private|group
+
+  if (!name) return res.status(400).json({ error: "name required" });
+
+  const id = crypto.randomUUID();
+  await db("groups").insert({
+    id,
+    user_id: userId,
+    name,
+    reply_mode: replyMode,
+    created_at: db.fn.now(),
+  });
+
+  res.json({ id, name, reply_mode: replyMode });
+});
+
+/**
+ * POST /v1/groups/:id/members
+ * body: { memberIds: ["contactId", ...] }
+ */
+groupsRouter.post("/:id/members", async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const groupId = String(req.params.id);
+  const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(String) : [];
+
+  const group = await db("groups").where({ id: groupId, user_id: userId }).first();
+  if (!group) return res.status(404).json({ error: "Group not found" });
+
+  await db.transaction(async (trx) => {
+    await trx("group_members").where({ group_id: groupId }).del();
+    if (memberIds.length) {
+      await trx("group_members").insert(
+        memberIds.map((cid) => ({
+          group_id: groupId,
+          contact_id: cid,
+          created_at: trx.fn.now(),
+        })),
+      );
+    }
+  });
+
+  res.json({ ok: true, groupId, memberCount: memberIds.length });
+});
+
+==============================
+FILE: comms-app\services\backend\src\routes\contacts.routes.js
+==============================
+import express from "express";
+import { importContacts } from "../services/contactImport.service.js";
+
+const router = express.Router();
+
+/**
+ * POST /v1/contacts/import
+ * Body:
+ * {
+ *   method: "google" | "csv" | "manual",
+ *   contacts: [{ name, phone, email, sourceMeta? }]
+ * }
+ */
+router.post("/import", async (req, res) => {
+  try {
+   const userId = req.user?.sub;
+if (!userId) {
+  return res.status(401).json({ error: "missing_token" });
+}
+    const { method, contacts } = req.body || {};
+
+    if (!Array.isArray(contacts)) {
+      throw new Error("contacts must be an array");
+    }
+
+    const result = await importContacts({
+      userId,
+      method,
+      contacts,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      ...result,
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err?.message || String(err),
+    });
+  }
+});
+
+export default router;
+
+==============================
+FILE: comms-app\services\backend\src\services\group.service.js
+==============================
+FILE NOT FOUND
+
+==============================
+FILE: comms-app\services\backend\src\services\contact.service.js
+==============================
+FILE NOT FOUND
+
+==============================
+FILE: comms-app\services\backend\src\config\db.js
+==============================
+import knex from "knex";
+import { env } from "./env.js";
+
+export const db = knex({ client: "pg", connection: env.databaseUrl });
+
+==============================
+FILE: comms-app\services\backend\src\app.js
+==============================
+import express from "express";
+import cors from "cors";
+import { env } from "./config/env.js";
+import { healthRouter } from "./routes/health.routes.js";
+import { authRouter } from "./routes/auth.routes.js";
+import { verificationRouter } from "./routes/verification.routes.js"; // ✅ NEW
+import { groupsRouter } from "./routes/groups.routes.js";
+import { templatesRouter } from "./routes/templates.routes.js";
+import { blastsRouter } from "./routes/blasts.routes.js";
+import { billingRouter } from "./routes/billing.routes.js";
+import { webhooksRouter } from "./routes/webhooks.routes.js";
+import { threadsRouter } from "./routes/threads.routes.js";
+import { usageRouter } from "./routes/usage.routes.js";
+import contactsImportRoutes from "./routes/contacts.import.routes.js";
+import { blastsQuoteRouter } from "./routes/blasts.quote.routes.js";
+import { blastsSendRouter } from "./routes/blasts.send.routes.js";
+import { stripeWebhooksRouter } from "./routes/stripe.webhooks.routes.js";
+
+export const app = express();
+
+app.set("trust proxy", 1);
+
+app.use(express.urlencoded({ extended: false }));
+
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+
+// ----- CORE ROUTES -----
+app.use("/health", healthRouter);
+app.use("/v1/auth", authRouter);
+app.use("/v1/auth", verificationRouter); // ✅ NEW: /v1/auth/verify
+app.use("/v1/contacts", contactsImportRoutes);
+app.use("/v1/groups", groupsRouter);
+app.use("/v1/templates", templatesRouter);
+app.use("/v1/blasts", blastsRouter);
+app.use("/v1/threads", threadsRouter);
+app.use("/v1/billing", billingRouter);
+app.use("/v1/usage", usageRouter);
+
+// ----- BLAST QUOTE / SEND -----
+app.use("/v1/blasts/quote", blastsQuoteRouter);
+app.use("/v1/blasts/send", blastsSendRouter);
+
+// ----- WEBHOOKS -----
+app.use("/v1/webhooks", webhooksRouter);
+app.use("/v1/webhooks/stripe", stripeWebhooksRouter);
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "SendForge API",
+    env: process.env.NODE_ENV,
+  });
+});
+
+==============================
+FILE: comms-app\apps\mobile\lib\models\group.dart
+==============================
+import 'contact.dart';
+
+class Group {
+  final String id;
+  final String name;
+  final List<Contact> members;
+
+  Group({
+    required this.id,
+    required this.name,
+    required this.members,
+  });
+
+  int get memberCount => members.length;
+
+  int get smsCapableCount => members.where((m) => m.hasSms).length;
+  int get emailCapableCount => members.where((m) => m.hasEmail).length;
+}
+
+==============================
+FILE: comms-app\apps\mobile\lib\models\contact.dart
+==============================
+class Contact {
+  final String id;
+  final String name;
+  final String? phone;
+  final String? email;
+  final String? organization;
+
+  String? get phoneE164 => phone;
+
+  bool get hasSms => phoneE164 != null && phoneE164!.isNotEmpty;
+  bool get hasEmail => email != null && email!.isNotEmpty;
+
+  Contact({
+    required this.id,
+    required this.name,
+    this.phone,
+    this.email,
+    this.organization,
+  });
+}
+
+==============================
+FILE: comms-app\apps\mobile\lib\services\group_api.dart
+==============================
+FILE NOT FOUND
+
+==============================
+FILE: comms-app\apps\mobile\lib\services\contact_api.dart
+==============================
+FILE NOT FOUND
+
+==============================
+FILE: comms-app\apps\mobile\lib\ui\screens\groups_screen.dart
+==============================
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import 'create_group_screen.dart';
+import 'groups_list_screen.dart';
+import 'import_contacts_screen.dart';
+
+class GroupsScreen extends StatelessWidget {
+  final AppState appState;
+  const GroupsScreen({super.key, required this.appState});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _navButton(
+            context,
+            label: 'Create Group',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => CreateGroupScreen(appState: appState),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _navButton(
+            context,
+            label: 'Manage Groups',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => GroupsListScreen(appState: appState),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _navButton(
+            context,
+            label: 'Import Contacts',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ImportContactsScreen(appState: appState),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _navButton(BuildContext context,
+      {required String label, required VoidCallback onTap}) {
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton(
+        onPressed: onTap,
+        child: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+}
+
+==============================
+FILE: comms-app\apps\mobile\lib\ui\screens\manage_groups_screen.dart
+==============================
+FILE NOT FOUND
+
+==============================
+FILE: comms-app\apps\mobile\lib\ui\screens\manage_contacts_screen.dart
+==============================
+FILE NOT FOUND
+
+==============================
+FILE: comms-app\apps\mobile\lib\ui\components\compact_contact_tile.dart
+==============================
+import 'package:flutter/material.dart';
+import '../../models/contact.dart';
+
+class CompactContactTile extends StatefulWidget {
+  final Contact contact;
+  final bool selected;
+  final VoidCallback onToggle;
+  final VoidCallback onSelectOrganization;
+  final VoidCallback onDeselectOrganization;
+
+  const CompactContactTile({
+    super.key,
+    required this.contact,
+    required this.selected,
+    required this.onToggle,
+    required this.onSelectOrganization,
+    required this.onDeselectOrganization,
+  });
+
+  @override
+  State<CompactContactTile> createState() => _CompactContactTileState();
+}
+
+class _CompactContactTileState extends State<CompactContactTile> {
+  bool expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.contact;
+
+    return Column(
+      children: [
+        InkWell(
+          onTap: widget.onToggle,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                GestureDetector(
+                  onTap: () => setState(() => expanded = !expanded),
+                  child: const CircleAvatar(radius: 16),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: GestureDetector(
+                    onTap: widget.onToggle,
+                    child: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          c.name,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w600),
+                        ),
+                        if (c.organization != null &&
+                            c.organization!.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: GestureDetector(
+                              onTap: widget.onSelectOrganization,
+                              onLongPress: widget.onDeselectOrganization,
+                              child: Text(
+                                c.organization!,
+                                style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (c.hasSms)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 6),
+                    child: Icon(Icons.sms, size: 16),
+                  ),
+                if (c.hasEmail)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 6),
+                    child: Icon(Icons.email, size: 16),
+                  ),
+                Checkbox(
+                  value: widget.selected,
+                  onChanged: (_) => widget.onToggle(),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (expanded)
+          Padding(
+            padding: const EdgeInsets.only(left: 48, bottom: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (c.phone != null) Text("Phone: ${c.phone}"),
+                if (c.email != null) Text("Email: ${c.email}"),
+              ],
+            ),
+          ),
+        const Divider(height: 1),
+      ],
+    );
+  }
+}
+
+==============================
+FILE: comms-app\apps\mobile\lib\core\app_state.dart
+==============================
+import 'package:flutter/foundation.dart';
+
+import '../models/group.dart';
+import '../models/contact.dart';
+import '../models/message.dart';
+import '../models/blast.dart';
+import '../services/api_client.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class AppState extends ChangeNotifier {
+  // Auth / config
+  String? token;
+  String baseUrl = 'https://comms-app-1wo0.onrender.com';
+
+  // Identity / billing (UI only for now)
+  String userId = 'local-user';
+  String planTier = 'free';
+
+  // Core data
+  final List<Group> groups = [];
+  final List<Contact> contacts = [];
+
+  final List<Message> threads = [];
+  final Map<String, List<Message>> messagesByThread = {};
+
+  BlastDraft? activeBlast;
+
+  // ------------------------
+
+  void setBaseUrl(String v) {
+    baseUrl = v;
+    notifyListeners();
+  }
+
+  Future<void> setToken(String? t) async {
+  token = t;
+
+  final prefs = await SharedPreferences.getInstance();
+
+  if (t == null) {
+    await prefs.remove('token');
+  } else {
+    await prefs.setString('token', t);
+  }
+
+  notifyListeners();
+}
+
+  void setPlanTier(String tier) {
+    planTier = tier;
+    notifyListeners();
+  }
+
+  /// 🔹 Load contacts from backend
+  Future<void> loadContacts() async {
+    final api = ApiClient(baseUrl: baseUrl);
+
+    final response = await api.getJson('/v1/contacts');
+
+    if (response['contacts'] is List) {
+      contacts.clear();
+
+      for (final item in response['contacts']) {
+        contacts.add(
+  Contact(
+    id: item['id'] ?? '',
+    name: item['name'] ?? 'Unknown',
+    phone: item['phone'],
+    email: item['email'],
+    organization: item['organization'],
+  ),
+);
+      }
+
+      notifyListeners();
+    }
+  }
+
+  /// Utility used by Create Blast
+  List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
+    final memberIds = groups
+        .where((g) => groupIds.contains(g.id))
+        .expand((g) => g.members.map((m) => m.id))
+        .toSet();
+
+    return contacts.where((c) => memberIds.contains(c.id)).toList();
+  }
+
+  /// Adds mock thread when blast queued
+  void addQueuedBlastAsThread({
+    required String blastId,
+    required String body,
+  }) {
+    final now = DateTime.now();
+
+    final root = Message(
+      id: blastId,
+      sender: 'You',
+      body: body,
+      incoming: false,
+      timestamp: now,
+    );
+
+    threads.insert(0, root);
+
+    messagesByThread.putIfAbsent(blastId, () => []);
+    messagesByThread[blastId]!.insert(
+      0,
+      Message(
+        id: '${blastId}_m1',
+        sender: 'You',
+        body: body,
+        incoming: false,
+        timestamp: now,
+      ),
+    );
+
+    notifyListeners();
+  }
+}

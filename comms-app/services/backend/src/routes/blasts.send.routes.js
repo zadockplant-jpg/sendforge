@@ -1,50 +1,94 @@
 import { Router } from "express";
 import { db } from "../config/db.js";
-import { chargeInternationalNow } from "../services/stripeUsageCharge.service.js";
-
-// TODO: replace with your real queue enqueue
-import { enqueueBlast } from "../services/queue.service.js";
+import { requireAuth } from "../middleware/auth.js";
+import { chargeIntlNow } from "../services/stripe_charge.service.js";
+import { resolveRecipients } from "../services/recipientsResolve.service.js";
 
 export const blastsSendRouter = Router();
 
 /**
  * POST /v1/blasts/send
- * Body: { userId, recipients: [...], body: "...", quote: { ... } }
+ * Auth: Bearer JWT required
  *
- * Simple MVP: client provides quote result; server recomputes quote later if you want.
+ * Body:
+ * {
+ *   groupIds: [],
+ *   contactIds: [],
+ *   channels: ["sms","email"],
+ *   body: "...",
+ *   quote: {...}
+ * }
  */
-blastsSendRouter.post("/", async (req, res) => {
-  const { userId, recipients, body, quote } = req.body || {};
-  if (!userId || !Array.isArray(recipients) || !body) {
-    return res.status(400).json({ error: "userId, recipients, body required" });
-  }
+blastsSendRouter.post("/", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "missing_token" });
+
+  const { groupIds, contactIds, channels, body, quote } = req.body || {};
+
+  const ch = Array.isArray(channels) ? channels.map(String) : ["sms"];
+  const msgBody = String(body || "").trim();
+  if (!msgBody) return res.status(400).json({ error: "body required" });
 
   const user = await db("users").where({ id: userId }).first();
   if (!user) return res.status(404).json({ error: "user not found" });
 
-  // Hard block if payment failed previously
   if (user.intl_blocked_reason) {
     return res.status(402).json({ error: "intl_blocked", reason: user.intl_blocked_reason });
   }
 
-  // If the quote requires immediate charge, charge now BEFORE enqueue
-  if (quote?.requiresImmediateCharge && quote?.estimatedIntlCents > 0) {
+  const resolved = await resolveRecipients({
+    userId,
+    groupIds,
+    contactIds,
+  });
+
+  const smsRecipients = resolved.sms;
+  const emailRecipients = resolved.email;
+
+  const wantsSms = ch.includes("sms");
+  const wantsEmail = ch.includes("email");
+
+  const totalQueued =
+    (wantsSms ? smsRecipients.length : 0) + (wantsEmail ? emailRecipients.length : 0);
+
+  if (totalQueued === 0) {
+    return res.status(400).json({ error: "No recipients (missing destinations for selected channels)" });
+  }
+
+  // If intl requires immediate charge, do it BEFORE sending
+  if (quote?.requiresImmediateCharge === true && Number(quote?.estimatedIntlCents || 0) > 0) {
     try {
-      await chargeInternationalNow({
+      await chargeIntlNow({
         userId,
-        amountCents: quote.estimatedIntlCents,
-        description: `Intl SMS precharge (${quote.reason})`,
+        amountCents: Number(quote.estimatedIntlCents),
+        reason: String(quote.reason || "intl"),
       });
-      // IMPORTANT: do not reset since_charge here. Reset only on HARDCAP payment webhook if you want that behavior.
-      // For your stated behavior, reset on "hardcap" successful payments only.
+
+      await db("users")
+        .where({ id: userId })
+        .update({
+          intl_spend_since_charge_cents: db.raw("intl_spend_since_charge_cents + ?", [Number(quote.estimatedIntlCents)]),
+          intl_spend_cycle_cents: db.raw("intl_spend_cycle_cents + ?", [Number(quote.estimatedIntlCents)]),
+        });
     } catch (e) {
-      // Mark blocked to prevent repeated abuse
       await db("users").where({ id: userId }).update({ intl_blocked_reason: "payment_failed" });
       return res.status(402).json({ error: "payment_failed", detail: String(e?.message || e) });
     }
   }
 
-  const blastId = await enqueueBlast({ userId, recipients, body });
+  // MVP: mock queue (real enqueue later)
+  const blastId = cryptoRandomId();
 
-  return res.json({ ok: true, blastId });
+  return res.json({
+    ok: true,
+    blastId,
+    queued: totalQueued,
+    queuedSms: wantsSms ? smsRecipients.length : 0,
+    queuedEmail: wantsEmail ? emailRecipients.length : 0,
+  });
 });
+
+function cryptoRandomId() {
+  // avoid importing crypto in case this file is executed in constrained envs
+  return `${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+}

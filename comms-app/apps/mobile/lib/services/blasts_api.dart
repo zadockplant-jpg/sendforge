@@ -1,31 +1,36 @@
-// apps/mobile/lib/services/blasts_api.dart
 import 'api_client.dart';
 
 class BlastsApi {
   final ApiClient client;
   BlastsApi(this.client);
 
+  /// Quote intl SMS costs (server resolves recipients based on groupIds/contactIds)
   Future<Map<String, dynamic>> quote({
-    required String userId,
-    required List<String> recipients,
+    required List<String> groupIds,
+    List<String> contactIds = const [],
+    required List<String> channels, // ["sms","email"]
     required String body,
   }) {
     return client.postJson('/v1/blasts/quote', {
-      'userId': userId,
-      'recipients': recipients,
+      'groupIds': groupIds,
+      'contactIds': contactIds,
+      'channels': channels,
       'body': body,
     });
   }
 
+  /// Send blast (server resolves recipients based on groupIds/contactIds)
   Future<Map<String, dynamic>> send({
-    required String userId,
-    required List<String> recipients,
+    required List<String> groupIds,
+    List<String> contactIds = const [],
+    required List<String> channels,
     required String body,
     required Map<String, dynamic> quote,
   }) {
     return client.postJson('/v1/blasts/send', {
-      'userId': userId,
-      'recipients': recipients,
+      'groupIds': groupIds,
+      'contactIds': contactIds,
+      'channels': channels,
       'body': body,
       'quote': quote,
     });

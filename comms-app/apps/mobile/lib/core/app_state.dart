@@ -1,11 +1,11 @@
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/group.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
 import '../models/blast.dart';
 import '../services/api_client.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class AppState extends ChangeNotifier {
   // Auth / config
@@ -33,18 +33,18 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> setToken(String? t) async {
-  token = t;
+    token = t;
 
-  final prefs = await SharedPreferences.getInstance();
+    final prefs = await SharedPreferences.getInstance();
 
-  if (t == null) {
-    await prefs.remove('token');
-  } else {
-    await prefs.setString('token', t);
+    if (t == null) {
+      await prefs.remove('token');
+    } else {
+      await prefs.setString('token', t);
+    }
+
+    notifyListeners();
   }
-
-  notifyListeners();
-}
 
   void setPlanTier(String tier) {
     planTier = tier;
@@ -54,7 +54,6 @@ class AppState extends ChangeNotifier {
   /// 🔹 Load contacts from backend
   Future<void> loadContacts() async {
     final api = ApiClient(baseUrl: baseUrl);
-
     final response = await api.getJson('/v1/contacts');
 
     if (response['contacts'] is List) {
@@ -62,21 +61,21 @@ class AppState extends ChangeNotifier {
 
       for (final item in response['contacts']) {
         contacts.add(
-  Contact(
-    id: item['id'] ?? '',
-    name: item['name'] ?? 'Unknown',
-    phone: item['phone'],
-    email: item['email'],
-    organization: item['organization'],
-  ),
-);
+          Contact(
+            id: item['id'] ?? '',
+            name: item['name'] ?? 'Unknown',
+            phone: item['phone'],
+            email: item['email'],
+            organization: item['organization'],
+          ),
+        );
       }
 
       notifyListeners();
     }
   }
 
-  /// Utility used by Create Blast
+  /// Utility used by Create Blast (local UI only)
   List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
     final memberIds = groups
         .where((g) => groupIds.contains(g.id))

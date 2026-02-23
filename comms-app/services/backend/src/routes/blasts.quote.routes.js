@@ -1,55 +1,83 @@
 import { Router } from "express";
 import { db } from "../config/db.js";
-import { PLAN, INTL_CAPS_CENTS, isDomesticUSCA } from "../config/pricingPolicy.js";
+import { requireAuth } from "../middleware/auth.js";
+import { PLAN, INTL_CAPS_CENTS, INTL_MULTIPLIERS, isDomesticUSCA } from "../config/pricingPolicy.js";
 import { getTwilioSmsUnitPriceUSD } from "../services/twilioPricing.service.js";
 import { getIntlTier, isTierBlocked, getMultiplierForTier } from "../services/intlTier.service.js";
-import { parseE164CountryCode } from "../services/phoneCountry.service.js"; // create next file
+import { parseE164CountryCode } from "../services/phoneCountry.service.js";
+import { resolveRecipients } from "../services/recipientsResolve.service.js";
 
 export const blastsQuoteRouter = Router();
 
 /**
  * POST /v1/blasts/quote
- * Body: { userId, recipients: [ "+1555...", ... ], body: "..." }
- * (You can swap userId for auth user in your middleware later.)
+ * Auth: Bearer JWT required
+ *
+ * Body supports:
+ * - { groupIds: [], contactIds: [], channels: ["sms","email"], body: "..." }
+ * OR (legacy)
+ * - { recipients: ["+1...", "+44..."], body: "...", channels? }
  */
-blastsQuoteRouter.post("/", async (req, res) => {
-  const { userId, recipients } = req.body || {};
-  if (!userId || !Array.isArray(recipients) || recipients.length === 0) {
-    return res.status(400).json({ error: "userId and recipients[] required" });
+blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "missing_token" });
+
+  const { recipients, groupIds, contactIds, channels } = req.body || {};
+
+  const ch = Array.isArray(channels) ? channels.map(String) : ["sms"];
+
+  // If SMS isn't selected, intl SMS quote flow isn't needed.
+  const wantsSms = ch.includes("sms");
+  if (!wantsSms) {
+    return res.json({
+      blocked: false,
+      domesticCount: 0,
+      intlCount: 0,
+      estimatedIntlCents: 0,
+      requiresConfirm: false,
+      requiresImmediateCharge: false,
+      note: "sms_not_selected",
+    });
+  }
+
+  let smsRecipients = [];
+
+  if (Array.isArray(recipients) && recipients.length) {
+    smsRecipients = recipients.map(String);
+  } else {
+    const resolved = await resolveRecipients({
+      userId,
+      groupIds,
+      contactIds,
+    });
+    smsRecipients = resolved.sms;
+  }
+
+  if (!Array.isArray(smsRecipients) || smsRecipients.length === 0) {
+    return res.status(400).json({ error: "No SMS recipients (missing phone_e164)" });
   }
 
   const user = await db("users").where({ id: userId }).first();
   if (!user) return res.status(404).json({ error: "user not found" });
 
-  const plan = user.plan_tier;
-  if (plan === PLAN.FREE) {
-    // Free tier: intl blocked, you can still compute domestic-only sends elsewhere
-    return res.json({
-      intlCount: 0,
-      domesticCount: recipients.length,
-      blocked: true,
-      blockedReason: "free_plan_intl_blocked",
-    });
-  }
+  const plan = user.plan_tier || PLAN.FREE;
 
+  // Hard blocks
+  if (plan === PLAN.FREE) {
+    return res.json({ blocked: true, blockedReason: "free_plan_intl_blocked" });
+  }
   if (user.intl_blocked_reason) {
     return res.json({ blocked: true, blockedReason: user.intl_blocked_reason });
   }
-
   if (!user.stripe_payment_method_attached) {
     return res.json({ blocked: true, blockedReason: "no_payment_method_for_intl" });
   }
 
   let intlCount = 0;
   let domesticCount = 0;
-
-  // estimate cents for THIS blast
-  let estimatedIntlCents = 0;
-
-  // Country bucketing reduces pricing calls
   const countryCounts = new Map();
 
-  for (const e164 of recipients) {
+  for (const e164 of smsRecipients) {
     const cc = parseE164CountryCode(e164);
     if (!cc) return res.status(400).json({ error: `invalid phone: ${e164}` });
 
@@ -67,11 +95,22 @@ blastsQuoteRouter.post("/", async (req, res) => {
     countryCounts.set(cc, (countryCounts.get(cc) || 0) + 1);
   }
 
-  // price each destination country using Twilio live pricing
+  if (intlCount === 0) {
+    return res.json({
+      blocked: false,
+      domesticCount,
+      intlCount: 0,
+      estimatedIntlCents: 0,
+      requiresConfirm: false,
+      requiresImmediateCharge: false,
+    });
+  }
+
+  let estimatedIntlCents = 0;
+
   for (const [cc, count] of countryCounts.entries()) {
     const tier = getIntlTier(cc);
-    const mult = getMultiplierForTier(tier);
-    if (!mult) return res.json({ blocked: true, blockedReason: `intl_missing_multiplier_${cc}` });
+    const mult = getMultiplierForTier(tier) ?? (tier === "tier1" ? INTL_MULTIPLIERS.tier1 : INTL_MULTIPLIERS.tier2);
 
     const unitUsd = await getTwilioSmsUnitPriceUSD(cc);
     const unitCents = Math.round(unitUsd * 100);
@@ -86,19 +125,18 @@ blastsQuoteRouter.post("/", async (req, res) => {
   const breachesSoftPerBlast = estimatedIntlCents > caps.soft_per_blast;
   const breachesHardAccum = since + estimatedIntlCents > caps.hard_accum;
 
-  // You asked: immediate invoice+charge anytime softcap breached (per blast)
-  // Also: if accumulated passes hardcap -> immediate invoice+charge
-  const requiresImmediateCharge = intlCount > 0 && (breachesSoftPerBlast || breachesHardAccum);
+  const requiresImmediateCharge = breachesSoftPerBlast || breachesHardAccum;
 
   return res.json({
+    blocked: false,
     domesticCount,
     intlCount,
     estimatedIntlCents,
     estimatedIntlUsd: (estimatedIntlCents / 100).toFixed(2),
-    requiresConfirm: intlCount > 0,
-    requiresImmediateCharge,
-    reason: breachesSoftPerBlast ? "softcap_per_blast" : breachesHardAccum ? "hardcap_accum" : null,
     caps,
     intlSpendSinceChargeCents: since,
+    requiresConfirm: true,
+    requiresImmediateCharge,
+    reason: breachesSoftPerBlast ? "softcap_per_blast" : breachesHardAccum ? "hardcap_accum" : null,
   });
 });

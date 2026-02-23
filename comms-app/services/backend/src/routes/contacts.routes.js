@@ -13,11 +13,10 @@ const router = express.Router();
  */
 router.post("/import", async (req, res) => {
   try {
-    const userId =
-      req.header("x-user-id") ||
-      req.body.userId ||
-      "dev-user";
-
+   const userId = req.user?.sub;
+if (!userId) {
+  return res.status(401).json({ error: "missing_token" });
+}
     const { method, contacts } = req.body || {};
 
     if (!Array.isArray(contacts)) {

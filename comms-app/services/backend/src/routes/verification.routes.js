@@ -2,13 +2,9 @@
 import { Router } from "express";
 import crypto from "crypto";
 import { db } from "../config/db.js";
+import { env } from "../config/env.js";
 import { log, getRequestId } from "../utils/logger.js";
 
-/**
- * GET /v1/auth/verify?token=...
- * - validates token (hashed in DB)
- * - marks user email_verified=true
- */
 export const verificationRouter = Router();
 
 const TOKEN_TTL_HOURS = 24;
@@ -33,12 +29,11 @@ verificationRouter.get("/verify", async (req, res) => {
       return res.status(400).json({ ok: false, error: "invalid_or_used_token" });
     }
 
-    // Expiry check (if sent_at exists)
+    // Expiry check
     if (user.verification_sent_at) {
       const sentAt = new Date(user.verification_sent_at).getTime();
-      const now = Date.now();
       const ttlMs = TOKEN_TTL_HOURS * 60 * 60 * 1000;
-      if (now - sentAt > ttlMs) {
+      if (Date.now() - sentAt > ttlMs) {
         log("warn", "verify_token_expired", { requestId, userId: user.id });
         return res.status(400).json({ ok: false, error: "token_expired" });
       }
@@ -55,9 +50,8 @@ verificationRouter.get("/verify", async (req, res) => {
 
     log("info", "verify_success", { requestId, userId: user.id });
 
-    const redirectUrl = `${env.publicBaseUrl.replace('/v1','')}/#/login?verified=1`;
-return res.redirect(302, redirectUrl);
-
+    // Keep it simple for now: JSON response. (You can later redirect to app deep link.)
+    return res.json({ ok: true });
   } catch (e) {
     log("error", "verify_server_error", {
       requestId,
