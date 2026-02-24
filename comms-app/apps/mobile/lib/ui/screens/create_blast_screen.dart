@@ -1,3 +1,5 @@
+// comms-app/apps/mobile/lib/ui/screens/create_blast_screen.dart
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -32,6 +34,8 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
   final _subjectFocus = FocusNode();
   final _bodyFocus = FocusNode();
 
+  final FocusNode _kbdFocus = FocusNode();
+
   /// Channels
   final Set<Channel> _channels = {Channel.sms};
 
@@ -52,6 +56,7 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
     _nameFocus.dispose();
     _subjectFocus.dispose();
     _bodyFocus.dispose();
+    _kbdFocus.dispose();
     super.dispose();
   }
 
@@ -60,7 +65,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       context: context,
       isScrollControlled: true,
       builder: (_) {
-        // ✅ local modal state so checkmarks update immediately
         return StatefulBuilder(
           builder: (context, modalSetState) {
             return _GroupPicker(
@@ -106,13 +110,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
         false;
   }
 
-  List<String> _channelsToApiList() {
-    final out = <String>[];
-    if (_channels.contains(Channel.sms)) out.add("sms");
-    if (_channels.contains(Channel.email)) out.add("email");
-    return out;
-  }
-
   Future<void> _send() async {
     setState(() => status = null);
 
@@ -128,14 +125,11 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       return;
     }
 
-    // Assign draft fields (UI only)
     draft.channels = _channels.toSet();
     draft.name = _nameCtrl.text.trim();
     draft.subject = _subjectCtrl.text.trim();
     draft.body = _bodyCtrl.text.trim();
     draft.groupIds = _selectedGroupIds.toList();
-
-    final channelsApi = _channelsToApiList();
 
     setState(() => busy = true);
 
@@ -143,10 +137,12 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       final apiClient = ApiClient(baseUrl: widget.appState.baseUrl);
       final blastsApi = BlastsApi(apiClient);
 
-      // 1️⃣ Quote (server resolves recipients from groupIds/contactIds)
+      final channels = _channels.map((c) => c == Channel.sms ? "sms" : "email").toList();
+
+      // 1) Quote
       final quote = await blastsApi.quote(
-        groupIds: draft.groupIds,
-        channels: channelsApi,
+        groupIds: _selectedGroupIds.toList(),
+        channels: channels,
         body: draft.body,
       );
 
@@ -158,7 +154,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       final intlCount = (quote['intlCount'] ?? 0) as int;
       final requiresConfirm = quote['requiresConfirm'] == true;
 
-      // 2️⃣ Confirm intl charges if required
       if (requiresConfirm && intlCount > 0) {
         final est = quote['estimatedIntlUsd']?.toString() ?? '0.00';
         final chargeNow = quote['requiresImmediateCharge'] == true;
@@ -167,10 +162,10 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
         if (!ok) return;
       }
 
-      // 3️⃣ Send
+      // 2) Send
       final resp = await blastsApi.send(
-        groupIds: draft.groupIds,
-        channels: channelsApi,
+        groupIds: _selectedGroupIds.toList(),
+        channels: channels,
         body: draft.body,
         quote: quote,
       );
@@ -178,7 +173,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       final blastId = (resp['blastId'] ?? DateTime.now().millisecondsSinceEpoch.toString()).toString();
       setState(() => status = 'Queued ✅ ($blastId)');
 
-      // Local thread placeholder so Threads tab is testable
       widget.appState.addQueuedBlastAsThread(
         blastId: blastId,
         body: draft.body,
@@ -187,7 +181,9 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
       if (!mounted) return;
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => ThreadsScreen(appState: widget.appState)),
+        MaterialPageRoute(
+          builder: (_) => ThreadsScreen(appState: widget.appState),
+        ),
       );
     } catch (e) {
       setState(() => status = 'Error: $e');
@@ -200,189 +196,182 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
   Widget build(BuildContext context) {
     final needsSubject = hasEmail;
 
-    // Ctrl+Enter to send (desktop/web/windows)
-    final shortcuts = <ShortcutActivator, Intent>{
-      const SingleActivator(LogicalKeyboardKey.enter, control: true): const _SendIntent(),
-      const SingleActivator(LogicalKeyboardKey.numpadEnter, control: true): const _SendIntent(),
-    };
-
-    final actions = <Type, Action<Intent>>{
-      _SendIntent: CallbackAction<_SendIntent>(
-        onInvoke: (_) {
-          if (!busy) _send();
-          return null;
-        },
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Create Blast'),
+        backgroundColor: SFColors.primaryBlue,
+        foregroundColor: Colors.white,
       ),
-    };
+      body: RawKeyboardListener(
+        focusNode: _kbdFocus,
+        autofocus: true,
+        onKey: (evt) async {
+          // Ctrl+Enter sends (desktop/web)
+          final isDown = evt is RawKeyDownEvent;
+          if (!isDown) return;
 
-    return Shortcuts(
-      shortcuts: shortcuts,
-      child: Actions(
-        actions: actions,
-        child: Focus(
-          autofocus: true,
-          child: Scaffold(
-            appBar: AppBar(
-              title: const Text('Create Blast'),
-              backgroundColor: SFColors.primaryBlue,
-              foregroundColor: Colors.white,
-            ),
-            body: SafeArea(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    children: [
-                      /// CHANNELS
-                      SFCard(
-                        title: 'Channels',
-                        subtitle: 'Select one or both (SMS + Email)',
-                        child: Wrap(
-                          spacing: 12,
-                          children: Channel.values.map((c) {
-                            final selected = _channels.contains(c);
-                            final label = c == Channel.sms ? 'SMS' : 'Email';
+          final isEnter = evt.logicalKey == LogicalKeyboardKey.enter ||
+              evt.logicalKey == LogicalKeyboardKey.numpadEnter;
 
-                            return InkWell(
+          if (!isEnter) return;
+
+          final isCtrl = evt.isControlPressed || evt.isMetaPressed;
+
+          // If in body, plain Enter should be newline (TextFormField handles it).
+          // Only Ctrl+Enter triggers send.
+          if (isCtrl) {
+            await _send();
+          }
+        },
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                children: [
+                  SFCard(
+                    title: 'Channels',
+                    subtitle: 'Select one or both (SMS + Email)',
+                    child: Wrap(
+                      spacing: 12,
+                      children: Channel.values.map((c) {
+                        final selected = _channels.contains(c);
+                        final label = c == Channel.sms ? 'SMS' : 'Email';
+
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () {
+                            setState(() {
+                              selected ? _channels.remove(c) : _channels.add(c);
+                            });
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                            decoration: BoxDecoration(
                               borderRadius: BorderRadius.circular(12),
-                              onTap: () {
-                                setState(() {
-                                  selected ? _channels.remove(c) : _channels.add(c);
-                                });
-                              },
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(12),
-                                  color: selected ? SFColors.primaryBlue : Colors.white,
-                                  border: Border.all(
-                                    color: selected ? SFColors.primaryBlue : SFColors.cardBorder,
-                                  ),
-                                ),
-                                child: Text(
-                                  label,
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color: selected ? Colors.white : SFColors.textPrimary,
-                                  ),
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-
-                      const SizedBox(height: 14),
-
-                      /// REPLY MODE
-                      SFCard(
-                        title: 'Reply mode',
-                        subtitle: 'Private = sender only • Group = shared thread',
-                        child: _ReplyModeSlider(
-                          value: draft.replyMode,
-                          onChanged: (v) => setState(() => draft.replyMode = v),
-                        ),
-                      ),
-
-                      const SizedBox(height: 14),
-
-                      /// MESSAGE
-                      SFCard(
-                        title: 'Message',
-                        child: Column(
-                          children: [
-                            TextFormField(
-                              controller: _nameCtrl,
-                              focusNode: _nameFocus,
-                              textInputAction: TextInputAction.next,
-                              onFieldSubmitted: (_) => _subjectFocus.requestFocus(),
-                              decoration: const InputDecoration(
-                                labelText: 'Name',
-                                prefixIcon: Icon(Icons.edit_outlined),
+                              color: selected ? SFColors.primaryBlue : Colors.white,
+                              border: Border.all(
+                                color: selected ? SFColors.primaryBlue : SFColors.cardBorder,
                               ),
                             ),
-                            const SizedBox(height: 12),
-                            TextFormField(
-                              controller: _subjectCtrl,
-                              focusNode: _subjectFocus,
-                              textInputAction: TextInputAction.next,
-                              onFieldSubmitted: (_) => _bodyFocus.requestFocus(),
-                              decoration: InputDecoration(
-                                labelText: needsSubject ? 'Subject (required for email)' : 'Subject (email only)',
-                                prefixIcon: const Icon(SFIcons.email),
+                            child: Text(
+                              label,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: selected ? Colors.white : SFColors.textPrimary,
                               ),
-                              validator: (v) {
-                                if (needsSubject && (v == null || v.trim().isEmpty)) {
-                                  return 'Subject required when Email is selected.';
-                                }
-                                return null;
-                              },
                             ),
-                            const SizedBox(height: 12),
-                            TextFormField(
-                              controller: _bodyCtrl,
-                              focusNode: _bodyFocus,
-                              minLines: 4,
-                              maxLines: 8,
-                              keyboardType: TextInputType.multiline,
-                              textInputAction: TextInputAction.newline,
-                              decoration: InputDecoration(
-                                labelText: 'Body',
-                                helperText: kIsWeb ? 'Ctrl+Enter to send' : null,
-                                prefixIcon: Icon(hasEmail && !hasSms ? SFIcons.email : SFIcons.sms),
-                              ),
-                              validator: (v) => (v == null || v.trim().isEmpty) ? 'Body is required.' : null,
-                            ),
-                          ],
-                        ),
-                      ),
-
-                      const SizedBox(height: 14),
-
-                      /// GROUPS
-                      SFCard(
-                        title: 'Groups',
-                        subtitle: 'Select one or more groups',
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            OutlinedButton.icon(
-                              icon: const Icon(Icons.group),
-                              label: const Text('Select Groups'),
-                              onPressed: _openGroupPicker,
-                            ),
-                            if (_selectedGroupIds.isNotEmpty) ...[
-                              const SizedBox(height: 8),
-                              Text(
-                                '${_selectedGroupIds.length} group(s) selected',
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-
-                      const SizedBox(height: 16),
-
-                      /// SEND
-                      SizedBox(
-                        width: double.infinity,
-                        child: SFPrimaryButton(
-                          icon: SFIcons.queue,
-                          label: busy ? 'Queuing…' : 'Queue Blast',
-                          busy: busy,
-                          onPressed: busy ? null : _send,
-                        ),
-                      ),
-
-                      if (status != null) ...[
-                        const SizedBox(height: 12),
-                        _StatusBanner(text: status!),
-                      ],
-                    ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
                   ),
-                ),
+
+                  const SizedBox(height: 14),
+
+                  SFCard(
+                    title: 'Reply mode',
+                    subtitle: 'Private = sender only • Group = shared thread',
+                    child: _ReplyModeSlider(
+                      value: draft.replyMode,
+                      onChanged: (v) => setState(() => draft.replyMode = v),
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  SFCard(
+                    title: 'Message',
+                    child: Column(
+                      children: [
+                        TextFormField(
+                          controller: _nameCtrl,
+                          focusNode: _nameFocus,
+                          textInputAction: TextInputAction.next,
+                          onFieldSubmitted: (_) => FocusScope.of(context).requestFocus(_subjectFocus),
+                          decoration: const InputDecoration(
+                            labelText: 'Name',
+                            prefixIcon: Icon(Icons.edit_outlined),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _subjectCtrl,
+                          focusNode: _subjectFocus,
+                          textInputAction: TextInputAction.next,
+                          onFieldSubmitted: (_) => FocusScope.of(context).requestFocus(_bodyFocus),
+                          decoration: InputDecoration(
+                            labelText: needsSubject ? 'Subject (required for email)' : 'Subject (email only)',
+                            prefixIcon: const Icon(SFIcons.email),
+                          ),
+                          validator: (v) {
+                            if (needsSubject && (v == null || v.trim().isEmpty)) {
+                              return 'Subject required when Email is selected.';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _bodyCtrl,
+                          focusNode: _bodyFocus,
+                          textInputAction: TextInputAction.newline,
+                          keyboardType: TextInputType.multiline,
+                          minLines: 4,
+                          maxLines: 10,
+                          decoration: InputDecoration(
+                            labelText: 'Body',
+                            helperText: kIsWeb ? 'Tip: Ctrl+Enter to send' : null,
+                            prefixIcon: Icon(hasEmail && !hasSms ? SFIcons.email : SFIcons.sms),
+                          ),
+                          validator: (v) => (v == null || v.trim().isEmpty) ? 'Body is required.' : null,
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  SFCard(
+                    title: 'Groups',
+                    subtitle: 'Select one or more groups',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.group),
+                          label: const Text('Select Groups'),
+                          onPressed: _openGroupPicker,
+                        ),
+                        if (_selectedGroupIds.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            '${_selectedGroupIds.length} group(s) selected',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  SizedBox(
+                    width: double.infinity,
+                    child: SFPrimaryButton(
+                      icon: SFIcons.queue,
+                      label: busy ? 'Queuing…' : 'Queue Blast',
+                      busy: busy,
+                      onPressed: busy ? null : _send,
+                    ),
+                  ),
+
+                  if (status != null) ...[
+                    const SizedBox(height: 12),
+                    _StatusBanner(text: status!),
+                  ],
+                ],
               ),
             ),
           ),
@@ -391,14 +380,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
     );
   }
 }
-
-class _SendIntent extends Intent {
-  const _SendIntent();
-}
-
-/// ============================================================
-/// GROUP PICKER (single definition only)
-/// ============================================================
 
 class _GroupPicker extends StatelessWidget {
   final List<Group> groups;
@@ -430,6 +411,7 @@ class _GroupPicker extends StatelessWidget {
                 color: isSelected ? SFColors.primaryBlue : Colors.grey,
               ),
               title: Text(g.name),
+              subtitle: g.type == "meta" ? const Text("Meta group (dynamic)") : null,
               trailing: isSelected ? const Icon(Icons.check_circle) : null,
               onTap: () => onToggle(g.id),
             );
@@ -439,10 +421,6 @@ class _GroupPicker extends StatelessWidget {
     );
   }
 }
-
-/// ============================================================
-/// REPLY MODE
-/// ============================================================
 
 class _ReplyModeSlider extends StatelessWidget {
   final ReplyMode value;
@@ -512,10 +490,6 @@ class _ReplyModeSlider extends StatelessWidget {
     );
   }
 }
-
-/// ============================================================
-/// STATUS BANNER
-/// ============================================================
 
 class _StatusBanner extends StatelessWidget {
   final String text;

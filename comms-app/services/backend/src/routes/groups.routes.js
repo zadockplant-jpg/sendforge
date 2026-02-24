@@ -1,91 +1,265 @@
+// comms-app/services/backend/src/routes/groups.routes.js
 import { Router } from "express";
 import crypto from "crypto";
 import { db } from "../config/db.js";
-import { getUserId } from "../utils/getUserId.js";
+import { requireAuth } from "../middleware/auth.js";
 
 export const groupsRouter = Router();
 
 /**
- * GET /v1/groups
+ * Helpers
  */
-groupsRouter.get("/", async (req, res) => {
-  const userId = getUserId(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-  const groups = await db("groups")
-    .select("id", "name", "reply_mode", "created_at")
-    .where({ user_id: userId })
-    .orderBy("created_at", "desc")
-    .limit(500);
+async function resolveSnapshotGroupIds(userId, groupIds) {
+  // Returns DISTINCT snapshot group IDs including:
+  // - any selected snapshot groups
+  // - any snapshot descendants of selected meta groups (meta_group_links recursion)
+  const rows = await db.raw(
+    `
+    WITH RECURSIVE descendants AS (
+      SELECT g.id, g.type
+      FROM groups g
+      WHERE g.user_id = ? AND g.id = ANY(?)
 
-  // member counts (cheap + useful)
-  const counts = await db("group_members")
-    .select("group_id")
-    .count("* as member_count")
-    .whereIn("group_id", groups.map((g) => g.id))
-    .groupBy("group_id");
+      UNION ALL
 
-  const countMap = new Map(counts.map((c) => [c.group_id, Number(c.member_count)]));
+      SELECT child.id, child.type
+      FROM meta_group_links l
+      JOIN groups parent ON parent.id = l.parent_group_id
+      JOIN groups child ON child.id = l.child_group_id
+      JOIN descendants d ON d.id = parent.id
+      WHERE parent.user_id = ?
+    )
+    SELECT DISTINCT id
+    FROM descendants
+    WHERE type = 'snapshot'
+    `,
+    [userId, groupIds, userId],
+  );
 
-  res.json({
-    groups: groups.map((g) => ({
-      ...g,
-      member_count: countMap.get(g.id) ?? 0,
-    })),
-  });
+  return (rows?.rows || []).map((r) => r.id);
+}
+
+async function resolveContactsForGroup(userId, groupId) {
+  // Decide if group is snapshot or meta
+  const g = await db("groups").where({ id: groupId, user_id: userId }).first();
+  if (!g) return null;
+
+  const type = g.type || "snapshot";
+
+  let snapshotIds = [];
+  if (type === "snapshot") {
+    snapshotIds = [groupId];
+  } else {
+    snapshotIds = await resolveSnapshotGroupIds(userId, [groupId]);
+  }
+
+  if (!snapshotIds.length) return { group: g, contacts: [] };
+
+  const rows = await db("group_members as gm")
+    .join("contacts as c", "c.id", "gm.contact_id")
+    .select("c.id", "c.name", "c.phone_e164 as phone", "c.email", "c.organization")
+    .where("c.user_id", userId)
+    .whereIn("gm.group_id", snapshotIds);
+
+  // de-dupe contacts across overlapping snapshot groups in meta groups
+  const seen = new Set();
+  const out = [];
+  for (const c of rows) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    out.push(c);
+  }
+
+  return { group: g, contacts: out };
+}
+
+/**
+ * GET /v1/groups
+ * Auth required
+ * Returns groups with members (for now) + memberCount.
+ */
+groupsRouter.get("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const groups = await db("groups")
+      .select("id", "name", "type")
+      .where({ user_id: userId })
+      .orderBy("created_at", "desc");
+
+    const result = [];
+    for (const g of groups) {
+      const resolved = await resolveContactsForGroup(userId, g.id);
+      const contacts = resolved?.contacts || [];
+      result.push({
+        id: g.id,
+        name: g.name,
+        type: g.type || "snapshot",
+        memberCount: contacts.length,
+        members: contacts,
+      });
+    }
+
+    return res.json({ ok: true, groups: result });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "groups_list_failed" });
+  }
 });
 
 /**
  * POST /v1/groups
- * body: { name, replyMode }
+ * Body: { name, type?: "snapshot"|"meta" }
  */
-groupsRouter.post("/", async (req, res) => {
-  const userId = getUserId(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+groupsRouter.post("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
 
-  const name = String(req.body?.name ?? "").trim();
-  const replyMode = String(req.body?.replyMode ?? "private"); // private|group
+    const name = String(req.body?.name ?? "").trim();
+    const type = String(req.body?.type ?? "snapshot");
 
-  if (!name) return res.status(400).json({ error: "name required" });
+    if (!name) return res.status(400).json({ error: "name_required" });
+    if (!["snapshot", "meta"].includes(type)) return res.status(400).json({ error: "invalid_type" });
 
-  const id = crypto.randomUUID();
-  await db("groups").insert({
-    id,
-    user_id: userId,
-    name,
-    reply_mode: replyMode,
-    created_at: db.fn.now(),
-  });
+    const id = crypto.randomUUID();
 
-  res.json({ id, name, reply_mode: replyMode });
+    await db("groups").insert({
+      id,
+      user_id: userId,
+      name,
+      type,
+      created_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+
+    return res.json({ ok: true, group: { id, name, type, memberCount: 0, members: [] } });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "group_create_failed" });
+  }
 });
 
 /**
- * POST /v1/groups/:id/members
- * body: { memberIds: ["contactId", ...] }
+ * PUT /v1/groups/:id/members
+ * Snapshot groups only.
+ * Body: { memberIds: ["contactId", ...] }
  */
-groupsRouter.post("/:id/members", async (req, res) => {
-  const userId = getUserId(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
 
-  const groupId = String(req.params.id);
-  const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(String) : [];
+    const groupId = String(req.params.id);
+    const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(String) : [];
 
-  const group = await db("groups").where({ id: groupId, user_id: userId }).first();
-  if (!group) return res.status(404).json({ error: "Group not found" });
+    const g = await db("groups").where({ id: groupId, user_id: userId }).first();
+    if (!g) return res.status(404).json({ error: "group_not_found" });
 
-  await db.transaction(async (trx) => {
-    await trx("group_members").where({ group_id: groupId }).del();
+    const type = g.type || "snapshot";
+    if (type !== "snapshot") return res.status(400).json({ error: "meta_group_membership_is_dynamic" });
+
+    // Replace membership
+    await db("group_members").where({ group_id: groupId }).del();
+
     if (memberIds.length) {
-      await trx("group_members").insert(
-        memberIds.map((cid) => ({
-          group_id: groupId,
-          contact_id: cid,
-          created_at: trx.fn.now(),
-        })),
-      );
-    }
-  });
+      // Only allow contacts owned by user
+      const validContacts = await db("contacts")
+        .select("id")
+        .where({ user_id: userId })
+        .whereIn("id", memberIds);
 
-  res.json({ ok: true, groupId, memberCount: memberIds.length });
+      const validIds = validContacts.map((c) => c.id);
+
+      const rows = validIds.map((contactId) => ({
+        group_id: groupId,
+        contact_id: contactId,
+        created_at: db.fn.now(),
+      }));
+
+      if (rows.length) await db("group_members").insert(rows);
+    }
+
+    const resolved = await resolveContactsForGroup(userId, groupId);
+    return res.json({
+      ok: true,
+      group: {
+        id: g.id,
+        name: g.name,
+        type,
+        memberCount: resolved?.contacts?.length || 0,
+        members: resolved?.contacts || [],
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "members_update_failed" });
+  }
+});
+
+/**
+ * PUT /v1/groups/:id/meta-links
+ * Meta groups only.
+ * Body: { childGroupIds: ["groupId", ...] }
+ * Allows meta groups containing other meta groups.
+ */
+groupsRouter.put("/:id/meta-links", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const parentId = String(req.params.id);
+    const childGroupIds = Array.isArray(req.body?.childGroupIds) ? req.body.childGroupIds.map(String) : [];
+
+    const parent = await db("groups").where({ id: parentId, user_id: userId }).first();
+    if (!parent) return res.status(404).json({ error: "group_not_found" });
+    if ((parent.type || "snapshot") !== "meta") return res.status(400).json({ error: "not_a_meta_group" });
+
+    // Ensure all children exist and belong to user
+    const children = childGroupIds.length
+      ? await db("groups").select("id").where({ user_id: userId }).whereIn("id", childGroupIds)
+      : [];
+    const validChildIds = children.map((c) => c.id);
+
+    // Replace links
+    await db("meta_group_links").where({ parent_group_id: parentId }).del();
+
+    if (validChildIds.length) {
+      const rows = validChildIds.map((cid) => ({
+        parent_group_id: parentId,
+        child_group_id: cid,
+        created_at: db.fn.now(),
+      }));
+      await db("meta_group_links").insert(rows);
+    }
+
+    return res.json({ ok: true, childGroupIds: validChildIds });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "meta_links_update_failed" });
+  }
+});
+
+/**
+ * GET /v1/groups/:id/meta-links
+ */
+groupsRouter.get("/:id/meta-links", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const parentId = String(req.params.id);
+    const parent = await db("groups").where({ id: parentId, user_id: userId }).first();
+    if (!parent) return res.status(404).json({ error: "group_not_found" });
+    if ((parent.type || "snapshot") !== "meta") return res.status(400).json({ error: "not_a_meta_group" });
+
+    const links = await db("meta_group_links as l")
+      .join("groups as g", "g.id", "l.child_group_id")
+      .select("g.id", "g.name", "g.type")
+      .where("l.parent_group_id", parentId)
+      .where("g.user_id", userId)
+      .orderBy("g.name", "asc");
+
+    return res.json({ ok: true, children: links });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "meta_links_fetch_failed" });
+  }
 });

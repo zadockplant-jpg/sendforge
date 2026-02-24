@@ -1,18 +1,43 @@
+// comms-app/apps/mobile/lib/models/group.dart
 import 'contact.dart';
 
 class Group {
   final String id;
   final String name;
+
+  /// "snapshot" | "meta"
+  final String type;
+
+  /// For UI speed, backend returns this directly.
+  final int memberCount;
+
+  /// Backend returns members currently; keep for existing UI.
   final List<Contact> members;
 
   Group({
     required this.id,
     required this.name,
+    required this.type,
+    required this.memberCount,
     required this.members,
   });
 
-  int get memberCount => members.length;
-
   int get smsCapableCount => members.where((m) => m.hasSms).length;
   int get emailCapableCount => members.where((m) => m.hasEmail).length;
+
+  Group copyWith({
+    String? id,
+    String? name,
+    String? type,
+    int? memberCount,
+    List<Contact>? members,
+  }) {
+    return Group(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      type: type ?? this.type,
+      memberCount: memberCount ?? this.memberCount,
+      members: members ?? this.members,
+    );
+  }
 }

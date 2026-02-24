@@ -1,0 +1,1631 @@
+﻿================================
+FILE: comms-app\services\backend\src\app.js
+================================
+import express from "express";
+import cors from "cors";
+import { env } from "./config/env.js";
+import { healthRouter } from "./routes/health.routes.js";
+import { authRouter } from "./routes/auth.routes.js";
+import { verificationRouter } from "./routes/verification.routes.js"; // ✅ NEW
+import { groupsRouter } from "./routes/groups.routes.js";
+import { templatesRouter } from "./routes/templates.routes.js";
+import { blastsRouter } from "./routes/blasts.routes.js";
+import { billingRouter } from "./routes/billing.routes.js";
+import { webhooksRouter } from "./routes/webhooks.routes.js";
+import { threadsRouter } from "./routes/threads.routes.js";
+import { usageRouter } from "./routes/usage.routes.js";
+import contactsImportRoutes from "./routes/contacts.import.routes.js";
+import { blastsQuoteRouter } from "./routes/blasts.quote.routes.js";
+import { blastsSendRouter } from "./routes/blasts.send.routes.js";
+import { stripeWebhooksRouter } from "./routes/stripe.webhooks.routes.js";
+
+export const app = express();
+
+app.set("trust proxy", 1);
+
+app.use(express.urlencoded({ extended: false }));
+
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+
+// ----- CORE ROUTES -----
+app.use("/health", healthRouter);
+app.use("/v1/auth", authRouter);
+app.use("/v1/auth", verificationRouter); // ✅ NEW: /v1/auth/verify
+app.use("/v1/contacts", contactsImportRoutes);
+app.use("/v1/groups", groupsRouter);
+app.use("/v1/templates", templatesRouter);
+app.use("/v1/blasts", blastsRouter);
+app.use("/v1/threads", threadsRouter);
+app.use("/v1/billing", billingRouter);
+app.use("/v1/usage", usageRouter);
+
+// ----- BLAST QUOTE / SEND -----
+app.use("/v1/blasts/quote", blastsQuoteRouter);
+app.use("/v1/blasts/send", blastsSendRouter);
+
+// ----- WEBHOOKS -----
+app.use("/v1/webhooks", webhooksRouter);
+app.use("/v1/webhooks/stripe", stripeWebhooksRouter);
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "SendForge API",
+    env: process.env.NODE_ENV,
+  });
+});
+
+================================
+FILE: comms-app\services\backend\src\server.js
+================================
+import "dotenv/config";
+import { env } from "./config/env.js";
+import { app } from "./app.js";
+
+app.listen(env.port, "0.0.0.0", () => {
+  console.log(`[api] listening on ${env.port}`);
+});
+
+
+================================
+FILE: comms-app\services\backend\src\middleware\auth.js
+================================
+import jwt from "jsonwebtoken";
+import { env } from "../config/env.js";
+
+/**
+ * Sets req.user = { sub: userId, email }
+ */
+export function requireAuth(req, res, next) {
+  const hdr = req.headers.authorization || "";
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : null;
+
+  if (!token) return res.status(401).json({ error: "missing_token" });
+
+  try {
+    const payload = jwt.verify(token, env.jwtSecret);
+    // payload expected: { sub, email }
+    req.user = payload;
+    return next();
+  } catch {
+    return res.status(401).json({ error: "invalid_token" });
+  }
+}
+
+================================
+FILE: comms-app\services\backend\src\utils\getUserId.js
+================================
+/**
+ * Canonical user id resolver.
+ * Dev fallbacks removed (no more "dev-user" / fake UUID).
+ */
+export function getUserId(req) {
+  if (req.user?.sub) return String(req.user.sub);
+  return null;
+}
+
+================================
+FILE: comms-app\services\backend\src\routes\contacts.import.routes.js
+================================
+// comms-app/services/backend/src/routes/contacts.import.routes.js
+import express from "express";
+import { requireAuth } from "../middleware/auth.js";
+import { importContacts } from "../services/contactImport.service.js";
+import { db } from "../config/db.js";
+const router = express.Router();
+
+/**
+ * POST /v1/contacts/import
+ * Auth: Bearer JWT required
+ * Body:
+ * {
+ *   method: "google" | "csv" | "device" | "manual",
+ *   contacts: [{ name, phone, email, sourceMeta? }]
+ * }
+ */
+router.get("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.sub;
+
+    const rows = await db("contacts")
+      .where({ user_id: userId })
+      .orderBy("created_at", "desc");
+
+    return res.json({
+      ok: true,
+      contacts: rows,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: "failed_to_fetch_contacts",
+    });
+  }
+});
+router.post("/import", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub; // UUID from JWT
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: "missing_token" });
+    }
+
+    const { method, contacts } = req.body || {};
+
+    if (!method || typeof method !== "string") {
+      return res.status(400).json({ ok: false, error: "invalid_method" });
+    }
+
+    if (!Array.isArray(contacts)) {
+      return res.status(400).json({ ok: false, error: "contacts_must_be_array" });
+    }
+
+    const result = await importContacts({
+      userId,
+      method,
+      contacts,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      ...result,
+    });
+  } catch (err) {
+    // Keep errors useful, but not overly leaky
+    const msg = err?.message || String(err);
+    return res.status(400).json({
+      ok: false,
+      error: msg,
+    });
+  }
+});
+
+export default router;
+
+================================
+FILE: comms-app\services\backend\src\routes\groups.routes.js
+================================
+import { Router } from "express";
+import crypto from "crypto";
+import { db } from "../config/db.js";
+import { getUserId } from "../utils/getUserId.js";
+
+export const groupsRouter = Router();
+
+/**
+ * GET /v1/groups
+ */
+groupsRouter.get("/", async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const groups = await db("groups")
+    .select("id", "name", "reply_mode", "created_at")
+    .where({ user_id: userId })
+    .orderBy("created_at", "desc")
+    .limit(500);
+
+  // member counts (cheap + useful)
+  const counts = await db("group_members")
+    .select("group_id")
+    .count("* as member_count")
+    .whereIn("group_id", groups.map((g) => g.id))
+    .groupBy("group_id");
+
+  const countMap = new Map(counts.map((c) => [c.group_id, Number(c.member_count)]));
+
+  res.json({
+    groups: groups.map((g) => ({
+      ...g,
+      member_count: countMap.get(g.id) ?? 0,
+    })),
+  });
+});
+
+/**
+ * POST /v1/groups
+ * body: { name, replyMode }
+ */
+groupsRouter.post("/", async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const name = String(req.body?.name ?? "").trim();
+  const replyMode = String(req.body?.replyMode ?? "private"); // private|group
+
+  if (!name) return res.status(400).json({ error: "name required" });
+
+  const id = crypto.randomUUID();
+  await db("groups").insert({
+    id,
+    user_id: userId,
+    name,
+    reply_mode: replyMode,
+    created_at: db.fn.now(),
+  });
+
+  res.json({ id, name, reply_mode: replyMode });
+});
+
+/**
+ * POST /v1/groups/:id/members
+ * body: { memberIds: ["contactId", ...] }
+ */
+groupsRouter.post("/:id/members", async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const groupId = String(req.params.id);
+  const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(String) : [];
+
+  const group = await db("groups").where({ id: groupId, user_id: userId }).first();
+  if (!group) return res.status(404).json({ error: "Group not found" });
+
+  await db.transaction(async (trx) => {
+    await trx("group_members").where({ group_id: groupId }).del();
+    if (memberIds.length) {
+      await trx("group_members").insert(
+        memberIds.map((cid) => ({
+          group_id: groupId,
+          contact_id: cid,
+          created_at: trx.fn.now(),
+        })),
+      );
+    }
+  });
+
+  res.json({ ok: true, groupId, memberCount: memberIds.length });
+});
+
+
+================================
+FILE: comms-app\services\backend\src\routes\blasts.quote.routes.js
+================================
+import { Router } from "express";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+import { PLAN, INTL_CAPS_CENTS, INTL_MULTIPLIERS, isDomesticUSCA } from "../config/pricingPolicy.js";
+import { getTwilioSmsUnitPriceUSD } from "../services/twilioPricing.service.js";
+import { getIntlTier, isTierBlocked, getMultiplierForTier } from "../services/intlTier.service.js";
+import { parseE164CountryCode } from "../services/phoneCountry.service.js";
+import { resolveRecipients } from "../services/recipientsResolve.service.js";
+
+export const blastsQuoteRouter = Router();
+
+/**
+ * POST /v1/blasts/quote
+ * Auth: Bearer JWT required
+ *
+ * Body supports:
+ * - { groupIds: [], contactIds: [], channels: ["sms","email"], body: "..." }
+ * OR (legacy)
+ * - { recipients: ["+1...", "+44..."], body: "...", channels? }
+ */
+blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "missing_token" });
+
+  const { recipients, groupIds, contactIds, channels } = req.body || {};
+
+  const ch = Array.isArray(channels) ? channels.map(String) : ["sms"];
+
+  // If SMS isn't selected, intl SMS quote flow isn't needed.
+  const wantsSms = ch.includes("sms");
+  if (!wantsSms) {
+    return res.json({
+      blocked: false,
+      domesticCount: 0,
+      intlCount: 0,
+      estimatedIntlCents: 0,
+      requiresConfirm: false,
+      requiresImmediateCharge: false,
+      note: "sms_not_selected",
+    });
+  }
+
+  let smsRecipients = [];
+
+  if (Array.isArray(recipients) && recipients.length) {
+    smsRecipients = recipients.map(String);
+  } else {
+    const resolved = await resolveRecipients({
+      userId,
+      groupIds,
+      contactIds,
+    });
+    smsRecipients = resolved.sms;
+  }
+
+  if (!Array.isArray(smsRecipients) || smsRecipients.length === 0) {
+    return res.status(400).json({ error: "No SMS recipients (missing phone_e164)" });
+  }
+
+  const user = await db("users").where({ id: userId }).first();
+  if (!user) return res.status(404).json({ error: "user not found" });
+
+  const plan = user.plan_tier || PLAN.FREE;
+
+  // Hard blocks
+  if (plan === PLAN.FREE) {
+    return res.json({ blocked: true, blockedReason: "free_plan_intl_blocked" });
+  }
+  if (user.intl_blocked_reason) {
+    return res.json({ blocked: true, blockedReason: user.intl_blocked_reason });
+  }
+  if (!user.stripe_payment_method_attached) {
+    return res.json({ blocked: true, blockedReason: "no_payment_method_for_intl" });
+  }
+
+  let intlCount = 0;
+  let domesticCount = 0;
+  const countryCounts = new Map();
+
+  for (const e164 of smsRecipients) {
+    const cc = parseE164CountryCode(e164);
+    if (!cc) return res.status(400).json({ error: `invalid phone: ${e164}` });
+
+    if (isDomesticUSCA(cc)) {
+      domesticCount++;
+      continue;
+    }
+
+    const tier = getIntlTier(cc);
+    if (isTierBlocked(tier)) {
+      return res.json({ blocked: true, blockedReason: `intl_blocked_country_${cc}` });
+    }
+
+    intlCount++;
+    countryCounts.set(cc, (countryCounts.get(cc) || 0) + 1);
+  }
+
+  if (intlCount === 0) {
+    return res.json({
+      blocked: false,
+      domesticCount,
+      intlCount: 0,
+      estimatedIntlCents: 0,
+      requiresConfirm: false,
+      requiresImmediateCharge: false,
+    });
+  }
+
+  let estimatedIntlCents = 0;
+
+  for (const [cc, count] of countryCounts.entries()) {
+    const tier = getIntlTier(cc);
+    const mult = getMultiplierForTier(tier) ?? (tier === "tier1" ? INTL_MULTIPLIERS.tier1 : INTL_MULTIPLIERS.tier2);
+
+    const unitUsd = await getTwilioSmsUnitPriceUSD(cc);
+    const unitCents = Math.round(unitUsd * 100);
+    const billedUnitCents = Math.ceil(unitCents * mult);
+
+    estimatedIntlCents += billedUnitCents * count;
+  }
+
+  const caps = plan === PLAN.PRO ? INTL_CAPS_CENTS.pro : INTL_CAPS_CENTS.business;
+  const since = user.intl_spend_since_charge_cents || 0;
+
+  const breachesSoftPerBlast = estimatedIntlCents > caps.soft_per_blast;
+  const breachesHardAccum = since + estimatedIntlCents > caps.hard_accum;
+
+  const requiresImmediateCharge = breachesSoftPerBlast || breachesHardAccum;
+
+  return res.json({
+    blocked: false,
+    domesticCount,
+    intlCount,
+    estimatedIntlCents,
+    estimatedIntlUsd: (estimatedIntlCents / 100).toFixed(2),
+    caps,
+    intlSpendSinceChargeCents: since,
+    requiresConfirm: true,
+    requiresImmediateCharge,
+    reason: breachesSoftPerBlast ? "softcap_per_blast" : breachesHardAccum ? "hardcap_accum" : null,
+  });
+});
+
+================================
+FILE: comms-app\services\backend\src\routes\blasts.send.routes.js
+================================
+import { Router } from "express";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+import { chargeIntlNow } from "../services/stripe_charge.service.js";
+import { resolveRecipients } from "../services/recipientsResolve.service.js";
+
+export const blastsSendRouter = Router();
+
+/**
+ * POST /v1/blasts/send
+ * Auth: Bearer JWT required
+ *
+ * Body:
+ * {
+ *   groupIds: [],
+ *   contactIds: [],
+ *   channels: ["sms","email"],
+ *   body: "...",
+ *   quote: {...}
+ * }
+ */
+blastsSendRouter.post("/", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "missing_token" });
+
+  const { groupIds, contactIds, channels, body, quote } = req.body || {};
+
+  const ch = Array.isArray(channels) ? channels.map(String) : ["sms"];
+  const msgBody = String(body || "").trim();
+  if (!msgBody) return res.status(400).json({ error: "body required" });
+
+  const user = await db("users").where({ id: userId }).first();
+  if (!user) return res.status(404).json({ error: "user not found" });
+
+  if (user.intl_blocked_reason) {
+    return res.status(402).json({ error: "intl_blocked", reason: user.intl_blocked_reason });
+  }
+
+  const resolved = await resolveRecipients({
+    userId,
+    groupIds,
+    contactIds,
+  });
+
+  const smsRecipients = resolved.sms;
+  const emailRecipients = resolved.email;
+
+  const wantsSms = ch.includes("sms");
+  const wantsEmail = ch.includes("email");
+
+  const totalQueued =
+    (wantsSms ? smsRecipients.length : 0) + (wantsEmail ? emailRecipients.length : 0);
+
+  if (totalQueued === 0) {
+    return res.status(400).json({ error: "No recipients (missing destinations for selected channels)" });
+  }
+
+  // If intl requires immediate charge, do it BEFORE sending
+  if (quote?.requiresImmediateCharge === true && Number(quote?.estimatedIntlCents || 0) > 0) {
+    try {
+      await chargeIntlNow({
+        userId,
+        amountCents: Number(quote.estimatedIntlCents),
+        reason: String(quote.reason || "intl"),
+      });
+
+      await db("users")
+        .where({ id: userId })
+        .update({
+          intl_spend_since_charge_cents: db.raw("intl_spend_since_charge_cents + ?", [Number(quote.estimatedIntlCents)]),
+          intl_spend_cycle_cents: db.raw("intl_spend_cycle_cents + ?", [Number(quote.estimatedIntlCents)]),
+        });
+    } catch (e) {
+      await db("users").where({ id: userId }).update({ intl_blocked_reason: "payment_failed" });
+      return res.status(402).json({ error: "payment_failed", detail: String(e?.message || e) });
+    }
+  }
+
+  // MVP: mock queue (real enqueue later)
+  const blastId = cryptoRandomId();
+
+  return res.json({
+    ok: true,
+    blastId,
+    queued: totalQueued,
+    queuedSms: wantsSms ? smsRecipients.length : 0,
+    queuedEmail: wantsEmail ? emailRecipients.length : 0,
+  });
+});
+
+function cryptoRandomId() {
+  // avoid importing crypto in case this file is executed in constrained envs
+  return `${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+}
+
+================================
+FILE: comms-app\services\backend\src\services\contactImport.service.js
+================================
+// comms-app/services/backend/src/services/contactImport.service.js
+import { dedupeContacts } from "./dedupe.service.js";
+import { auditLog } from "./audit.service.js";
+import { db } from "../config/db.js";
+
+export async function importContacts({ userId, method, contacts }) {
+  if (!userId) throw new Error("missing_user");
+
+  const normalized = (contacts || []).map(normalize).filter(Boolean);
+
+  const { unique, duplicates } = dedupeContacts(normalized);
+
+  let inserted = 0;
+
+  // Insert best-effort; count actual inserts (not just attempts)
+  for (const c of unique) {
+      const rows = await db("contacts")
+  .insert({
+    user_id: userId,
+    name: c.name,
+    phone: c.phone,
+    email: c.email,
+    organization: c.organization || null,
+    source: method,
+    created_at: new Date(),
+  })
+  .onConflict(["user_id", "phone", "email"])
+  .ignore()
+  .returning(["id"]);
+
+    if (Array.isArray(rows) && rows.length > 0) inserted++;
+  }
+
+  // Audit should never block import success
+  try {
+    await auditLog(userId, "contacts_import", {
+      method,
+      inserted,
+      duplicates: duplicates.length,
+      invalid: (contacts?.length || 0) - normalized.length,
+    });
+  } catch (_) {
+    // ignore
+  }
+
+  return {
+    added: inserted,
+    duplicates: duplicates.length,
+    invalid: (contacts?.length || 0) - normalized.length,
+    // keep these if you want them for debugging/UI (safe-ish)
+    unique,
+    duplicatesList: duplicates,
+  };
+}
+
+function normalize(c) {
+  if (!c) return null;
+
+  const phone = typeof c.phone === "string" ? c.phone.trim() : "";
+  const email = typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
+
+  if (!phone && !email) return null;
+
+  return {
+    name: typeof c.name === "string" ? c.name.trim() : "",
+    phone: phone || null,
+    email: email || null,
+  };
+}
+
+================================
+FILE: comms-app\apps\mobile\lib\core\app_state.dart
+================================
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/group.dart';
+import '../models/contact.dart';
+import '../models/message.dart';
+import '../models/blast.dart';
+import '../services/api_client.dart';
+
+class AppState extends ChangeNotifier {
+  // Auth / config
+  String? token;
+  String baseUrl = 'https://comms-app-1wo0.onrender.com';
+
+  // Identity / billing (UI only for now)
+  String userId = 'local-user';
+  String planTier = 'free';
+
+  // Core data
+  final List<Group> groups = [];
+  final List<Contact> contacts = [];
+
+  final List<Message> threads = [];
+  final Map<String, List<Message>> messagesByThread = {};
+
+  BlastDraft? activeBlast;
+
+  // ------------------------
+
+  void setBaseUrl(String v) {
+    baseUrl = v;
+    notifyListeners();
+  }
+
+  Future<void> setToken(String? t) async {
+    token = t;
+
+    final prefs = await SharedPreferences.getInstance();
+
+    if (t == null) {
+      await prefs.remove('token');
+    } else {
+      await prefs.setString('token', t);
+    }
+
+    notifyListeners();
+  }
+
+  void setPlanTier(String tier) {
+    planTier = tier;
+    notifyListeners();
+  }
+
+  /// 🔹 Load contacts from backend
+  Future<void> loadContacts() async {
+    final api = ApiClient(baseUrl: baseUrl);
+    final response = await api.getJson('/v1/contacts');
+
+    if (response['contacts'] is List) {
+      contacts.clear();
+
+      for (final item in response['contacts']) {
+        contacts.add(
+          Contact(
+            id: item['id'] ?? '',
+            name: item['name'] ?? 'Unknown',
+            phone: item['phone'],
+            email: item['email'],
+            organization: item['organization'],
+          ),
+        );
+      }
+
+      notifyListeners();
+    }
+  }
+
+  /// Utility used by Create Blast (local UI only)
+  List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
+    final memberIds = groups
+        .where((g) => groupIds.contains(g.id))
+        .expand((g) => g.members.map((m) => m.id))
+        .toSet();
+
+    return contacts.where((c) => memberIds.contains(c.id)).toList();
+  }
+
+  /// Adds mock thread when blast queued
+  void addQueuedBlastAsThread({
+    required String blastId,
+    required String body,
+  }) {
+    final now = DateTime.now();
+
+    final root = Message(
+      id: blastId,
+      sender: 'You',
+      body: body,
+      incoming: false,
+      timestamp: now,
+    );
+
+    threads.insert(0, root);
+
+    messagesByThread.putIfAbsent(blastId, () => []);
+    messagesByThread[blastId]!.insert(
+      0,
+      Message(
+        id: '${blastId}_m1',
+        sender: 'You',
+        body: body,
+        incoming: false,
+        timestamp: now,
+      ),
+    );
+
+    notifyListeners();
+  }
+}
+
+================================
+FILE: comms-app\apps\mobile\lib\ui\screens\create_blast_screen.dart
+================================
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../core/app_state.dart';
+import '../../models/blast.dart';
+import '../../services/blasts_api.dart';
+import '../../services/api_client.dart';
+import '../colors.dart';
+import '../icons.dart';
+import '../components/sf_card.dart';
+import '../components/sf_primary_button.dart';
+import '../../models/group.dart';
+import 'threads_screen.dart';
+
+class CreateBlastScreen extends StatefulWidget {
+  final AppState appState;
+  const CreateBlastScreen({super.key, required this.appState});
+
+  @override
+  State<CreateBlastScreen> createState() => _CreateBlastScreenState();
+}
+
+class _CreateBlastScreenState extends State<CreateBlastScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final BlastDraft draft = BlastDraft();
+
+  final _nameCtrl = TextEditingController(text: 'Smoke Test');
+  final _subjectCtrl = TextEditingController();
+  final _bodyCtrl = TextEditingController();
+
+  final _nameFocus = FocusNode();
+  final _subjectFocus = FocusNode();
+  final _bodyFocus = FocusNode();
+
+  /// Channels
+  final Set<Channel> _channels = {Channel.sms};
+
+  /// Groups (IDs)
+  final Set<String> _selectedGroupIds = {};
+
+  bool busy = false;
+  String? status;
+
+  bool get hasEmail => _channels.contains(Channel.email);
+  bool get hasSms => _channels.contains(Channel.sms);
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _subjectCtrl.dispose();
+    _bodyCtrl.dispose();
+    _nameFocus.dispose();
+    _subjectFocus.dispose();
+    _bodyFocus.dispose();
+    super.dispose();
+  }
+
+  void _openGroupPicker() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) {
+        // ✅ local modal state so checkmarks update immediately
+        return StatefulBuilder(
+          builder: (context, modalSetState) {
+            return _GroupPicker(
+              groups: widget.appState.groups,
+              selected: _selectedGroupIds,
+              onToggle: (id) {
+                modalSetState(() {});
+                setState(() {
+                  _selectedGroupIds.contains(id)
+                      ? _selectedGroupIds.remove(id)
+                      : _selectedGroupIds.add(id);
+                });
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<bool> _confirmInternational(String estUsd, bool chargeNow) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text("International SMS charges"),
+            content: Text(
+              "This blast includes international recipients.\n\n"
+              "Estimated international cost: \$$estUsd\n\n"
+              "Charges are based on destination and billed to your saved payment method.",
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text("Cancel"),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(chargeNow ? "Confirm & Charge Now" : "Confirm & Send"),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  List<String> _channelsToApiList() {
+    final out = <String>[];
+    if (_channels.contains(Channel.sms)) out.add("sms");
+    if (_channels.contains(Channel.email)) out.add("email");
+    return out;
+  }
+
+  Future<void> _send() async {
+    setState(() => status = null);
+
+    if (!_formKey.currentState!.validate()) return;
+
+    if (_channels.isEmpty) {
+      setState(() => status = 'Select at least one channel.');
+      return;
+    }
+
+    if (_selectedGroupIds.isEmpty) {
+      setState(() => status = 'Select at least one group.');
+      return;
+    }
+
+    // Assign draft fields (UI only)
+    draft.channels = _channels.toSet();
+    draft.name = _nameCtrl.text.trim();
+    draft.subject = _subjectCtrl.text.trim();
+    draft.body = _bodyCtrl.text.trim();
+    draft.groupIds = _selectedGroupIds.toList();
+
+    final channelsApi = _channelsToApiList();
+
+    setState(() => busy = true);
+
+    try {
+      final apiClient = ApiClient(baseUrl: widget.appState.baseUrl);
+      final blastsApi = BlastsApi(apiClient);
+
+      // 1️⃣ Quote (server resolves recipients from groupIds/contactIds)
+      final quote = await blastsApi.quote(
+        groupIds: draft.groupIds,
+        channels: channelsApi,
+        body: draft.body,
+      );
+
+      if (quote['blocked'] == true) {
+        setState(() => status = 'Blocked: ${quote['blockedReason'] ?? 'not allowed'}');
+        return;
+      }
+
+      final intlCount = (quote['intlCount'] ?? 0) as int;
+      final requiresConfirm = quote['requiresConfirm'] == true;
+
+      // 2️⃣ Confirm intl charges if required
+      if (requiresConfirm && intlCount > 0) {
+        final est = quote['estimatedIntlUsd']?.toString() ?? '0.00';
+        final chargeNow = quote['requiresImmediateCharge'] == true;
+
+        final ok = await _confirmInternational(est, chargeNow);
+        if (!ok) return;
+      }
+
+      // 3️⃣ Send
+      final resp = await blastsApi.send(
+        groupIds: draft.groupIds,
+        channels: channelsApi,
+        body: draft.body,
+        quote: quote,
+      );
+
+      final blastId = (resp['blastId'] ?? DateTime.now().millisecondsSinceEpoch.toString()).toString();
+      setState(() => status = 'Queued ✅ ($blastId)');
+
+      // Local thread placeholder so Threads tab is testable
+      widget.appState.addQueuedBlastAsThread(
+        blastId: blastId,
+        body: draft.body,
+      );
+
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => ThreadsScreen(appState: widget.appState)),
+      );
+    } catch (e) {
+      setState(() => status = 'Error: $e');
+    } finally {
+      setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final needsSubject = hasEmail;
+
+    // Ctrl+Enter to send (desktop/web/windows)
+    final shortcuts = <ShortcutActivator, Intent>{
+      const SingleActivator(LogicalKeyboardKey.enter, control: true): const _SendIntent(),
+      const SingleActivator(LogicalKeyboardKey.numpadEnter, control: true): const _SendIntent(),
+    };
+
+    final actions = <Type, Action<Intent>>{
+      _SendIntent: CallbackAction<_SendIntent>(
+        onInvoke: (_) {
+          if (!busy) _send();
+          return null;
+        },
+      ),
+    };
+
+    return Shortcuts(
+      shortcuts: shortcuts,
+      child: Actions(
+        actions: actions,
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
+            appBar: AppBar(
+              title: const Text('Create Blast'),
+              backgroundColor: SFColors.primaryBlue,
+              foregroundColor: Colors.white,
+            ),
+            body: SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    children: [
+                      /// CHANNELS
+                      SFCard(
+                        title: 'Channels',
+                        subtitle: 'Select one or both (SMS + Email)',
+                        child: Wrap(
+                          spacing: 12,
+                          children: Channel.values.map((c) {
+                            final selected = _channels.contains(c);
+                            final label = c == Channel.sms ? 'SMS' : 'Email';
+
+                            return InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: () {
+                                setState(() {
+                                  selected ? _channels.remove(c) : _channels.add(c);
+                                });
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(12),
+                                  color: selected ? SFColors.primaryBlue : Colors.white,
+                                  border: Border.all(
+                                    color: selected ? SFColors.primaryBlue : SFColors.cardBorder,
+                                  ),
+                                ),
+                                child: Text(
+                                  label,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    color: selected ? Colors.white : SFColors.textPrimary,
+                                  ),
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ),
+
+                      const SizedBox(height: 14),
+
+                      /// REPLY MODE
+                      SFCard(
+                        title: 'Reply mode',
+                        subtitle: 'Private = sender only • Group = shared thread',
+                        child: _ReplyModeSlider(
+                          value: draft.replyMode,
+                          onChanged: (v) => setState(() => draft.replyMode = v),
+                        ),
+                      ),
+
+                      const SizedBox(height: 14),
+
+                      /// MESSAGE
+                      SFCard(
+                        title: 'Message',
+                        child: Column(
+                          children: [
+                            TextFormField(
+                              controller: _nameCtrl,
+                              focusNode: _nameFocus,
+                              textInputAction: TextInputAction.next,
+                              onFieldSubmitted: (_) => _subjectFocus.requestFocus(),
+                              decoration: const InputDecoration(
+                                labelText: 'Name',
+                                prefixIcon: Icon(Icons.edit_outlined),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            TextFormField(
+                              controller: _subjectCtrl,
+                              focusNode: _subjectFocus,
+                              textInputAction: TextInputAction.next,
+                              onFieldSubmitted: (_) => _bodyFocus.requestFocus(),
+                              decoration: InputDecoration(
+                                labelText: needsSubject ? 'Subject (required for email)' : 'Subject (email only)',
+                                prefixIcon: const Icon(SFIcons.email),
+                              ),
+                              validator: (v) {
+                                if (needsSubject && (v == null || v.trim().isEmpty)) {
+                                  return 'Subject required when Email is selected.';
+                                }
+                                return null;
+                              },
+                            ),
+                            const SizedBox(height: 12),
+                            TextFormField(
+                              controller: _bodyCtrl,
+                              focusNode: _bodyFocus,
+                              minLines: 4,
+                              maxLines: 8,
+                              keyboardType: TextInputType.multiline,
+                              textInputAction: TextInputAction.newline,
+                              decoration: InputDecoration(
+                                labelText: 'Body',
+                                helperText: kIsWeb ? 'Ctrl+Enter to send' : null,
+                                prefixIcon: Icon(hasEmail && !hasSms ? SFIcons.email : SFIcons.sms),
+                              ),
+                              validator: (v) => (v == null || v.trim().isEmpty) ? 'Body is required.' : null,
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 14),
+
+                      /// GROUPS
+                      SFCard(
+                        title: 'Groups',
+                        subtitle: 'Select one or more groups',
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            OutlinedButton.icon(
+                              icon: const Icon(Icons.group),
+                              label: const Text('Select Groups'),
+                              onPressed: _openGroupPicker,
+                            ),
+                            if (_selectedGroupIds.isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                '${_selectedGroupIds.length} group(s) selected',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      /// SEND
+                      SizedBox(
+                        width: double.infinity,
+                        child: SFPrimaryButton(
+                          icon: SFIcons.queue,
+                          label: busy ? 'Queuing…' : 'Queue Blast',
+                          busy: busy,
+                          onPressed: busy ? null : _send,
+                        ),
+                      ),
+
+                      if (status != null) ...[
+                        const SizedBox(height: 12),
+                        _StatusBanner(text: status!),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SendIntent extends Intent {
+  const _SendIntent();
+}
+
+/// ============================================================
+/// GROUP PICKER (single definition only)
+/// ============================================================
+
+class _GroupPicker extends StatelessWidget {
+  final List<Group> groups;
+  final Set<String> selected;
+  final ValueChanged<String> onToggle;
+
+  const _GroupPicker({
+    required this.groups,
+    required this.selected,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Select Groups',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          ...groups.map((g) {
+            final isSelected = selected.contains(g.id);
+            return ListTile(
+              leading: Icon(
+                Icons.group,
+                color: isSelected ? SFColors.primaryBlue : Colors.grey,
+              ),
+              title: Text(g.name),
+              trailing: isSelected ? const Icon(Icons.check_circle) : null,
+              onTap: () => onToggle(g.id),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
+/// ============================================================
+/// REPLY MODE
+/// ============================================================
+
+class _ReplyModeSlider extends StatelessWidget {
+  final ReplyMode value;
+  final ValueChanged<ReplyMode> onChanged;
+
+  const _ReplyModeSlider({required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final isPrivate = value == ReplyMode.private;
+    return Row(
+      children: [
+        Expanded(
+          child: _chip(
+            selected: isPrivate,
+            icon: SFIcons.replyPrivate,
+            label: 'Private',
+            onTap: () => onChanged(ReplyMode.private),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: _chip(
+            selected: !isPrivate,
+            icon: SFIcons.replyGroup,
+            label: 'Group',
+            onTap: () => onChanged(ReplyMode.group),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chip({
+    required bool selected,
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: selected ? SFColors.primaryBlue : Colors.white,
+          border: Border.all(
+            color: selected ? SFColors.primaryBlue : Colors.black12,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: selected ? Colors.white : SFColors.primaryBlue),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+                color: selected ? Colors.white : SFColors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// ============================================================
+/// STATUS BANNER
+/// ============================================================
+
+class _StatusBanner extends StatelessWidget {
+  final String text;
+  const _StatusBanner({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final isError = text.toLowerCase().contains('error') ||
+        text.toLowerCase().contains('blocked') ||
+        text.toLowerCase().contains('required');
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isError ? Colors.redAccent.withOpacity(0.10) : Colors.green.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: isError ? Colors.redAccent : Colors.green),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isError ? SFIcons.warning : Icons.check_circle_outline,
+            color: isError ? Colors.redAccent : Colors.green,
+          ),
+          const SizedBox(width: 10),
+          Expanded(child: Text(text)),
+        ],
+      ),
+    );
+  }
+}
+
+================================
+FILE: comms-app\apps\mobile\lib\ui\screens\groups_screen.dart
+================================
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import 'create_group_screen.dart';
+import 'groups_list_screen.dart';
+import 'import_contacts_screen.dart';
+
+class GroupsScreen extends StatelessWidget {
+  final AppState appState;
+  const GroupsScreen({super.key, required this.appState});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _navButton(
+            context,
+            label: 'Create Group',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => CreateGroupScreen(appState: appState),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _navButton(
+            context,
+            label: 'Manage Groups',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => GroupsListScreen(appState: appState),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _navButton(
+            context,
+            label: 'Import Contacts',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ImportContactsScreen(appState: appState),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _navButton(BuildContext context,
+      {required String label, required VoidCallback onTap}) {
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton(
+        onPressed: onTap,
+        child: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+}
+
+
+================================
+FILE: comms-app\apps\mobile\lib\ui\screens\group_detail_screen.dart
+================================
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import '../../models/group.dart';
+import '../../models/contact.dart';
+import '../../services/groups_api.dart';
+import '../components/compact_contact_tile.dart';
+
+class GroupDetailScreen extends StatefulWidget {
+  final AppState appState;
+  final Group group;
+
+  const GroupDetailScreen({
+    super.key,
+    required this.appState,
+    required this.group,
+  });
+
+  @override
+  State<GroupDetailScreen> createState() => _GroupDetailScreenState();
+}
+
+class _GroupDetailScreenState extends State<GroupDetailScreen> {
+  late Set<String> _selectedMemberIds;
+  final TextEditingController _search = TextEditingController();
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedMemberIds =
+        widget.group.members.map((m) => m.id).toSet();
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    final api = GroupsApi(widget.appState);
+    await api.updateMembers(
+      widget.group.id,
+      _selectedMemberIds.toList(),
+    );
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allContacts = widget.appState.contacts;
+    final query = _search.text.toLowerCase();
+
+    final contacts = allContacts.where((c) {
+      return c.name.toLowerCase().contains(query) ||
+          (c.organization ?? '')
+              .toLowerCase()
+              .contains(query);
+    }).toList();
+
+    contacts.sort((a, b) =>
+        a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.group.name),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _search,
+                    decoration: const InputDecoration(
+                      hintText: "Search contacts...",
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _saving ? null : _save,
+                  child: _saving
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2))
+                      : const Text("Save"),
+                )
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: contacts.length,
+              itemBuilder: (context, i) {
+                final c = contacts[i];
+                final selected =
+                    _selectedMemberIds.contains(c.id);
+
+                return CompactContactTile(
+                  contact: c,
+                  selected: selected,
+                  onToggle: () {
+                    setState(() {
+                      selected
+                          ? _selectedMemberIds.remove(c.id)
+                          : _selectedMemberIds.add(c.id);
+                    });
+                  },
+                  onSelectOrganization: () {
+                    final org = c.organization;
+                    if (org == null) return;
+                    final orgContacts = allContacts
+                        .where((x) =>
+                            x.organization == org)
+                        .map((x) => x.id);
+                    setState(() {
+                      _selectedMemberIds.addAll(orgContacts);
+                    });
+                  },
+                  onDeselectOrganization: () {
+                    final org = c.organization;
+                    if (org == null) return;
+                    final orgContacts = allContacts
+                        .where((x) =>
+                            x.organization == org)
+                        .map((x) => x.id);
+                    setState(() {
+                      _selectedMemberIds
+                          .removeAll(orgContacts);
+                    });
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+================================
+FILE: comms-app\apps\mobile\lib\services\api_client.dart
+================================
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+class ApiClient {
+  final String baseUrl;
+
+  static const _storage = FlutterSecureStorage();
+  static const _tokenKey = 'auth_token';
+
+  ApiClient({required this.baseUrl});
+
+  Future<String?> getToken() async {
+    return await _storage.read(key: _tokenKey);
+  }
+
+  Future<Map<String, String>> _headers() async {
+    final token = await getToken();
+
+    final h = <String, String>{
+      'Content-Type': 'application/json',
+    };
+
+    if (token != null && token.isNotEmpty) {
+      h['Authorization'] = 'Bearer $token';
+    }
+
+    return h;
+  }
+
+  Future<Map<String, dynamic>> getJson(String path) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final res = await http.get(uri, headers: await _headers());
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.post(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+}
+
+class ApiError implements Exception {
+  final String message;
+  ApiError({required this.message});
+
+  @override
+  String toString() => message;
+}
+
+================================
+FILE: comms-app\apps\mobile\lib\services\blasts_api.dart
+================================
+import 'api_client.dart';
+
+class BlastsApi {
+  final ApiClient client;
+  BlastsApi(this.client);
+
+  /// Quote intl SMS costs (server resolves recipients based on groupIds/contactIds)
+  Future<Map<String, dynamic>> quote({
+    required List<String> groupIds,
+    List<String> contactIds = const [],
+    required List<String> channels, // ["sms","email"]
+    required String body,
+  }) {
+    return client.postJson('/v1/blasts/quote', {
+      'groupIds': groupIds,
+      'contactIds': contactIds,
+      'channels': channels,
+      'body': body,
+    });
+  }
+
+  /// Send blast (server resolves recipients based on groupIds/contactIds)
+  Future<Map<String, dynamic>> send({
+    required List<String> groupIds,
+    List<String> contactIds = const [],
+    required List<String> channels,
+    required String body,
+    required Map<String, dynamic> quote,
+  }) {
+    return client.postJson('/v1/blasts/send', {
+      'groupIds': groupIds,
+      'contactIds': contactIds,
+      'channels': channels,
+      'body': body,
+      'quote': quote,
+    });
+  }
+}
+
+

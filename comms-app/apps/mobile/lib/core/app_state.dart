@@ -1,3 +1,4 @@
+// comms-app/apps/mobile/lib/core/app_state.dart
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -6,6 +7,7 @@ import '../models/contact.dart';
 import '../models/message.dart';
 import '../models/blast.dart';
 import '../services/api_client.dart';
+import '../services/groups_api.dart';
 
 class AppState extends ChangeNotifier {
   // Auth / config
@@ -36,7 +38,6 @@ class AppState extends ChangeNotifier {
     token = t;
 
     final prefs = await SharedPreferences.getInstance();
-
     if (t == null) {
       await prefs.remove('token');
     } else {
@@ -73,6 +74,18 @@ class AppState extends ChangeNotifier {
 
       notifyListeners();
     }
+  }
+
+  /// 🔹 Load groups from backend
+  Future<void> loadGroups() async {
+    final api = GroupsApi(this);
+    final data = await api.list();
+
+    groups
+      ..clear()
+      ..addAll(data);
+
+    notifyListeners();
   }
 
   /// Utility used by Create Blast (local UI only)
@@ -114,6 +127,17 @@ class AppState extends ChangeNotifier {
       ),
     );
 
+    notifyListeners();
+  }
+
+  /// Update a single group in memory (used after member save to fix count drift)
+  void upsertGroup(Group g) {
+    final idx = groups.indexWhere((x) => x.id == g.id);
+    if (idx >= 0) {
+      groups[idx] = g;
+    } else {
+      groups.insert(0, g);
+    }
     notifyListeners();
   }
 }
