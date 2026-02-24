@@ -1,14 +1,13 @@
-// comms-app/apps/mobile/lib/ui/screens/groups_screen.dart
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
 import '../colors.dart';
 import 'create_group_screen.dart';
 import 'groups_list_screen.dart';
-// You can wire ManageContactsScreen later once you paste it; for now we keep existing ImportContactsScreen.
 import 'import_contacts_screen.dart';
 
 class GroupsScreen extends StatefulWidget {
   final AppState appState;
+
   const GroupsScreen({super.key, required this.appState});
 
   @override
@@ -88,12 +87,18 @@ class _GroupsScreenState extends State<GroupsScreen> {
             await Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) => CreateGroupScreen(appState: widget.appState),
+                builder: (_) => CreateGroupScreen(
+                  appState: widget.appState,
+                  type: "snapshot",
+                ),
               ),
             );
             _refresh();
           },
-          child: const Text('Create Group', style: TextStyle(fontWeight: FontWeight.w800)),
+          child: const Text(
+            'Create Group',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
         ),
         const SizedBox(height: 10),
         FilledButton(
@@ -101,22 +106,32 @@ class _GroupsScreenState extends State<GroupsScreen> {
             await Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) => CreateGroupScreen(appState: widget.appState, type: "meta"),
+                builder: (_) => CreateGroupScreen(
+                  appState: widget.appState,
+                  type: "meta",
+                ),
               ),
             );
             _refresh();
           },
-          child: const Text('Create Meta Group', style: TextStyle(fontWeight: FontWeight.w800)),
+          child: const Text(
+            'Create Meta Group',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
         ),
         const SizedBox(height: 10),
         OutlinedButton(
           onPressed: () => Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => ImportContactsScreen(appState: widget.appState),
+              builder: (_) =>
+                  ImportContactsScreen(appState: widget.appState),
             ),
           ),
-          child: const Text('Manage Contacts', style: TextStyle(fontWeight: FontWeight.w800)),
+          child: const Text(
+            'Manage Contacts',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
         ),
       ],
     );
