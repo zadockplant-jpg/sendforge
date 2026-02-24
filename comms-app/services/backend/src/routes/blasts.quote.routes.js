@@ -7,7 +7,7 @@ import {
   INTL_CAPS_CENTS,
   INTL_MULTIPLIER,
   isDomesticUSCA,
-} from "../config/pricingpolicy.js";
+} from "../config/pricingpolicytmp.js";
 import { parseE164CountryCode } from "../services/phone_country.service.js";
 import { getIntlTier } from "../services/intl_tier.service.js";
 import { getTwilioSmsUnitPriceUSD } from "../services/twilio_pricing.service.js";
