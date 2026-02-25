@@ -67,6 +67,30 @@ class ApiClient {
 
     return (decoded as Map<String, dynamic>);
   }
+
+  // ✅ Added to match backend PUT routes
+  Future<Map<String, dynamic>> putJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.put(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
 }
 
 class ApiError implements Exception {

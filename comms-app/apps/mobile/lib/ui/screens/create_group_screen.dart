@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
-import '../../models/group.dart';
+import '../../services/groups_api.dart';
 import '../colors.dart';
 
 class CreateGroupScreen extends StatefulWidget {
@@ -14,10 +14,12 @@ class CreateGroupScreen extends StatefulWidget {
   });
 
   @override
-  State<CreateGroupScreen> createState() => _CreateGroupScreenState();
+  State<CreateGroupScreen> createState() =>
+      _CreateGroupScreenState();
 }
 
-class _CreateGroupScreenState extends State<CreateGroupScreen> {
+class _CreateGroupScreenState
+    extends State<CreateGroupScreen> {
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
 
@@ -33,15 +35,16 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
     });
 
     try {
-      final group = Group(
-        id: UniqueKey().toString(),
+      final groupsApi =
+          GroupsApi(widget.appState);
+
+      await groupsApi.create(
         name: _nameCtrl.text.trim(),
         type: widget.type,
-        memberCount: 0,
-        members: const [],
       );
 
-      widget.appState.upsertGroup(group);
+      // Reload from backend
+      await widget.appState.loadGroups();
 
       if (mounted) Navigator.pop(context);
     } catch (e) {
@@ -57,7 +60,8 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(isMeta ? "Create Meta Group" : "Create Group"),
+        title: Text(
+            isMeta ? "Create Meta Group" : "Create Group"),
         backgroundColor: SFColors.primaryBlue,
         foregroundColor: Colors.white,
       ),
@@ -68,18 +72,20 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             children: [
               if (_err != null)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
+                  padding:
+                      const EdgeInsets.only(bottom: 12),
                   child: Text(
                     _err!,
-                    style: const TextStyle(color: Colors.red),
+                    style: const TextStyle(
+                        color: Colors.red),
                   ),
                 ),
-
               Form(
                 key: _formKey,
                 child: TextFormField(
                   controller: _nameCtrl,
-                  decoration: const InputDecoration(
+                  decoration:
+                      const InputDecoration(
                     labelText: "Group Name",
                   ),
                   validator: (v) =>
@@ -88,16 +94,19 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                           : null,
                 ),
               ),
-
               const SizedBox(height: 20),
-
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
-                  onPressed: _saving ? null : _save,
+                  onPressed:
+                      _saving ? null : _save,
                   child: Text(
-                    _saving ? "Saving..." : "Create",
-                    style: const TextStyle(fontWeight: FontWeight.w800),
+                    _saving
+                        ? "Saving..."
+                        : "Create",
+                    style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w800),
                   ),
                 ),
               ),
