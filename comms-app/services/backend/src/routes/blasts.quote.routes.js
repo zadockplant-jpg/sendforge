@@ -5,7 +5,7 @@ import { requireAuth } from "../middleware/auth.js";
 import {
   PLAN,
   INTL_CAPS_CENTS,
-  INTL_MULTIPLIER,
+  INTL_MULTIPLIERS,
   isDomesticUSCA,
 } from "../config/pricingpolicy.js";
 import { parseE164CountryCode } from "../services/phone_country.service.js";
@@ -145,7 +145,10 @@ blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
 
     for (const [cc, count] of countryCounts.entries()) {
       const tier = getIntlTier(cc);
-      const mult = tier === "tier1" ? INTL_MULTIPLIER.tier1 : INTL_MULTIPLIER.tier2;
+      const mult =
+  tier === "tier1"
+    ? INTL_MULTIPLIERS.tier1
+    : INTL_MULTIPLIERS.tier2;
 
       const unitUsd = await getTwilioSmsUnitPriceUSD(cc);
       const unitCents = Math.round(unitUsd * 100);

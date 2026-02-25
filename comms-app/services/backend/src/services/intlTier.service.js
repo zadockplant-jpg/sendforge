@@ -1,4 +1,4 @@
-import { INTL_MULTIPLIER } from "../config/pricingpolicy.js";
+import { INTL_MULTIPLIERS } from "../config/pricingpolicy.js";
 
 // Keep this simple; expand later.
 const TIER1 = new Set(["GB", "IE", "FR", "DE", "ES", "IT", "NL", "BE", "SE", "NO", "DK", "FI", "AT", "CH", "PT", "AU", "NZ"]);
