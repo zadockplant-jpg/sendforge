@@ -177,10 +177,12 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
       const validIds = validContacts.map((c) => c.id);
 
       const rows = validIds.map((contactId) => ({
-        group_id: groupId,
-        contact_id: contactId,
-        created_at: db.fn.now(),
-      }));
+  id: crypto.randomUUID(),
+  user_id: userId,
+  group_id: groupId,
+  contact_id: contactId,
+  created_at: db.fn.now(),
+}));
 
       if (rows.length) await db("group_members").insert(rows);
     }
