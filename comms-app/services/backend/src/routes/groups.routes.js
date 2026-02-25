@@ -136,7 +136,12 @@ groupsRouter.post("/", requireAuth, async (req, res) => {
 
     return res.json({ ok: true, group: { id, name, type, memberCount: 0, members: [] } });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "group_create_failed" });
+  console.error("GROUP CREATE ERROR:", e);
+  return res.status(500).json({
+    ok: false,
+    error: e.message || "group_create_failed"
+  });
+
   }
 });
 
