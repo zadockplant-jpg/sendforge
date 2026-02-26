@@ -19,18 +19,16 @@ class ContactImportService {
                 'name': c.name,
                 'phone': c.phone,
                 'email': c.email,
-                'organization': c.organization,
               })
           .toList(),
     };
 
-    final response = await api.postJson('/v1/contacts/import', payload);
-    await appState.loadContacts();
-    return response;
-  }
+    final response =
+        await api.postJson('/v1/contacts/import', payload);
 
-  Future<void> deleteContact(String contactId) async {
-    await api.deleteJson('/v1/contacts/$contactId');
+    // 🔹 Immediately refresh contacts from backend
     await appState.loadContacts();
+
+    return response;
   }
 }

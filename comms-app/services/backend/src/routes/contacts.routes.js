@@ -1,56 +1,44 @@
-import { Router } from "express";
-import { db } from "../config/db.js";
-import { requireAuth } from "../middleware/auth.js";
+import express from "express";
+import { importContacts } from "../services/contactImport.service.js";
 
-export const contactsRouter = Router();
+const router = express.Router();
 
 /**
- * GET /v1/contacts
+ * POST /v1/contacts/import
+ * Body:
+ * {
+ *   method: "google" | "csv" | "manual",
+ *   contacts: [{ name, phone, email, sourceMeta? }]
+ * }
  */
-contactsRouter.get("/", requireAuth, async (req, res) => {
+router.post("/import", async (req, res) => {
   try {
-    const userId = req.user?.sub;
-    if (!userId) return res.status(401).json({ error: "missing_token" });
+   const userId = req.user?.sub;
+if (!userId) {
+  return res.status(401).json({ error: "missing_token" });
+}
+    const { method, contacts } = req.body || {};
 
-    const rows = await db("contacts")
-      .select(
-        "id",
-        "name",
-        db.raw("COALESCE(phone_e164, phone) as phone"),
-        "email",
-        "organization"
-      )
-      .where({ user_id: userId })
-      .orderBy("created_at", "desc");
+    if (!Array.isArray(contacts)) {
+      throw new Error("contacts must be an array");
+    }
 
-    return res.json({ ok: true, contacts: rows });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "contacts_list_failed" });
+    const result = await importContacts({
+      userId,
+      method,
+      contacts,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      ...result,
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err?.message || String(err),
+    });
   }
 });
 
-/**
- * DELETE /v1/contacts/:id
- */
-contactsRouter.delete("/:id", requireAuth, async (req, res) => {
-  try {
-    const userId = req.user?.sub;
-    if (!userId) return res.status(401).json({ error: "missing_token" });
-
-    const id = String(req.params.id);
-
-    const row = await db("contacts")
-      .where({ id, user_id: userId })
-      .first();
-
-    if (!row) return res.status(404).json({ error: "contact_not_found" });
-
-    // also clear group_members rows via FK? if no FK, do it explicitly:
-    await db("group_members").where({ contact_id: id }).del();
-    await db("contacts").where({ id }).del();
-
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "contact_delete_failed" });
-  }
-});
+export default router;

@@ -10,14 +10,6 @@ class ApiClient {
 
   ApiClient({required this.baseUrl});
 
-  Future<void> setToken(String token) async {
-    await _storage.write(key: _tokenKey, value: token);
-  }
-
-  Future<void> clearToken() async {
-    await _storage.delete(key: _tokenKey);
-  }
-
   Future<String?> getToken() async {
     return await _storage.read(key: _tokenKey);
   }
@@ -36,60 +28,75 @@ class ApiClient {
     return h;
   }
 
-  Uri _u(String path) => Uri.parse('$baseUrl$path');
-
-  Map<String, dynamic> _decode(http.Response res) {
-    if (res.body.isEmpty) return <String, dynamic>{};
-    final decoded = jsonDecode(res.body);
-    if (decoded is Map<String, dynamic>) return decoded;
-    return <String, dynamic>{'data': decoded};
-  }
-
-  Never _throw(http.Response res, Map<String, dynamic> decoded) {
-    final msg = decoded['error']?.toString() ?? res.body;
-    throw ApiError(message: msg);
-  }
-
   Future<Map<String, dynamic>> getJson(String path) async {
-    final res = await http.get(_u(path), headers: await _headers());
-    final decoded = _decode(res);
-    if (res.statusCode >= 400) _throw(res, decoded);
-    return decoded;
+    final uri = Uri.parse('$baseUrl$path');
+    final res = await http.get(uri, headers: await _headers());
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
   }
 
-  Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body) async {
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
     final res = await http.post(
-      _u(path),
+      uri,
       headers: await _headers(),
       body: jsonEncode(body),
     );
-    final decoded = _decode(res);
-    if (res.statusCode >= 400) _throw(res, decoded);
-    return decoded;
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
   }
 
-  Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body) async {
+  // ✅ Added to match backend PUT routes
+  Future<Map<String, dynamic>> putJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
     final res = await http.put(
-      _u(path),
+      uri,
       headers: await _headers(),
       body: jsonEncode(body),
     );
-    final decoded = _decode(res);
-    if (res.statusCode >= 400) _throw(res, decoded);
-    return decoded;
-  }
 
-  Future<Map<String, dynamic>> deleteJson(String path) async {
-    final res = await http.delete(_u(path), headers: await _headers());
-    final decoded = _decode(res);
-    if (res.statusCode >= 400) _throw(res, decoded);
-    return decoded;
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
   }
 }
 
 class ApiError implements Exception {
   final String message;
   ApiError({required this.message});
+
   @override
   String toString() => message;
 }

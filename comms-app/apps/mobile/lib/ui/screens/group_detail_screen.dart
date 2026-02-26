@@ -1,10 +1,14 @@
+// comms-app/apps/mobile/lib/ui/screens/group_detail_screen.dart
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
 import '../../core/app_state.dart';
 import '../../models/group.dart';
 import '../../models/contact.dart';
 import '../../services/groups_api.dart';
-import '../colors.dart';
 import '../components/compact_contact_tile.dart';
+import '../colors.dart';
 
 class GroupDetailScreen extends StatefulWidget {
   final AppState appState;
@@ -21,241 +25,250 @@ class GroupDetailScreen extends StatefulWidget {
 }
 
 class _GroupDetailScreenState extends State<GroupDetailScreen> {
-  bool busy = false;
-  String? err;
+  late Set<String> _selectedMemberIds;
+  final TextEditingController _search = TextEditingController();
+  bool _saving = false;
 
-  // snapshot selection
-  final Set<String> selectedContactIds = {};
+  // Range selection support
+  int? _lastTappedIndex; // for desktop shift-select
+  bool _shiftDown = false;
+  final FocusNode _keyboardFocus = FocusNode();
 
-  // meta selection
-  final Set<String> selectedChildGroupIds = {};
-
-  GroupsApi get api => GroupsApi(widget.appState);
+  // Mobile range mode
+  int? _mobileRangeAnchor;
+  bool get _inMobileRangeMode => _mobileRangeAnchor != null;
 
   @override
   void initState() {
     super.initState();
+    _selectedMemberIds = widget.group.members.map((m) => m.id).toSet();
+  }
 
-    if (widget.group.type == 'meta') {
-      _loadMetaLinks();
-    } else {
-      // Seed selection from current members list
-      for (final c in widget.group.members) {
-        if (c.id.isNotEmpty) selectedContactIds.add(c.id);
+  @override
+  void dispose() {
+    _search.dispose();
+    _keyboardFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (widget.group.type == "meta") {
+      // Meta group membership is dynamic; member editing happens via meta-link builder (next pass).
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Meta groups are dynamic. Edit linked groups instead.")),
+      );
+      return;
+    }
+
+    setState(() => _saving = true);
+
+    try {
+      final api = GroupsApi(widget.appState);
+      final updated = await api.updateMembers(
+        widget.group.id,
+        _selectedMemberIds.toList(),
+      );
+
+      // ✅ Fix: update AppState immediately so memberCount updates without leaving screen
+      widget.appState.upsertGroup(updated);
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Save failed: $e")),
+      );
+    }
+  }
+
+  void _toggleSingle(Contact c) {
+    setState(() {
+      if (_selectedMemberIds.contains(c.id)) {
+        _selectedMemberIds.remove(c.id);
+      } else {
+        _selectedMemberIds.add(c.id);
       }
-    }
+    });
   }
 
-  Future<void> _loadMetaLinks() async {
-    setState(() {
-      busy = true;
-      err = null;
-    });
+  void _toggleRange(List<Contact> contacts, int a, int b, bool select) {
+    final start = a < b ? a : b;
+    final end = a < b ? b : a;
 
-    try {
-      final children = await api.getMetaLinks(widget.group.id);
-      selectedChildGroupIds
-        ..clear()
-        ..addAll(children.map((g) => g.id));
-    } catch (e) {
-      err = e.toString();
-    } finally {
-      if (mounted) {
-        setState(() => busy = false);
+    setState(() {
+      for (int i = start; i <= end; i++) {
+        final id = contacts[i].id;
+        if (select) {
+          _selectedMemberIds.add(id);
+        } else {
+          _selectedMemberIds.remove(id);
+        }
       }
-    }
-  }
-
-  Future<void> _saveSnapshotMembers() async {
-    setState(() {
-      busy = true;
-      err = null;
     });
-
-    try {
-      await api.updateMembers(widget.group.id, selectedContactIds.toList());
-      await widget.appState.loadGroups();
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      setState(() => err = e.toString());
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
-  }
-
-  Future<void> _saveMetaLinks() async {
-    setState(() {
-      busy = true;
-      err = null;
-    });
-
-    try {
-      await api.updateMetaLinks(widget.group.id, selectedChildGroupIds.toList());
-      await widget.appState.loadGroups();
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      setState(() => err = e.toString());
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final isMeta = widget.group.type == 'meta';
+    final allContacts = widget.appState.contacts;
+    final query = _search.text.toLowerCase();
+
+    final contacts = allContacts.where((c) {
+      return c.name.toLowerCase().contains(query) ||
+          (c.organization ?? '').toLowerCase().contains(query);
+    }).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    final header = AppBar(
+      title: Text(widget.group.name),
+      backgroundColor: SFColors.primaryBlue,
+      foregroundColor: Colors.white,
+    );
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(isMeta ? "Meta Group" : "Group"),
-        backgroundColor: SFColors.primaryBlue,
-        foregroundColor: Colors.white,
-        actions: [
-          TextButton(
-            onPressed: busy ? null : (isMeta ? _saveMetaLinks : _saveSnapshotMembers),
-            child: const Text(
-              "Save",
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900),
-            ),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: SafeArea(
+      appBar: header,
+      body: RawKeyboardListener(
+        focusNode: _keyboardFocus,
+        autofocus: true,
+        onKey: (evt) {
+          final isShift = evt.logicalKey == LogicalKeyboardKey.shiftLeft ||
+              evt.logicalKey == LogicalKeyboardKey.shiftRight;
+          if (isShift) {
+            setState(() {
+              _shiftDown = evt is RawKeyDownEvent;
+            });
+          }
+        },
         child: Column(
           children: [
-            if (err != null)
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(err!, style: const TextStyle(color: Colors.red)),
+            // Search + Save row (always up top)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _search,
+                      decoration: InputDecoration(
+                        hintText: "Search name or organization",
+                        isDense: true,
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  FilledButton(
+                    onPressed: _saving ? null : _save,
+                    child: _saving
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text("Save", style: TextStyle(fontWeight: FontWeight.w800)),
+                  ),
+                ],
               ),
+            ),
 
-            if (busy)
-              const Padding(
-                padding: EdgeInsets.all(12),
-                child: LinearProgressIndicator(),
+            if (_inMobileRangeMode)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.select_all, size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        "Range select: tap another contact to select the range. Tap again to exit.",
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => setState(() => _mobileRangeAnchor = null),
+                      child: const Text("Cancel"),
+                    ),
+                  ],
+                ),
               ),
 
             Expanded(
-              child: isMeta ? _buildMetaBody() : _buildSnapshotBody(),
+              child: ListView.builder(
+                itemCount: contacts.length,
+                itemBuilder: (context, i) {
+                  final c = contacts[i];
+                  final selected = _selectedMemberIds.contains(c.id);
+
+                  return CompactContactTile(
+                    contact: c,
+                    selected: selected,
+
+                    // Tap on row toggles; range logic applies on desktop shift, or mobile anchor mode
+                    onToggle: () {
+                      // Desktop/web: Shift selects range
+                      final canShiftRange = (kIsWeb || !defaultTargetPlatform.toString().contains("android")) && _shiftDown;
+
+                      if (canShiftRange && _lastTappedIndex != null) {
+                        final select = !selected; // make range match current action
+                        _toggleRange(contacts, _lastTappedIndex!, i, select);
+                      } else if (_inMobileRangeMode && _mobileRangeAnchor != null) {
+                        final anchor = _mobileRangeAnchor!;
+                        final select = true; // mobile spec: selecting a range (we can add deselect-range later)
+                        _toggleRange(contacts, anchor, i, select);
+                        _mobileRangeAnchor = null;
+                      } else {
+                        _toggleSingle(c);
+                      }
+
+                      _lastTappedIndex = i;
+                    },
+
+                    // Mobile: long press on name/row sets anchor
+                    onLongPressRow: () {
+                      setState(() {
+                        _mobileRangeAnchor = i;
+                        _lastTappedIndex = i;
+                      });
+                    },
+
+                    // Org tap selects all in org (ONLY for current group)
+                    onSelectOrganization: () {
+                      final org = c.organization;
+                      if (org == null || org.isEmpty) return;
+
+                      final orgContacts = allContacts
+                          .where((x) => x.organization == org)
+                          .map((x) => x.id);
+
+                      setState(() {
+                        _selectedMemberIds.addAll(orgContacts);
+                      });
+                    },
+
+                    // Org long press = deselect all in org
+                    onDeselectOrganization: () {
+                      final org = c.organization;
+                      if (org == null || org.isEmpty) return;
+
+                      final orgContacts = allContacts
+                          .where((x) => x.organization == org)
+                          .map((x) => x.id);
+
+                      setState(() {
+                        _selectedMemberIds.removeAll(orgContacts);
+                      });
+                    },
+                  );
+                },
+              ),
             ),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildSnapshotBody() {
-    final all = widget.appState.contacts;
-
-    if (all.isEmpty) {
-      return const Center(child: Text("No contacts yet."));
-    }
-
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(10, 10, 10, 14),
-      itemCount: all.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 6),
-      itemBuilder: (_, i) {
-        final c = all[i];
-        final sel = selectedContactIds.contains(c.id);
-
-        return Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: Colors.black.withOpacity(0.06)),
-          ),
-          child: CompactContactTile(
-            contact: c,
-            selected: sel,
-            onToggleSelected: () {
-              setState(() {
-                if (sel) {
-                  selectedContactIds.remove(c.id);
-                } else {
-                  selectedContactIds.add(c.id);
-                }
-              });
-            },
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildMetaBody() {
-    // Meta group can only select existing groups (not contacts).
-    // Exclude self to prevent direct self-cycle. (We still allow meta nesting.)
-    final groups = widget.appState.groups.where((g) => g.id != widget.group.id).toList();
-
-    if (groups.isEmpty) {
-      return const Center(child: Text("No groups to link yet."));
-    }
-
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(10, 10, 10, 14),
-      itemCount: groups.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 6),
-      itemBuilder: (_, i) {
-        final g = groups[i];
-        final sel = selectedChildGroupIds.contains(g.id);
-
-        return InkWell(
-          onTap: () {
-            setState(() {
-              if (sel) {
-                selectedChildGroupIds.remove(g.id);
-              } else {
-                selectedChildGroupIds.add(g.id);
-              }
-            });
-          },
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Colors.black.withOpacity(0.06)),
-            ),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  radius: 18,
-                  child: Text(
-                    (g.name.isNotEmpty ? g.name.substring(0, 1) : "?").toUpperCase(),
-                    style: const TextStyle(fontWeight: FontWeight.w900),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    g.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w800),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  g.type == 'meta' ? 'Meta' : 'Group',
-                  style: const TextStyle(color: Colors.black54, fontWeight: FontWeight.w700, fontSize: 12),
-                ),
-                const SizedBox(width: 8),
-                Checkbox(value: sel, onChanged: (_) {
-                  setState(() {
-                    if (sel) {
-                      selectedChildGroupIds.remove(g.id);
-                    } else {
-                      selectedChildGroupIds.add(g.id);
-                    }
-                  });
-                }),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 }
