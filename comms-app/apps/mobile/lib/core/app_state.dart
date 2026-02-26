@@ -1,143 +1,86 @@
-// comms-app/apps/mobile/lib/core/app_state.dart
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../models/group.dart';
 import '../models/contact.dart';
-import '../models/message.dart';
-import '../models/blast.dart';
+import '../models/group.dart';
 import '../services/api_client.dart';
-import '../services/groups_api.dart';
 
 class AppState extends ChangeNotifier {
-  // Auth / config
-  String? token;
-  String baseUrl = 'https://comms-app-1wo0.onrender.com';
+  final String baseUrl;
 
-  // Identity / billing (UI only for now)
-  String userId = 'local-user';
-  String planTier = 'free';
+  AppState({required this.baseUrl});
 
-  // Core data
-  final List<Group> groups = [];
-  final List<Contact> contacts = [];
+  List<Contact> contacts = [];
+  List<Group> groups = [];
 
-  final List<Message> threads = [];
-  final Map<String, List<Message>> messagesByThread = {};
+  bool contactsLoaded = false;
+  bool groupsLoaded = false;
 
-  BlastDraft? activeBlast;
+  ApiClient get api => ApiClient(baseUrl: baseUrl);
 
-  // ------------------------
-
-  void setBaseUrl(String v) {
-    baseUrl = v;
-    notifyListeners();
+  Future<bool> hasToken() async {
+    final t = await api.getToken();
+    return t != null && t.isNotEmpty;
   }
 
-  Future<void> setToken(String? t) async {
-    token = t;
-
-    final prefs = await SharedPreferences.getInstance();
-    if (t == null) {
-      await prefs.remove('token');
-    } else {
-      await prefs.setString('token', t);
-    }
-
-    notifyListeners();
-  }
-
-  void setPlanTier(String tier) {
-    planTier = tier;
-    notifyListeners();
-  }
-
-  /// 🔹 Load contacts from backend
   Future<void> loadContacts() async {
-    final api = ApiClient(baseUrl: baseUrl);
-    final response = await api.getJson('/v1/contacts');
+    final res = await api.getJson('/v1/contacts');
 
-    if (response['contacts'] is List) {
-      contacts.clear();
+    final items = (res['contacts'] as List? ?? []);
+    contacts = items.map((c) {
+      return Contact(
+        id: (c['id'] ?? '').toString(),
+        name: (c['name'] ?? '').toString(),
+        phone: c['phone']?.toString(),
+        email: c['email']?.toString(),
+        organization: c['organization']?.toString(),
+      );
+    }).toList();
 
-      for (final item in response['contacts']) {
-        contacts.add(
-          Contact(
-            id: item['id'] ?? '',
-            name: item['name'] ?? 'Unknown',
-            phone: item['phone'],
-            email: item['email'],
-            organization: item['organization'],
-          ),
-        );
-      }
-
-      notifyListeners();
-    }
+    contactsLoaded = true;
+    notifyListeners();
   }
 
-  /// 🔹 Load groups from backend
   Future<void> loadGroups() async {
-    final api = GroupsApi(this);
-    final data = await api.list();
+    final res = await api.getJson('/v1/groups');
 
-    groups
-      ..clear()
-      ..addAll(data);
+    final items = (res['groups'] as List? ?? []);
+    groups = items.map((g) {
+      final membersJson = (g['members'] as List? ?? []);
+      final members = membersJson.map((c) {
+        return Contact(
+          id: (c['id'] ?? '').toString(),
+          name: (c['name'] ?? 'Unknown').toString(),
+          phone: c['phone']?.toString(),
+          email: c['email']?.toString(),
+          organization: c['organization']?.toString(),
+        );
+      }).toList();
 
+      return Group(
+        id: (g['id'] ?? '').toString(),
+        name: (g['name'] ?? '').toString(),
+        type: (g['type'] ?? 'snapshot').toString(),
+        memberCount: (g['memberCount'] ?? members.length) as int,
+        members: members,
+      );
+    }).toList();
+
+    groupsLoaded = true;
     notifyListeners();
   }
 
-  /// Utility used by Create Blast (local UI only)
-  List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
-    final memberIds = groups
-        .where((g) => groupIds.contains(g.id))
-        .expand((g) => g.members.map((m) => m.id))
-        .toSet();
-
-    return contacts.where((c) => memberIds.contains(c.id)).toList();
-  }
-
-  /// Adds mock thread when blast queued
-  void addQueuedBlastAsThread({
-    required String blastId,
-    required String body,
-  }) {
-    final now = DateTime.now();
-
-    final root = Message(
-      id: blastId,
-      sender: 'You',
-      body: body,
-      incoming: false,
-      timestamp: now,
-    );
-
-    threads.insert(0, root);
-
-    messagesByThread.putIfAbsent(blastId, () => []);
-    messagesByThread[blastId]!.insert(
-      0,
-      Message(
-        id: '${blastId}_m1',
-        sender: 'You',
-        body: body,
-        incoming: false,
-        timestamp: now,
-      ),
-    );
-
-    notifyListeners();
-  }
-
-  /// Update a single group in memory (used after member save to fix count drift)
-  void upsertGroup(Group g) {
-    final idx = groups.indexWhere((x) => x.id == g.id);
-    if (idx >= 0) {
-      groups[idx] = g;
-    } else {
-      groups.insert(0, g);
+  Group? getGroupById(String id) {
+    try {
+      return groups.firstWhere((g) => g.id == id);
+    } catch (_) {
+      return null;
     }
-    notifyListeners();
+  }
+
+  Contact? getContactById(String id) {
+    try {
+      return contacts.firstWhere((c) => c.id == id);
+    } catch (_) {
+      return null;
+    }
   }
 }

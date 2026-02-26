@@ -1,180 +1,311 @@
 import 'package:flutter/material.dart';
-
 import '../../core/app_state.dart';
 import '../../models/contact.dart';
 import '../../services/api_client.dart';
 import '../../services/contact_import_service.dart';
-import '../../services/csv_parser.dart';
 import '../colors.dart';
-import '../components/sf_card.dart';
 
-class ContactsImportScreen extends StatefulWidget {
+class ImportContactsScreen extends StatefulWidget {
   final AppState appState;
-  const ContactsImportScreen({super.key, required this.appState});
+  const ImportContactsScreen({super.key, required this.appState});
 
   @override
-  State<ContactsImportScreen> createState() => _ContactsImportScreenState();
+  State<ImportContactsScreen> createState() => _ImportContactsScreenState();
 }
 
-class _ContactsImportScreenState extends State<ContactsImportScreen> {
-  List<Contact> _parsed = [];
-  bool _busy = false;
-  String? _status;
+class _ImportContactsScreenState extends State<ImportContactsScreen> {
+  List<Contact> preview = [];
+  bool busy = false;
+  String? err;
 
-  Future<void> _pickCsv() async {
+  int tab = 0; // 0 import, 1 manage
+
+  late final ApiClient api;
+  late final ContactImportService svc;
+
+  @override
+  void initState() {
+    super.initState();
+    api = ApiClient(baseUrl: widget.appState.baseUrl);
+    svc = ContactImportService(api, widget.appState);
+
+    widget.appState.loadContacts();
+  }
+
+  Future<void> _importNow() async {
     setState(() {
-      _status = null;
-      _busy = true;
-      _parsed = [];
+      busy = true;
+      err = null;
     });
 
     try {
-      final contacts = await CsvParser.pickAndParseCsv();
-      setState(() {
-        _parsed = contacts;
-        _status = contacts.isEmpty
-            ? 'No contacts found in that CSV.'
-            : 'Parsed ${contacts.length} contacts. Review then import.';
-      });
+      await svc.importContacts(method: "manual", contacts: preview);
+      setState(() => preview = []);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Imported.")),
+        );
+      }
     } catch (e) {
-      setState(() => _status = 'Error parsing CSV: $e');
+      setState(() => err = e.toString());
     } finally {
-      setState(() => _busy = false);
+      if (mounted) setState(() => busy = false);
     }
   }
 
-  Future<void> _import() async {
-    if (_parsed.isEmpty) {
-      setState(() => _status = 'Pick a CSV first.');
-      return;
-    }
-
+  Future<void> _deleteContact(String id) async {
     setState(() {
-      _status = null;
-      _busy = true;
+      busy = true;
+      err = null;
     });
 
     try {
-      final api = ApiClient(baseUrl: widget.appState.baseUrl);
-      final svc = ContactImportService(api, widget.appState);
-
-
-      final resp = await svc.importContacts(
-        method: 'csv',
-        contacts: _parsed,
-      );
-
-      // Update local state so UI can use contacts immediately
-      widget.appState.contacts.addAll(_parsed);
-      widget.appState.notifyListeners();
-
-      final added = resp['added']?.toString() ?? '?';
-      final dupes = resp['duplicates']?.toString() ?? '?';
-      final invalid = resp['invalid']?.toString() ?? '?';
-
-      setState(() {
-        _status = 'Imported ✅  added=$added  duplicates=$dupes  invalid=$invalid';
-      });
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Contacts imported successfully')),
-      );
+      await svc.deleteContact(id);
     } catch (e) {
-      setState(() => _status = 'Import failed: $e');
+      setState(() => err = e.toString());
     } finally {
-      setState(() => _busy = false);
+      if (mounted) setState(() => busy = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final preview = _parsed.take(12).toList();
-
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Import CSV'),
+        title: const Text("Contacts"),
         backgroundColor: SFColors.primaryBlue,
         foregroundColor: Colors.white,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
+      body: SafeArea(
         child: Column(
           children: [
-            SFCard(
-              title: 'Step 1 — Pick a CSV',
-              subtitle: 'We parse it locally first, then import to your backend.',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+            if (err != null)
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(err!, style: const TextStyle(color: Colors.red)),
+              ),
+
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+              child: Row(
                 children: [
-                  FilledButton(
-                    onPressed: _busy ? null : _pickCsv,
-                    child: Text(_busy ? 'Working…' : 'Pick CSV'),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    _parsed.isEmpty
-                        ? 'No file selected yet.'
-                        : '${_parsed.length} contact(s) parsed.',
-                    style: const TextStyle(fontSize: 12),
+                  Expanded(
+                    child: SegmentedButton<int>(
+                      segments: const [
+                        ButtonSegment(value: 0, label: Text("Import")),
+                        ButtonSegment(value: 1, label: Text("Manage")),
+                      ],
+                      selected: {tab},
+                      onSelectionChanged: (s) => setState(() => tab = s.first),
+                    ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 12),
-            SFCard(
-              title: 'Step 2 — Preview',
-              subtitle: preview.isEmpty ? 'Pick a CSV to preview contacts.' : 'Showing first ${preview.length} items.',
-              child: preview.isEmpty
-                  ? const Text('—')
-                  : Column(
-                      children: preview.map((c) {
-                        final line = [
-                          c.name,
-                          if ((c.phone ?? '').isNotEmpty) c.phone!,
-                          if ((c.email ?? '').isNotEmpty) c.email!,
-                        ].join(' • ');
-                        return ListTile(
-                          dense: true,
-                          title: Text(
-                            line,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        );
-                      }).toList(),
-                    ),
-            ),
-            const SizedBox(height: 12),
-            SFCard(
-              title: 'Step 3 — Import to SendForge',
-              subtitle: 'This calls POST /v1/contacts/import (Render or local backend).',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  FilledButton(
-                    onPressed: _busy ? null : _import,
-                    child: Text(_busy ? 'Importing…' : 'Import to SendForge'),
-                  ),
-                  if (_status != null) ...[
-                    const SizedBox(height: 10),
-                    Text(
-                      _status!,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: _status!.toLowerCase().contains('fail') ||
-                                _status!.toLowerCase().contains('error')
-                            ? Colors.redAccent
-                            : SFColors.textPrimary,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
+
+            if (busy) const LinearProgressIndicator(),
+
+            Expanded(
+              child: tab == 0 ? _buildImport() : _buildManage(),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildImport() {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        children: [
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              "Quick add (manual preview)",
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ),
+          const SizedBox(height: 10),
+
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      final c = await showDialog<Contact>(
+                        context: context,
+                        builder: (_) => const _AddContactDialog(),
+                      );
+                      if (c != null) setState(() => preview.add(c));
+                    },
+              child: const Text("Add to preview"),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
+          Expanded(
+            child: preview.isEmpty
+                ? const Center(child: Text("No preview contacts yet."))
+                : ListView.separated(
+                    itemCount: preview.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (_, i) {
+                      final c = preview[i];
+                      return Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.black.withOpacity(0.06)),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                c.name,
+                                style: const TextStyle(fontWeight: FontWeight.w800),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: busy ? null : () => setState(() => preview.removeAt(i)),
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+
+          const SizedBox(height: 10),
+
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: busy || preview.isEmpty ? null : _importNow,
+              child: const Text("Import now"),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildManage() {
+    final contacts = widget.appState.contacts;
+
+    if (contacts.isEmpty) {
+      return const Center(child: Text("No contacts yet."));
+    }
+
+    return RefreshIndicator(
+      onRefresh: widget.appState.loadContacts,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 14),
+        itemCount: contacts.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 6),
+        itemBuilder: (_, i) {
+          final c = contacts[i];
+          final org = (c.organization ?? '').trim();
+
+          return Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.black.withOpacity(0.06)),
+            ),
+            child: ListTile(
+              dense: true,
+              title: Text(c.name, style: const TextStyle(fontWeight: FontWeight.w800)),
+              subtitle: Text(
+                [
+                  if (org.isNotEmpty) org,
+                  if ((c.phone ?? '').trim().isNotEmpty) c.phone!,
+                  if ((c.email ?? '').trim().isNotEmpty) c.email!,
+                ].join(" • "),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                onPressed: busy
+                    ? null
+                    : () async {
+                        final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (_) => AlertDialog(
+                            title: const Text("Delete contact?"),
+                            content: Text("Delete ${c.name}?"),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+                              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text("Delete")),
+                            ],
+                          ),
+                        );
+                        if (ok == true) {
+                          await _deleteContact(c.id);
+                        }
+                      },
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _AddContactDialog extends StatefulWidget {
+  const _AddContactDialog();
+
+  @override
+  State<_AddContactDialog> createState() => _AddContactDialogState();
+}
+
+class _AddContactDialogState extends State<_AddContactDialog> {
+  final _name = TextEditingController();
+  final _phone = TextEditingController();
+  final _email = TextEditingController();
+  final _org = TextEditingController();
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text("Add Contact"),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(controller: _name, decoration: const InputDecoration(labelText: "Name")),
+          TextField(controller: _org, decoration: const InputDecoration(labelText: "Organization")),
+          TextField(controller: _phone, decoration: const InputDecoration(labelText: "Phone")),
+          TextField(controller: _email, decoration: const InputDecoration(labelText: "Email")),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        FilledButton(
+          onPressed: () {
+            final name = _name.text.trim();
+            if (name.isEmpty) return;
+
+            Navigator.pop(
+              context,
+              Contact(
+                id: "",
+                name: name,
+                phone: _phone.text.trim().isEmpty ? null : _phone.text.trim(),
+                email: _email.text.trim().isEmpty ? null : _email.text.trim(),
+                organization: _org.text.trim().isEmpty ? null : _org.text.trim(),
+              ),
+            );
+          },
+          child: const Text("Add"),
+        ),
+      ],
     );
   }
 }

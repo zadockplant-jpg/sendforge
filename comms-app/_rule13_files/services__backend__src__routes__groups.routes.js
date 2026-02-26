@@ -1,3 +1,4 @@
+// comms-app/services/backend/src/routes/groups.routes.js
 import { Router } from "express";
 import crypto from "crypto";
 import { db } from "../config/db.js";
@@ -8,7 +9,11 @@ export const groupsRouter = Router();
 /**
  * Helpers
  */
+
 async function resolveSnapshotGroupIds(userId, groupIds) {
+  // Returns DISTINCT snapshot group IDs including:
+  // - any selected snapshot groups
+  // - any snapshot descendants of selected meta groups (meta_group_links recursion)
   const rows = await db.raw(
     `
     WITH RECURSIVE descendants AS (
@@ -36,6 +41,7 @@ async function resolveSnapshotGroupIds(userId, groupIds) {
 }
 
 async function resolveContactsForGroup(userId, groupId) {
+  // Decide if group is snapshot or meta
   const g = await db("groups").where({ id: groupId, user_id: userId }).first();
   if (!g) return null;
 
@@ -52,16 +58,11 @@ async function resolveContactsForGroup(userId, groupId) {
 
   const rows = await db("group_members as gm")
     .join("contacts as c", "c.id", "gm.contact_id")
-    .select(
-      "c.id",
-      "c.name",
-      db.raw("COALESCE(c.phone_e164, c.phone) as phone"),
-      "c.email",
-      "c.organization"
-    )
+    .select("c.id", "c.name", "c.phone_e164 as phone", "c.email", "c.organization")
     .where("c.user_id", userId)
     .whereIn("gm.group_id", snapshotIds);
 
+  // de-dupe contacts across overlapping snapshot groups in meta groups
   const seen = new Set();
   const out = [];
   for (const c of rows) {
@@ -75,6 +76,8 @@ async function resolveContactsForGroup(userId, groupId) {
 
 /**
  * GET /v1/groups
+ * Auth required
+ * Returns groups with members (for now) + memberCount.
  */
 groupsRouter.get("/", requireAuth, async (req, res) => {
   try {
@@ -82,7 +85,7 @@ groupsRouter.get("/", requireAuth, async (req, res) => {
     if (!userId) return res.status(401).json({ error: "missing_token" });
 
     const groups = await db("groups")
-      .select("id", "name", "type")
+      .select("id", "name", "type", "avatar_key")
       .where({ user_id: userId })
       .orderBy("created_at", "desc");
 
@@ -94,6 +97,7 @@ groupsRouter.get("/", requireAuth, async (req, res) => {
         id: g.id,
         name: g.name,
         type: g.type || "snapshot",
+        avatarKey: g.avatar_key,
         memberCount: contacts.length,
         members: contacts,
       });
@@ -113,7 +117,7 @@ groupsRouter.post("/", requireAuth, async (req, res) => {
   try {
     const userId = req.user?.sub;
     if (!userId) return res.status(401).json({ error: "missing_token" });
-
+    const avatarKey = req.body?.avatarKey ?? null;
     const name = String(req.body?.name ?? "").trim();
     const type = String(req.body?.type ?? "snapshot");
 
@@ -133,7 +137,12 @@ groupsRouter.post("/", requireAuth, async (req, res) => {
 
     return res.json({ ok: true, group: { id, name, type, memberCount: 0, members: [] } });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "group_create_failed" });
+  console.error("GROUP CREATE ERROR:", e);
+  return res.status(500).json({
+    ok: false,
+    error: e.message || "group_create_failed"
+  });
+
   }
 });
 
@@ -156,9 +165,11 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
     const type = g.type || "snapshot";
     if (type !== "snapshot") return res.status(400).json({ error: "meta_group_membership_is_dynamic" });
 
+    // Replace membership
     await db("group_members").where({ group_id: groupId }).del();
 
     if (memberIds.length) {
+      // Only allow contacts owned by user
       const validContacts = await db("contacts")
         .select("id")
         .where({ user_id: userId })
@@ -167,10 +178,13 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
       const validIds = validContacts.map((c) => c.id);
 
       const rows = validIds.map((contactId) => ({
-        group_id: groupId,
-        contact_id: contactId,
-        created_at: db.fn.now(),
-      }));
+  id: crypto.randomUUID(),
+  user_id: userId,
+  group_id: groupId,
+  avatar_key: avatarKey,
+  contact_id: contactId,
+  created_at: db.fn.now(),
+}));
 
       if (rows.length) await db("group_members").insert(rows);
     }
@@ -182,6 +196,7 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
         id: g.id,
         name: g.name,
         type,
+        avatarKey,
         memberCount: resolved?.contacts?.length || 0,
         members: resolved?.contacts || [],
       },
@@ -195,6 +210,7 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
  * PUT /v1/groups/:id/meta-links
  * Meta groups only.
  * Body: { childGroupIds: ["groupId", ...] }
+ * Allows meta groups containing other meta groups.
  */
 groupsRouter.put("/:id/meta-links", requireAuth, async (req, res) => {
   try {
@@ -208,11 +224,13 @@ groupsRouter.put("/:id/meta-links", requireAuth, async (req, res) => {
     if (!parent) return res.status(404).json({ error: "group_not_found" });
     if ((parent.type || "snapshot") !== "meta") return res.status(400).json({ error: "not_a_meta_group" });
 
+    // Ensure all children exist and belong to user
     const children = childGroupIds.length
       ? await db("groups").select("id").where({ user_id: userId }).whereIn("id", childGroupIds)
       : [];
     const validChildIds = children.map((c) => c.id);
 
+    // Replace links
     await db("meta_group_links").where({ parent_group_id: parentId }).del();
 
     if (validChildIds.length) {
