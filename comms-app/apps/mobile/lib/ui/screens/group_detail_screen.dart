@@ -1,8 +1,14 @@
+// comms-app/apps/mobile/lib/ui/screens/group_detail_screen.dart
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
 import '../../core/app_state.dart';
 import '../../models/group.dart';
 import '../../models/contact.dart';
 import '../../services/groups_api.dart';
+import '../components/compact_contact_tile.dart';
+import '../colors.dart';
 
 class GroupDetailScreen extends StatefulWidget {
   final AppState appState;
@@ -15,221 +21,253 @@ class GroupDetailScreen extends StatefulWidget {
   });
 
   @override
-  State<GroupDetailScreen> createState() =>
-      _GroupDetailScreenState();
+  State<GroupDetailScreen> createState() => _GroupDetailScreenState();
 }
 
-class _GroupDetailScreenState
-    extends State<GroupDetailScreen> {
+class _GroupDetailScreenState extends State<GroupDetailScreen> {
+  late Set<String> _selectedMemberIds;
+  final TextEditingController _search = TextEditingController();
+  bool _saving = false;
 
-  final Set<String> selectedIds = {};
-  final Set<String> selectedGroupIds = {};
+  // Range selection support
+  int? _lastTappedIndex; // for desktop shift-select
+  bool _shiftDown = false;
+  final FocusNode _keyboardFocus = FocusNode();
 
-  bool saving = false;
+  // Mobile range mode
+  int? _mobileRangeAnchor;
+  bool get _inMobileRangeMode => _mobileRangeAnchor != null;
 
   @override
   void initState() {
     super.initState();
+    _selectedMemberIds = widget.group.members.map((m) => m.id).toSet();
+  }
 
-    if (widget.group.type == "snapshot") {
-      selectedIds.addAll(
-        widget.group.members.map((m) => m.id),
+  @override
+  void dispose() {
+    _search.dispose();
+    _keyboardFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (widget.group.type == "meta") {
+      // Meta group membership is dynamic; member editing happens via meta-link builder (next pass).
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Meta groups are dynamic. Edit linked groups instead.")),
+      );
+      return;
+    }
+
+    setState(() => _saving = true);
+
+    try {
+      final api = GroupsApi(widget.appState);
+      final updated = await api.updateMembers(
+        widget.group.id,
+        _selectedMemberIds.toList(),
+      );
+
+      // ✅ Fix: update AppState immediately so memberCount updates without leaving screen
+      widget.appState.upsertGroup(updated);
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Save failed: $e")),
       );
     }
   }
 
-  Future<void> _save() async {
-    setState(() => saving = true);
+  void _toggleSingle(Contact c) {
+    setState(() {
+      if (_selectedMemberIds.contains(c.id)) {
+        _selectedMemberIds.remove(c.id);
+      } else {
+        _selectedMemberIds.add(c.id);
+      }
+    });
+  }
 
-    final api = GroupsApi(widget.appState);
+  void _toggleRange(List<Contact> contacts, int a, int b, bool select) {
+    final start = a < b ? a : b;
+    final end = a < b ? b : a;
 
-    if (widget.group.type == "snapshot") {
-      final updated = await api.updateMembers(
-          widget.group.id, selectedIds.toList());
-      widget.appState.upsertGroup(updated);
-    } else {
-      await api.updateMetaLinks(
-          widget.group.id, selectedGroupIds.toList());
-    }
-
-    if (mounted) Navigator.pop(context);
+    setState(() {
+      for (int i = start; i <= end; i++) {
+        final id = contacts[i].id;
+        if (select) {
+          _selectedMemberIds.add(id);
+        } else {
+          _selectedMemberIds.remove(id);
+        }
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    final allContacts = widget.appState.contacts;
+    final query = _search.text.toLowerCase();
+
+    final contacts = allContacts.where((c) {
+      return c.name.toLowerCase().contains(query) ||
+          (c.organization ?? '').toLowerCase().contains(query);
+    }).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    final header = AppBar(
+      title: Text(widget.group.name),
+      backgroundColor: SFColors.primaryBlue,
+      foregroundColor: Colors.white,
+    );
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.group.name),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(12),
-        child: widget.group.type == "snapshot"
-            ? _buildContacts()
-            : _buildMetaGroups(),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: saving ? null : _save,
-        child: const Icon(Icons.save),
-      ),
-    );
-  }
-
-  Widget _buildMetaGroups() {
-    final groups = widget.appState.groups
-        .where((g) => g.id != widget.group.id)
-        .toList();
-
-    return ListView(
-      children: groups.map((g) {
-        final selected =
-            selectedGroupIds.contains(g.id);
-
-        return CheckboxListTile(
-          title: Text(g.name),
-          value: selected,
-          onChanged: (v) {
+      appBar: header,
+      body: RawKeyboardListener(
+        focusNode: _keyboardFocus,
+        autofocus: true,
+        onKey: (evt) {
+          final isShift = evt.logicalKey == LogicalKeyboardKey.shiftLeft ||
+              evt.logicalKey == LogicalKeyboardKey.shiftRight;
+          if (isShift) {
             setState(() {
-              if (v == true) {
-                selectedGroupIds.add(g.id);
-              } else {
-                selectedGroupIds.remove(g.id);
-              }
+              _shiftDown = evt is RawKeyDownEvent;
             });
-          },
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildContacts() {
-    final contacts = widget.appState.contacts;
-
-    return ListView.builder(
-      itemCount: contacts.length,
-      itemBuilder: (context, i) {
-        final c = contacts[i];
-        final selected =
-            selectedIds.contains(c.id);
-
-        return InkWell(
-          onTap: () {
-            setState(() {
-              if (selected) {
-                selectedIds.remove(c.id);
-              } else {
-                selectedIds.add(c.id);
-              }
-            });
-          },
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-                vertical: 6),
-            child: Row(
-              children: [
-
-                GestureDetector(
-                  onTap: () {
-                    showDialog(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        title: Text(c.name),
-                        content: Column(
-                          mainAxisSize:
-                              MainAxisSize.min,
-                          crossAxisAlignment:
-                              CrossAxisAlignment
-                                  .start,
-                          children: [
-                            if (c.phone != null)
-                              Text("Phone: ${c.phone}"),
-                            if (c.email != null)
-                              Text("Email: ${c.email}"),
-                          ],
-                        ),
+          }
+        },
+        child: Column(
+          children: [
+            // Search + Save row (always up top)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _search,
+                      decoration: InputDecoration(
+                        hintText: "Search name or organization",
+                        isDense: true,
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                       ),
-                    );
-                  },
-                  child: CircleAvatar(
-                    radius: 18,
-                    child: Text(
-                      c.name.isNotEmpty
-                          ? c.name[0]
-                          : "?",
+                      onChanged: (_) => setState(() {}),
                     ),
                   ),
-                ),
-
-                const SizedBox(width: 8),
-
-                Expanded(
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          c.name,
-                          style: const TextStyle(
-                              fontWeight:
-                                  FontWeight.w600),
-                        ),
-                      ),
-                      if (c.organization != null)
-                        Padding(
-                          padding:
-                              const EdgeInsets.only(
-                                  right: 8),
-                          child: Text(
-                            c.organization!,
-                            style: const TextStyle(
-                                fontSize: 12,
-                                color:
-                                    Colors.grey),
-                          ),
-                        ),
-                    ],
+                  const SizedBox(width: 10),
+                  FilledButton(
+                    onPressed: _saving ? null : _save,
+                    child: _saving
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text("Save", style: TextStyle(fontWeight: FontWeight.w800)),
                   ),
-                ),
-
-                if (c.hasSms)
-                  _bubble("SMS"),
-
-                if (c.hasEmail)
-                  _bubble("Email"),
-
-                Checkbox(
-                  value: selected,
-                  onChanged: (_) {
-                    setState(() {
-                      if (selected) {
-                        selectedIds.remove(c.id);
-                      } else {
-                        selectedIds.add(c.id);
-                      }
-                    });
-                  },
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        );
-      },
-    );
-  }
 
-  Widget _bubble(String text) {
-    return Container(
-      margin: const EdgeInsets.only(right: 6),
-      padding: const EdgeInsets.symmetric(
-          horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: Colors.blue.shade50,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600),
+            if (_inMobileRangeMode)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.select_all, size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        "Range select: tap another contact to select the range. Tap again to exit.",
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => setState(() => _mobileRangeAnchor = null),
+                      child: const Text("Cancel"),
+                    ),
+                  ],
+                ),
+              ),
+
+            Expanded(
+              child: ListView.builder(
+                itemCount: contacts.length,
+                itemBuilder: (context, i) {
+                  final c = contacts[i];
+                  final selected = _selectedMemberIds.contains(c.id);
+
+                  return CompactContactTile(
+                    contact: c,
+                    selected: selected,
+
+                    // Tap on row toggles; range logic applies on desktop shift, or mobile anchor mode
+                    onToggle: () {
+                      // Desktop/web: Shift selects range
+                      final canShiftRange = (kIsWeb || !defaultTargetPlatform.toString().contains("android")) && _shiftDown;
+
+                      if (canShiftRange && _lastTappedIndex != null) {
+                        final select = !selected; // make range match current action
+                        _toggleRange(contacts, _lastTappedIndex!, i, select);
+                      } else if (_inMobileRangeMode && _mobileRangeAnchor != null) {
+                        final anchor = _mobileRangeAnchor!;
+                        final select = true; // mobile spec: selecting a range (we can add deselect-range later)
+                        _toggleRange(contacts, anchor, i, select);
+                        _mobileRangeAnchor = null;
+                      } else {
+                        _toggleSingle(c);
+                      }
+
+                      _lastTappedIndex = i;
+                    },
+
+                    // Mobile: long press on name/row sets anchor
+                    onLongPressRow: () {
+                      setState(() {
+                        _mobileRangeAnchor = i;
+                        _lastTappedIndex = i;
+                      });
+                    },
+
+                    // Org tap selects all in org (ONLY for current group)
+                    onSelectOrganization: () {
+                      final org = c.organization;
+                      if (org == null || org.isEmpty) return;
+
+                      final orgContacts = allContacts
+                          .where((x) => x.organization == org)
+                          .map((x) => x.id);
+
+                      setState(() {
+                        _selectedMemberIds.addAll(orgContacts);
+                      });
+                    },
+
+                    // Org long press = deselect all in org
+                    onDeselectOrganization: () {
+                      final org = c.organization;
+                      if (org == null || org.isEmpty) return;
+
+                      final orgContacts = allContacts
+                          .where((x) => x.organization == org)
+                          .map((x) => x.id);
+
+                      setState(() {
+                        _selectedMemberIds.removeAll(orgContacts);
+                      });
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

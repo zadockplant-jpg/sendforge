@@ -1,81 +1,69 @@
+// comms-app/services/backend/src/services/contactImport.service.js
 import { dedupeContacts } from "./dedupe.service.js";
 import { auditLog } from "./audit.service.js";
 import { db } from "../config/db.js";
 
-function normalizePhone(phoneRaw) {
-  if (!phoneRaw) return null;
-
-  let phone = String(phoneRaw).trim();
-  phone = phone.replace(/[^\d+]/g, "");
-
-  if (phone.startsWith("+")) {
-    phone = phone.slice(1);
-  }
-
-  phone = phone.replace(/\D/g, "");
-
-  if (phone.length === 10) {
-    return `+1${phone}`;
-  }
-
-  if (phone.length === 11 && phone.startsWith("1")) {
-    return `+${phone}`;
-  }
-
-  if (phone.length >= 11 && phone.length <= 15) {
-    return `+${phone}`;
-  }
-
-  return null;
-}
-
-function normalize(c) {
-  if (!c) return null;
-
-  const phone = normalizePhone(c.phone);
-  const email = c.email?.trim() || null;
-
-  if (!phone && !email) return null;
-
-  return {
-    name: c.name?.trim() || "Unknown",
-    phone,
-    email,
-  };
-}
-
 export async function importContacts({ userId, method, contacts }) {
-  const normalized = contacts.map(normalize).filter(Boolean);
+  if (!userId) throw new Error("missing_user");
+
+  const normalized = (contacts || []).map(normalize).filter(Boolean);
 
   const { unique, duplicates } = dedupeContacts(normalized);
 
   let inserted = 0;
 
+  // Insert best-effort; count actual inserts (not just attempts)
   for (const c of unique) {
-    await db("contacts")
-      .insert({
-        user_id: userId,
-        name: c.name,
-        phone_e164: c.phone,
-        email: c.email,
-        source: method,
-        created_at: new Date(),
-      })
-      .onConflict(["user_id", "phone_e164", "email"])
-      .ignore();
+      const rows = await db("contacts")
+  .insert({
+    user_id: userId,
+    name: c.name,
+    phone: c.phone,
+    email: c.email,
+    organization: c.organization || null,
+    source: method,
+    created_at: new Date(),
+  })
+  .onConflict(["user_id", "phone", "email"])
+  .ignore()
+  .returning(["id"]);
 
-    inserted++;
+    if (Array.isArray(rows) && rows.length > 0) inserted++;
   }
 
-  await auditLog(userId, "contacts_import", {
-    method,
-    inserted,
-    duplicates: duplicates.length,
-  });
+  // Audit should never block import success
+  try {
+    await auditLog(userId, "contacts_import", {
+      method,
+      inserted,
+      duplicates: duplicates.length,
+      invalid: (contacts?.length || 0) - normalized.length,
+    });
+  } catch (_) {
+    // ignore
+  }
 
   return {
     added: inserted,
     duplicates: duplicates.length,
-    invalid: contacts.length - normalized.length,
+    invalid: (contacts?.length || 0) - normalized.length,
+    // keep these if you want them for debugging/UI (safe-ish)
+    unique,
+    duplicatesList: duplicates,
+  };
+}
+
+function normalize(c) {
+  if (!c) return null;
+
+  const phone = typeof c.phone === "string" ? c.phone.trim() : "";
+  const email = typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
+
+  if (!phone && !email) return null;
+
+  return {
+    name: typeof c.name === "string" ? c.name.trim() : "",
+    phone: phone || null,
+    email: email || null,
   };
 }
