@@ -1,0 +1,1147 @@
+
+===== FILE: services/backend/src/routes/groups.routes.js =====
+
+// comms-app/services/backend/src/routes/groups.routes.js
+import { Router } from "express";
+import crypto from "crypto";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+
+export const groupsRouter = Router();
+
+/**
+ * Helpers
+ */
+
+async function resolveSnapshotGroupIds(userId, groupIds) {
+  // Returns DISTINCT snapshot group IDs including:
+  // - any selected snapshot groups
+  // - any snapshot descendants of selected meta groups (meta_group_links recursion)
+  const rows = await db.raw(
+    `
+    WITH RECURSIVE descendants AS (
+      SELECT g.id, g.type
+      FROM groups g
+      WHERE g.user_id = ? AND g.id = ANY(?)
+
+      UNION ALL
+
+      SELECT child.id, child.type
+      FROM meta_group_links l
+      JOIN groups parent ON parent.id = l.parent_group_id
+      JOIN groups child ON child.id = l.child_group_id
+      JOIN descendants d ON d.id = parent.id
+      WHERE parent.user_id = ?
+    )
+    SELECT DISTINCT id
+    FROM descendants
+    WHERE type = 'snapshot'
+    `,
+    [userId, groupIds, userId],
+  );
+
+  return (rows?.rows || []).map((r) => r.id);
+}
+
+async function resolveContactsForGroup(userId, groupId) {
+  // Decide if group is snapshot or meta
+  const g = await db("groups").where({ id: groupId, user_id: userId }).first();
+  if (!g) return null;
+
+  const type = g.type || "snapshot";
+
+  let snapshotIds = [];
+  if (type === "snapshot") {
+    snapshotIds = [groupId];
+  } else {
+    snapshotIds = await resolveSnapshotGroupIds(userId, [groupId]);
+  }
+
+  if (!snapshotIds.length) return { group: g, contacts: [] };
+
+  const rows = await db("group_members as gm")
+    .join("contacts as c", "c.id", "gm.contact_id")
+    .select("c.id", "c.name", "c.phone_e164 as phone", "c.email", "c.organization")
+    .where("c.user_id", userId)
+    .whereIn("gm.group_id", snapshotIds);
+
+  // de-dupe contacts across overlapping snapshot groups in meta groups
+  const seen = new Set();
+  const out = [];
+  for (const c of rows) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    out.push(c);
+  }
+
+  return { group: g, contacts: out };
+}
+
+/**
+ * GET /v1/groups
+ * Auth required
+ * Returns groups with members (for now) + memberCount.
+ */
+groupsRouter.get("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const groups = await db("groups")
+      .select("id", "name", "type")
+      .where({ user_id: userId })
+      .orderBy("created_at", "desc");
+
+    const result = [];
+    for (const g of groups) {
+      const resolved = await resolveContactsForGroup(userId, g.id);
+      const contacts = resolved?.contacts || [];
+      result.push({
+        id: g.id,
+        name: g.name,
+        type: g.type || "snapshot",
+        memberCount: contacts.length,
+        members: contacts,
+      });
+    }
+
+    return res.json({ ok: true, groups: result });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "groups_list_failed" });
+  }
+});
+
+/**
+ * POST /v1/groups
+ * Body: { name, type?: "snapshot"|"meta" }
+ */
+groupsRouter.post("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const name = String(req.body?.name ?? "").trim();
+    const type = String(req.body?.type ?? "snapshot");
+
+    if (!name) return res.status(400).json({ error: "name_required" });
+    if (!["snapshot", "meta"].includes(type)) return res.status(400).json({ error: "invalid_type" });
+
+    const id = crypto.randomUUID();
+
+    await db("groups").insert({
+      id,
+      user_id: userId,
+      name,
+      type,
+      created_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+
+    return res.json({ ok: true, group: { id, name, type, memberCount: 0, members: [] } });
+  } catch (e) {
+  console.error("GROUP CREATE ERROR:", e);
+  return res.status(500).json({
+    ok: false,
+    error: e.message || "group_create_failed"
+  });
+
+  }
+});
+
+/**
+ * PUT /v1/groups/:id/members
+ * Snapshot groups only.
+ * Body: { memberIds: ["contactId", ...] }
+ */
+groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const groupId = String(req.params.id);
+    const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(String) : [];
+
+    const g = await db("groups").where({ id: groupId, user_id: userId }).first();
+    if (!g) return res.status(404).json({ error: "group_not_found" });
+
+    const type = g.type || "snapshot";
+    if (type !== "snapshot") return res.status(400).json({ error: "meta_group_membership_is_dynamic" });
+
+    // Replace membership
+    await db("group_members").where({ group_id: groupId }).del();
+
+    if (memberIds.length) {
+      // Only allow contacts owned by user
+      const validContacts = await db("contacts")
+        .select("id")
+        .where({ user_id: userId })
+        .whereIn("id", memberIds);
+
+      const validIds = validContacts.map((c) => c.id);
+
+      const rows = validIds.map((contactId) => ({
+  id: crypto.randomUUID(),
+  user_id: userId,
+  group_id: groupId,
+  contact_id: contactId,
+  created_at: db.fn.now(),
+}));
+
+      if (rows.length) await db("group_members").insert(rows);
+    }
+
+    const resolved = await resolveContactsForGroup(userId, groupId);
+    return res.json({
+      ok: true,
+      group: {
+        id: g.id,
+        name: g.name,
+        type,
+        memberCount: resolved?.contacts?.length || 0,
+        members: resolved?.contacts || [],
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "members_update_failed" });
+  }
+});
+
+/**
+ * PUT /v1/groups/:id/meta-links
+ * Meta groups only.
+ * Body: { childGroupIds: ["groupId", ...] }
+ * Allows meta groups containing other meta groups.
+ */
+groupsRouter.put("/:id/meta-links", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const parentId = String(req.params.id);
+    const childGroupIds = Array.isArray(req.body?.childGroupIds) ? req.body.childGroupIds.map(String) : [];
+
+    const parent = await db("groups").where({ id: parentId, user_id: userId }).first();
+    if (!parent) return res.status(404).json({ error: "group_not_found" });
+    if ((parent.type || "snapshot") !== "meta") return res.status(400).json({ error: "not_a_meta_group" });
+
+    // Ensure all children exist and belong to user
+    const children = childGroupIds.length
+      ? await db("groups").select("id").where({ user_id: userId }).whereIn("id", childGroupIds)
+      : [];
+    const validChildIds = children.map((c) => c.id);
+
+    // Replace links
+    await db("meta_group_links").where({ parent_group_id: parentId }).del();
+
+    if (validChildIds.length) {
+      const rows = validChildIds.map((cid) => ({
+        parent_group_id: parentId,
+        child_group_id: cid,
+        created_at: db.fn.now(),
+      }));
+      await db("meta_group_links").insert(rows);
+    }
+
+    return res.json({ ok: true, childGroupIds: validChildIds });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "meta_links_update_failed" });
+  }
+});
+
+/**
+ * GET /v1/groups/:id/meta-links
+ */
+groupsRouter.get("/:id/meta-links", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const parentId = String(req.params.id);
+    const parent = await db("groups").where({ id: parentId, user_id: userId }).first();
+    if (!parent) return res.status(404).json({ error: "group_not_found" });
+    if ((parent.type || "snapshot") !== "meta") return res.status(400).json({ error: "not_a_meta_group" });
+
+    const links = await db("meta_group_links as l")
+      .join("groups as g", "g.id", "l.child_group_id")
+      .select("g.id", "g.name", "g.type")
+      .where("l.parent_group_id", parentId)
+      .where("g.user_id", userId)
+      .orderBy("g.name", "asc");
+
+    return res.json({ ok: true, children: links });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "meta_links_fetch_failed" });
+  }
+});
+
+===== FILE: services/backend/src/routes/blasts.routes.js =====
+
+import { Router } from "express";
+import crypto from "crypto";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+
+export const blastsRouter = Router();
+
+/**
+ * POST /v1/blasts
+ * Auth: Bearer JWT required
+ * body: { name, subject, body, channels: ["sms","email"], replyMode }
+ */
+blastsRouter.post("/", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "missing_token" });
+
+  const name = String(req.body?.name ?? "").trim();
+  const subject = String(req.body?.subject ?? "").trim();
+  const body = String(req.body?.body ?? "").trim();
+  const replyMode = String(req.body?.replyMode ?? "private");
+  const channels = Array.isArray(req.body?.channels) ? req.body.channels.map(String) : [];
+
+  if (!name) return res.status(400).json({ error: "name required" });
+  if (!body) return res.status(400).json({ error: "body required" });
+  if (!channels.length) return res.status(400).json({ error: "channels required" });
+
+  const id = crypto.randomUUID();
+
+  await db("blasts").insert({
+    id,
+    user_id: userId,
+    name,
+    subject,
+    body,
+    channels: JSON.stringify(channels),
+    reply_mode: replyMode,
+    created_at: db.fn.now(),
+    updated_at: db.fn.now(),
+  });
+
+  res.json({ id, name, subject, body, channels, replyMode });
+});
+
+===== FILE: services/backend/src/config/db.js =====
+
+import knex from "knex";
+import { env } from "./env.js";
+
+export const db = knex({ client: "pg", connection: env.databaseUrl });
+
+
+===== FILE: services/backend/src/middleware/auth.js =====
+
+import jwt from "jsonwebtoken";
+import { env } from "../config/env.js";
+
+/**
+ * Sets req.user = { sub: userId, email }
+ */
+export function requireAuth(req, res, next) {
+  const hdr = req.headers.authorization || "";
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : null;
+
+  if (!token) return res.status(401).json({ error: "missing_token" });
+
+  try {
+    const payload = jwt.verify(token, env.jwtSecret);
+    // payload expected: { sub, email }
+    req.user = payload;
+    return next();
+  } catch {
+    return res.status(401).json({ error: "invalid_token" });
+  }
+}
+
+===== FILE: services/backend/src/app.js =====
+
+import express from "express";
+import cors from "cors";
+import { env } from "./config/env.js";
+import { healthRouter } from "./routes/health.routes.js";
+import { authRouter } from "./routes/auth.routes.js";
+import { verificationRouter } from "./routes/verification.routes.js"; // ✅ NEW
+import { groupsRouter } from "./routes/groups.routes.js";
+import { templatesRouter } from "./routes/templates.routes.js";
+import { blastsRouter } from "./routes/blasts.routes.js";
+import { billingRouter } from "./routes/billing.routes.js";
+import { webhooksRouter } from "./routes/webhooks.routes.js";
+import { threadsRouter } from "./routes/threads.routes.js";
+import { usageRouter } from "./routes/usage.routes.js";
+import contactsImportRoutes from "./routes/contacts.import.routes.js";
+import { blastsQuoteRouter } from "./routes/blasts.quote.routes.js";
+import { blastsSendRouter } from "./routes/blasts.send.routes.js";
+import { stripeWebhooksRouter } from "./routes/stripe.webhooks.routes.js";
+
+export const app = express();
+
+app.set("trust proxy", 1);
+
+app.use(express.urlencoded({ extended: false }));
+
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+
+// ----- CORE ROUTES -----
+app.use("/health", healthRouter);
+app.use("/v1/auth", authRouter);
+app.use("/v1/auth", verificationRouter); // ✅ NEW: /v1/auth/verify
+app.use("/v1/contacts", contactsImportRoutes);
+app.use("/v1/groups", groupsRouter);
+app.use("/v1/templates", templatesRouter);
+app.use("/v1/blasts", blastsRouter);
+app.use("/v1/threads", threadsRouter);
+app.use("/v1/billing", billingRouter);
+app.use("/v1/usage", usageRouter);
+
+// ----- BLAST QUOTE / SEND -----
+app.use("/v1/blasts/quote", blastsQuoteRouter);
+app.use("/v1/blasts/send", blastsSendRouter);
+
+// ----- WEBHOOKS -----
+app.use("/v1/webhooks", webhooksRouter);
+app.use("/v1/webhooks/stripe", stripeWebhooksRouter);
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "SendForge API",
+    env: process.env.NODE_ENV,
+  });
+});
+
+===== FILE: services/backend/src/db/migrations/015_add_updated_at_to_groups.cjs =====
+
+exports.up = async function (knex) {
+  const has = await knex.schema.hasColumn("groups", "updated_at");
+  if (!has) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.timestamp("updated_at", { useTz: true })
+        .notNullable()
+        .defaultTo(knex.fn.now());
+    });
+  }
+};
+
+exports.down = async function (knex) {
+  const has = await knex.schema.hasColumn("groups", "updated_at");
+  if (has) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.dropColumn("updated_at");
+    });
+  }
+};
+
+===== FILE: apps/mobile/lib/models/group.dart =====
+
+// comms-app/apps/mobile/lib/models/group.dart
+import 'contact.dart';
+
+class Group {
+  final String id;
+  final String name;
+
+  /// "snapshot" | "meta"
+  final String type;
+
+  /// For UI speed, backend returns this directly.
+  final int memberCount;
+
+  /// Backend returns members currently; keep for existing UI.
+  final List<Contact> members;
+
+  Group({
+    required this.id,
+    required this.name,
+    required this.type,
+    required this.memberCount,
+    required this.members,
+  });
+
+  int get smsCapableCount => members.where((m) => m.hasSms).length;
+  int get emailCapableCount => members.where((m) => m.hasEmail).length;
+
+  Group copyWith({
+    String? id,
+    String? name,
+    String? type,
+    int? memberCount,
+    List<Contact>? members,
+  }) {
+    return Group(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      type: type ?? this.type,
+      memberCount: memberCount ?? this.memberCount,
+      members: members ?? this.members,
+    );
+  }
+}
+
+===== FILE: apps/mobile/lib/services/groups_api.dart =====
+
+import '../core/app_state.dart';
+import '../models/contact.dart';
+import '../models/group.dart';
+import 'api_client.dart';
+
+class GroupsApi {
+  final AppState appState;
+  GroupsApi(this.appState);
+
+  ApiClient _client() => ApiClient(baseUrl: appState.baseUrl);
+
+  // -------------------------------
+  // LIST
+  // -------------------------------
+  Future<List<Group>> list() async {
+    final res = await _client().getJson('/v1/groups');
+    final items = (res['groups'] as List? ?? []);
+
+    return items.map((g) {
+      final membersJson = (g['members'] as List? ?? []);
+      final members = membersJson.map((c) {
+        return Contact(
+          id: c['id'] ?? '',
+          name: c['name'] ?? 'Unknown',
+          phone: c['phone'],
+          email: c['email'],
+          organization: c['organization'],
+        );
+      }).toList();
+
+      final mc = g['memberCount'];
+      final memberCount =
+          mc is num ? mc.toInt() : members.length;
+
+      return Group(
+        id: g['id'] ?? '',
+        name: g['name'] ?? '',
+        type: (g['type'] ?? 'snapshot').toString(),
+        memberCount: memberCount,
+        members: members,
+      );
+    }).toList();
+  }
+
+  // -------------------------------
+  // CREATE
+  // -------------------------------
+  Future<Group> create({
+    required String name,
+    String type = "snapshot",
+  }) async {
+    final res = await _client().postJson('/v1/groups', {
+      'name': name,
+      'type': type,
+    });
+
+    final g = res['group'] as Map<String, dynamic>;
+    final membersJson = (g['members'] as List? ?? []);
+
+    final members = membersJson.map((c) {
+      return Contact(
+        id: c['id'] ?? '',
+        name: c['name'] ?? 'Unknown',
+        phone: c['phone'],
+        email: c['email'],
+        organization: c['organization'],
+      );
+    }).toList();
+
+    final mc = g['memberCount'];
+    final memberCount =
+        mc is num ? mc.toInt() : members.length;
+
+    return Group(
+      id: g['id'] ?? '',
+      name: g['name'] ?? '',
+      type: (g['type'] ?? 'snapshot').toString(),
+      memberCount: memberCount,
+      members: members,
+    );
+  }
+
+  // -------------------------------
+  // UPDATE MEMBERS (PUT)
+  // -------------------------------
+  Future<Group> updateMembers(
+      String groupId, List<String> memberIds) async {
+    final res =
+        await _client().putJson('/v1/groups/$groupId/members', {
+      'memberIds': memberIds,
+    });
+
+    final g = res['group'] as Map<String, dynamic>;
+    final membersJson = (g['members'] as List? ?? []);
+
+    final members = membersJson.map((c) {
+      return Contact(
+        id: c['id'] ?? '',
+        name: c['name'] ?? 'Unknown',
+        phone: c['phone'],
+        email: c['email'],
+        organization: c['organization'],
+      );
+    }).toList();
+
+    final mc = g['memberCount'];
+    final memberCount =
+        mc is num ? mc.toInt() : members.length;
+
+    return Group(
+      id: g['id'] ?? '',
+      name: g['name'] ?? '',
+      type: (g['type'] ?? 'snapshot').toString(),
+      memberCount: memberCount,
+      members: members,
+    );
+  }
+
+  // -------------------------------
+  // UPDATE META LINKS (PUT)
+  // -------------------------------
+  Future<void> updateMetaLinks(
+      String groupId, List<String> childGroupIds) async {
+    await _client().putJson('/v1/groups/$groupId/meta-links', {
+      'childGroupIds': childGroupIds,
+    });
+  }
+
+  // -------------------------------
+  // GET META LINKS
+  // -------------------------------
+  Future<List<Group>> getMetaLinks(String groupId) async {
+    final res =
+        await _client().getJson('/v1/groups/$groupId/meta-links');
+    final items = (res['children'] as List? ?? []);
+
+    return items.map((g) {
+      return Group(
+        id: g['id'] ?? '',
+        name: g['name'] ?? '',
+        type: (g['type'] ?? 'snapshot').toString(),
+        memberCount: 0,
+        members: const [],
+      );
+    }).toList();
+  }
+}
+
+===== FILE: apps/mobile/lib/services/api_client.dart =====
+
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+class ApiClient {
+  final String baseUrl;
+
+  static const _storage = FlutterSecureStorage();
+  static const _tokenKey = 'auth_token';
+
+  ApiClient({required this.baseUrl});
+
+  Future<String?> getToken() async {
+    return await _storage.read(key: _tokenKey);
+  }
+
+  Future<Map<String, String>> _headers() async {
+    final token = await getToken();
+
+    final h = <String, String>{
+      'Content-Type': 'application/json',
+    };
+
+    if (token != null && token.isNotEmpty) {
+      h['Authorization'] = 'Bearer $token';
+    }
+
+    return h;
+  }
+
+  Future<Map<String, dynamic>> getJson(String path) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final res = await http.get(uri, headers: await _headers());
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.post(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  // ✅ Added to match backend PUT routes
+  Future<Map<String, dynamic>> putJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.put(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+}
+
+class ApiError implements Exception {
+  final String message;
+  ApiError({required this.message});
+
+  @override
+  String toString() => message;
+}
+
+===== FILE: apps/mobile/lib/core/app_state.dart =====
+
+// comms-app/apps/mobile/lib/core/app_state.dart
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/group.dart';
+import '../models/contact.dart';
+import '../models/message.dart';
+import '../models/blast.dart';
+import '../services/api_client.dart';
+import '../services/groups_api.dart';
+
+class AppState extends ChangeNotifier {
+  // Auth / config
+  String? token;
+  String baseUrl = 'https://comms-app-1wo0.onrender.com';
+
+  // Identity / billing (UI only for now)
+  String userId = 'local-user';
+  String planTier = 'free';
+
+  // Core data
+  final List<Group> groups = [];
+  final List<Contact> contacts = [];
+
+  final List<Message> threads = [];
+  final Map<String, List<Message>> messagesByThread = {};
+
+  BlastDraft? activeBlast;
+
+  // ------------------------
+
+  void setBaseUrl(String v) {
+    baseUrl = v;
+    notifyListeners();
+  }
+
+  Future<void> setToken(String? t) async {
+    token = t;
+
+    final prefs = await SharedPreferences.getInstance();
+    if (t == null) {
+      await prefs.remove('token');
+    } else {
+      await prefs.setString('token', t);
+    }
+
+    notifyListeners();
+  }
+
+  void setPlanTier(String tier) {
+    planTier = tier;
+    notifyListeners();
+  }
+
+  /// 🔹 Load contacts from backend
+  Future<void> loadContacts() async {
+    final api = ApiClient(baseUrl: baseUrl);
+    final response = await api.getJson('/v1/contacts');
+
+    if (response['contacts'] is List) {
+      contacts.clear();
+
+      for (final item in response['contacts']) {
+        contacts.add(
+          Contact(
+            id: item['id'] ?? '',
+            name: item['name'] ?? 'Unknown',
+            phone: item['phone'],
+            email: item['email'],
+            organization: item['organization'],
+          ),
+        );
+      }
+
+      notifyListeners();
+    }
+  }
+
+  /// 🔹 Load groups from backend
+  Future<void> loadGroups() async {
+    final api = GroupsApi(this);
+    final data = await api.list();
+
+    groups
+      ..clear()
+      ..addAll(data);
+
+    notifyListeners();
+  }
+
+  /// Utility used by Create Blast (local UI only)
+  List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
+    final memberIds = groups
+        .where((g) => groupIds.contains(g.id))
+        .expand((g) => g.members.map((m) => m.id))
+        .toSet();
+
+    return contacts.where((c) => memberIds.contains(c.id)).toList();
+  }
+
+  /// Adds mock thread when blast queued
+  void addQueuedBlastAsThread({
+    required String blastId,
+    required String body,
+  }) {
+    final now = DateTime.now();
+
+    final root = Message(
+      id: blastId,
+      sender: 'You',
+      body: body,
+      incoming: false,
+      timestamp: now,
+    );
+
+    threads.insert(0, root);
+
+    messagesByThread.putIfAbsent(blastId, () => []);
+    messagesByThread[blastId]!.insert(
+      0,
+      Message(
+        id: '${blastId}_m1',
+        sender: 'You',
+        body: body,
+        incoming: false,
+        timestamp: now,
+      ),
+    );
+
+    notifyListeners();
+  }
+
+  /// Update a single group in memory (used after member save to fix count drift)
+  void upsertGroup(Group g) {
+    final idx = groups.indexWhere((x) => x.id == g.id);
+    if (idx >= 0) {
+      groups[idx] = g;
+    } else {
+      groups.insert(0, g);
+    }
+    notifyListeners();
+  }
+}
+
+===== FILE: apps/mobile/lib/ui/screens/groups_list_screen.dart =====
+
+// comms-app/apps/mobile/lib/ui/screens/groups_list_screen.dart
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import '../../models/group.dart';
+import '../../services/groups_api.dart';
+import '../components/sf_card.dart';
+import 'group_detail_screen.dart';
+
+class GroupsListScreen extends StatefulWidget {
+  final AppState appState;
+
+  /// If true, this screen renders just the list (no scaffold),
+  /// so GroupsScreen can embed it under the buttons.
+  final bool embedMode;
+
+  final Future<void> Function()? onRefresh;
+
+  const GroupsListScreen({
+    super.key,
+    required this.appState,
+    this.embedMode = false,
+    this.onRefresh,
+  });
+
+  @override
+  State<GroupsListScreen> createState() => _GroupsListScreenState();
+}
+
+class _GroupsListScreenState extends State<GroupsListScreen> {
+  bool busy = true;
+  List<Group> groups = [];
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final api = GroupsApi(widget.appState);
+      final data = await api.list();
+
+      // keep AppState in sync
+      widget.appState.groups
+        ..clear()
+        ..addAll(data);
+
+      if (!mounted) return;
+      setState(() {
+        groups = data;
+        busy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        error = e.toString();
+        busy = false;
+      });
+    }
+  }
+
+  Widget _content() {
+    if (busy) return const Center(child: CircularProgressIndicator());
+    if (error != null) return Center(child: Text(error!, style: const TextStyle(color: Colors.red)));
+    if (groups.isEmpty) return const Center(child: Text("No groups yet."));
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _load();
+        if (widget.onRefresh != null) await widget.onRefresh!();
+      },
+      child: ListView.separated(
+        itemCount: groups.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        itemBuilder: (context, i) {
+          final g = groups[i];
+          final subtitle = g.type == "meta"
+              ? '${g.memberCount} members (dynamic)'
+              : '${g.memberCount} members';
+
+          return SFCard(
+            title: g.name,
+            subtitle: subtitle,
+            child: Row(
+              children: [
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () async {
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => GroupDetailScreen(
+                            appState: widget.appState,
+                            group: g,
+                          ),
+                        ),
+                      );
+
+                      // Reload so member count stays fresh even if user hit back fast
+                      _load();
+                    },
+                    child: const Text('Open', style: TextStyle(fontWeight: FontWeight.w800)),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.embedMode) return _content();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Groups')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: _content(),
+      ),
+    );
+  }
+}
+
+===== FILE: apps/mobile/lib/ui/screens/create_group_screen.dart =====
+
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import '../../services/groups_api.dart';
+import '../colors.dart';
+
+class CreateGroupScreen extends StatefulWidget {
+  final AppState appState;
+  final String type; // "snapshot" or "meta"
+
+  const CreateGroupScreen({
+    super.key,
+    required this.appState,
+    required this.type,
+  });
+
+  @override
+  State<CreateGroupScreen> createState() =>
+      _CreateGroupScreenState();
+}
+
+class _CreateGroupScreenState
+    extends State<CreateGroupScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _nameCtrl = TextEditingController();
+
+  bool _saving = false;
+  String? _err;
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _saving = true;
+      _err = null;
+    });
+
+    try {
+      final groupsApi =
+          GroupsApi(widget.appState);
+
+      await groupsApi.create(
+        name: _nameCtrl.text.trim(),
+        type: widget.type,
+      );
+
+      // Reload from backend
+      await widget.appState.loadGroups();
+
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      setState(() => _err = e.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isMeta = widget.type == "meta";
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+            isMeta ? "Create Meta Group" : "Create Group"),
+        backgroundColor: SFColors.primaryBlue,
+        foregroundColor: Colors.white,
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              if (_err != null)
+                Padding(
+                  padding:
+                      const EdgeInsets.only(bottom: 12),
+                  child: Text(
+                    _err!,
+                    style: const TextStyle(
+                        color: Colors.red),
+                  ),
+                ),
+              Form(
+                key: _formKey,
+                child: TextFormField(
+                  controller: _nameCtrl,
+                  decoration:
+                      const InputDecoration(
+                    labelText: "Group Name",
+                  ),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty)
+                          ? "Name required"
+                          : null,
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed:
+                      _saving ? null : _save,
+                  child: Text(
+                    _saving
+                        ? "Saving..."
+                        : "Create",
+                    style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w800),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -85,7 +85,7 @@ groupsRouter.get("/", requireAuth, async (req, res) => {
     if (!userId) return res.status(401).json({ error: "missing_token" });
 
     const groups = await db("groups")
-      .select("id", "name", "type")
+      .select("id", "name", "type", "avatar_key")
       .where({ user_id: userId })
       .orderBy("created_at", "desc");
 
@@ -97,6 +97,7 @@ groupsRouter.get("/", requireAuth, async (req, res) => {
         id: g.id,
         name: g.name,
         type: g.type || "snapshot",
+        avatarKey: g.avatar_key,
         memberCount: contacts.length,
         members: contacts,
       });
@@ -116,7 +117,7 @@ groupsRouter.post("/", requireAuth, async (req, res) => {
   try {
     const userId = req.user?.sub;
     if (!userId) return res.status(401).json({ error: "missing_token" });
-
+    const avatarKey = req.body?.avatarKey ?? null;
     const name = String(req.body?.name ?? "").trim();
     const type = String(req.body?.type ?? "snapshot");
 
@@ -180,6 +181,7 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
   id: crypto.randomUUID(),
   user_id: userId,
   group_id: groupId,
+  avatar_key: avatarKey,
   contact_id: contactId,
   created_at: db.fn.now(),
 }));
@@ -194,6 +196,7 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
         id: g.id,
         name: g.name,
         type,
+        avatarKey,
         memberCount: resolved?.contacts?.length || 0,
         members: resolved?.contacts || [],
       },

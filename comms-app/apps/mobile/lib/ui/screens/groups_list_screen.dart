@@ -80,39 +80,33 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
         itemCount: groups.length,
         separatorBuilder: (_, __) => const SizedBox(height: 12),
         itemBuilder: (context, i) {
-          final g = groups[i];
-          final subtitle = g.type == "meta"
-              ? '${g.memberCount} members (dynamic)'
-              : '${g.memberCount} members';
+  final g = groups[i];
+  final subtitle = g.type == "meta"
+      ? '${g.memberCount} members (dynamic)'
+      : '${g.memberCount} members';
 
-          return SFCard(
-            title: g.name,
-            subtitle: subtitle,
-            child: Row(
-              children: [
-                Expanded(
-                  child: FilledButton(
-                    onPressed: () async {
-                      await Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => GroupDetailScreen(
-                            appState: widget.appState,
-                            group: g,
-                          ),
-                        ),
-                      );
+  return InkWell(
+    borderRadius: BorderRadius.circular(12),
+    onTap: () async {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GroupDetailScreen(
+            appState: widget.appState,
+            group: g,
+          ),
+        ),
+      );
 
-                      // Reload so member count stays fresh even if user hit back fast
-                      _load();
-                    },
-                    child: const Text('Open', style: TextStyle(fontWeight: FontWeight.w800)),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
+      _load();
+    },
+    child: SFCard(
+      title: g.name,
+      subtitle: subtitle,
+      child: const SizedBox.shrink(),
+    ),
+  );
+},
       ),
     );
   }

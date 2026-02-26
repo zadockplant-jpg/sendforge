@@ -4,7 +4,7 @@ import 'contact.dart';
 class Group {
   final String id;
   final String name;
-
+  final String? avatarKey;
   /// "snapshot" | "meta"
   final String type;
 
@@ -19,6 +19,7 @@ class Group {
     required this.name,
     required this.type,
     required this.memberCount,
+    required this.avatarKey,
     required this.members,
   });
 
@@ -30,6 +31,7 @@ class Group {
     String? name,
     String? type,
     int? memberCount,
+    String? avatarKey,
     List<Contact>? members,
   }) {
     return Group(
@@ -37,6 +39,7 @@ class Group {
       name: name ?? this.name,
       type: type ?? this.type,
       memberCount: memberCount ?? this.memberCount,
+      avatarKey: avatarKey ?? this.avatarKey,
       members: members ?? this.members,
     );
   }

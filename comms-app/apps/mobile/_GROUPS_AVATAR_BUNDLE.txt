@@ -1,0 +1,20 @@
+
+===== FILE: services/backend/src/routes/groups.routes.js =====
+
+FILE NOT FOUND
+
+===== FILE: apps/mobile/lib/models/group.dart =====
+
+FILE NOT FOUND
+
+===== FILE: apps/mobile/lib/services/groups_api.dart =====
+
+FILE NOT FOUND
+
+===== FILE: apps/mobile/lib/screens/create_group_screen.dart =====
+
+FILE NOT FOUND
+
+===== FILE: apps/mobile/lib/screens/groups_screen.dart =====
+
+FILE NOT FOUND

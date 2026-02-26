@@ -37,6 +37,7 @@ class GroupsApi {
         name: g['name'] ?? '',
         type: (g['type'] ?? 'snapshot').toString(),
         memberCount: memberCount,
+        avatarKey: g['avatarKey'],
         members: members,
       );
     }).toList();
@@ -45,14 +46,16 @@ class GroupsApi {
   // -------------------------------
   // CREATE
   // -------------------------------
-  Future<Group> create({
-    required String name,
-    String type = "snapshot",
-  }) async {
-    final res = await _client().postJson('/v1/groups', {
-      'name': name,
-      'type': type,
-    });
+Future<Group> create({
+  required String name,
+  String type = "snapshot",
+  String? avatarKey,
+}) async {
+  final res = await _client().postJson('/v1/groups', {
+    'name': name,
+    'type': type,
+    'avatarKey': avatarKey,
+  });
 
     final g = res['group'] as Map<String, dynamic>;
     final membersJson = (g['members'] as List? ?? []);
@@ -75,8 +78,10 @@ class GroupsApi {
       id: g['id'] ?? '',
       name: g['name'] ?? '',
       type: (g['type'] ?? 'snapshot').toString(),
+      avatarKey: g['avatarKey'],
       memberCount: memberCount,
-      members: members,
+      
+            members: members,
     );
   }
 
@@ -111,6 +116,7 @@ class GroupsApi {
       id: g['id'] ?? '',
       name: g['name'] ?? '',
       type: (g['type'] ?? 'snapshot').toString(),
+      avatarKey: g['avatarKey'],
       memberCount: memberCount,
       members: members,
     );
@@ -139,6 +145,7 @@ class GroupsApi {
         id: g['id'] ?? '',
         name: g['name'] ?? '',
         type: (g['type'] ?? 'snapshot').toString(),
+        avatarKey: g['avatarKey'],
         memberCount: 0,
         members: const [],
       );
