@@ -74,11 +74,13 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     try {
       final api = GroupsApi(widget.appState);
       final children = await api.getMetaLinks(widget.group.id);
+      if (!mounted) return;
       setState(() {
         _selectedChildGroupIds = children.map((g) => g.id).toSet();
         _metaLoaded = true;
       });
     } catch (_) {
+      if (!mounted) return;
       setState(() => _metaLoaded = true);
     }
   }
@@ -90,7 +92,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       final api = GroupsApi(widget.appState);
 
       if (_isMeta) {
-        // ✅ meta: persist linked groups
         await api.updateMetaLinks(widget.group.id, _selectedChildGroupIds.toList());
         await widget.appState.loadGroups();
         if (!mounted) return;
@@ -98,7 +99,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
         return;
       }
 
-      // ✅ snapshot: persist membership
       final updated = await api.updateMembers(
         widget.group.id,
         _selectedMemberIds.toList(),
@@ -117,9 +117,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     }
   }
 
-  // ---------------------------
-  // SNAPSHOT selection helpers
-  // ---------------------------
   void _toggleSingleContact(Contact c) {
     setState(() {
       if (_selectedMemberIds.contains(c.id)) {
@@ -146,9 +143,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     });
   }
 
-  // ---------------------------
-  // META linking helpers
-  // ---------------------------
   void _toggleChildGroup(String groupId) {
     setState(() {
       if (_selectedChildGroupIds.contains(groupId)) {
@@ -166,7 +160,7 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
 
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: Text(g.name),
         content: SizedBox(
           width: 360,
@@ -193,7 +187,10 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close")),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text("Close"),
+          ),
         ],
       ),
     );
@@ -202,7 +199,7 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
   void _showContactModal(Contact c) {
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: Text(c.name),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -218,18 +215,19 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Text("SMS: ${c.phone}"),
               ),
-            if ((c.email ?? "").trim().isNotEmpty)
-              Text("Email: ${c.email}"),
+            if ((c.email ?? "").trim().isNotEmpty) Text("Email: ${c.email}"),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close")),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text("Close"),
+          ),
         ],
       ),
     );
   }
 
-  // Mobile drag-select: compute row index by y coordinate + scroll offset
   int _indexFromLocalDy(double dy) {
     final absolute = dy + _scrollOffset;
     final i = (absolute / _rowHeight).floor();
@@ -257,15 +255,9 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       ],
     );
 
-    // ---------------------------
-    // META UI
-    // ---------------------------
     if (_isMeta) {
-      final allGroups = widget.appState.groups
-          .where((g) => g.id != widget.group.id) // can’t link to itself
-          .toList();
+      final allGroups = widget.appState.groups.where((g) => g.id != widget.group.id).toList();
 
-      // ✅ allow meta→meta and meta→snapshot; backend safeguards loops (confirmed by you)
       return Scaffold(
         appBar: header,
         body: !_metaLoaded
@@ -275,7 +267,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                   padding: const EdgeInsets.all(12),
                   child: Column(
                     children: [
-                      // Header row: avatar opens compact member list for this meta group (resolved members)
                       Row(
                         children: [
                           GestureDetector(
@@ -397,9 +388,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       );
     }
 
-    // ---------------------------
-    // SNAPSHOT UI
-    // ---------------------------
     final allContacts = widget.appState.contacts;
     final query = _search.text.toLowerCase();
 
@@ -440,7 +428,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                 onChanged: (_) => setState(() {}),
               ),
             ),
-
             if (_mobileDragMode)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
@@ -465,7 +452,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                   ],
                 ),
               ),
-
             Expanded(
               child: NotificationListener<ScrollNotification>(
                 onNotification: (n) {
@@ -476,7 +462,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                 },
                 child: GestureDetector(
                   onLongPressStart: (d) {
-                    // start mobile drag mode only on touch platforms
                     if (kIsWeb) return;
                     setState(() {
                       _mobileDragMode = true;
@@ -493,7 +478,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                     final boundedIdx = idx.clamp(0, contacts.length - 1);
                     final boundedAnchor = anchor.clamp(0, contacts.length - 1);
 
-                    // Mobile spec: selecting a range
                     _toggleRangeContacts(contacts, boundedAnchor, boundedIdx, true);
 
                     setState(() {
@@ -520,8 +504,11 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                         selected: selected,
                         onAvatarTap: () => _showContactModal(c),
                         onToggle: () {
-                          // Desktop/web: Shift selects range
-                          final canShiftRange = (kIsWeb || defaultTargetPlatform == TargetPlatform.windows || defaultTargetPlatform == TargetPlatform.macOS || defaultTargetPlatform == TargetPlatform.linux) &&
+                          final canShiftRange =
+                              (kIsWeb ||
+                                  defaultTargetPlatform == TargetPlatform.windows ||
+                                  defaultTargetPlatform == TargetPlatform.macOS ||
+                                  defaultTargetPlatform == TargetPlatform.linux) &&
                               _shiftDown;
 
                           if (canShiftRange && _lastTappedIndex != null) {
@@ -533,7 +520,6 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
 
                           _lastTappedIndex = i;
                         },
-                        // we keep long press hook but slide mode is handled by parent GestureDetector
                         onLongPressRow: () {
                           if (kIsWeb) return;
                           setState(() {

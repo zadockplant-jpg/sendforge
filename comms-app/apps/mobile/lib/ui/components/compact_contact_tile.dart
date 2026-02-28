@@ -7,11 +7,9 @@ class CompactContactTile extends StatelessWidget {
 
   final VoidCallback onToggle;
 
-  // Desktop shift-click handled by parent; mobile slide-range handled by parent.
-  // We keep a long-press hook for starting mobile drag mode.
   final VoidCallback? onLongPressRow;
+  final VoidCallback? onAvatarTap;
 
-  final VoidCallback? onAvatarTap; // shows modal (compact)
   const CompactContactTile({
     super.key,
     required this.contact,
@@ -35,7 +33,6 @@ class CompactContactTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final org = (contact.organization ?? "").trim();
 
-    // Shrink vertical spacing ~50% vs old tile: fixed height + tighter padding
     return InkWell(
       onTap: onToggle,
       onLongPress: onLongPressRow,
@@ -63,11 +60,12 @@ class CompactContactTile extends StatelessWidget {
             ),
             const SizedBox(width: 10),
 
-            // Name + org + chips
+            // Name + org
             Expanded(
               child: Row(
                 children: [
-                  Expanded(
+                  Flexible(
+                    flex: 3,
                     child: Text(
                       contact.name,
                       style: const TextStyle(fontWeight: FontWeight.w800),
@@ -76,10 +74,11 @@ class CompactContactTile extends StatelessWidget {
                   ),
                   if (org.isNotEmpty) ...[
                     const SizedBox(width: 10),
-                    Expanded(
+                    Flexible(
+                      flex: 3,
                       child: Text(
                         org,
-                        textAlign: TextAlign.right, // ✅ org right aligned
+                        textAlign: TextAlign.right,
                         style: TextStyle(
                           fontSize: 12,
                           color: Colors.blueGrey.withOpacity(0.9),
@@ -95,15 +94,12 @@ class CompactContactTile extends StatelessWidget {
 
             const SizedBox(width: 10),
 
-            // chips left of checkbox
-            if (hasSms)
-              _chip("SMS"),
-            if (hasEmail)
-              _chip("Email"),
+            // chips
+            if (hasSms) _chip("SMS"),
+            if (hasEmail) _chip("Email"),
 
             const SizedBox(width: 8),
 
-            // checkbox far right
             Checkbox(
               value: selected,
               onChanged: (_) => onToggle(),

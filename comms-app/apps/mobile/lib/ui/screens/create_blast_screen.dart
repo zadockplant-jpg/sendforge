@@ -64,7 +64,7 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (_) {
+      builder: (sheetContext) {
         return StatefulBuilder(
           builder: (context, modalSetState) {
             return _GroupPicker(
@@ -78,6 +78,9 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
                       : _selectedGroupIds.add(id);
                 });
               },
+              onDone: () {
+                Navigator.of(sheetContext).pop(); // ✅ close the bottom sheet
+              },
             );
           },
         );
@@ -88,7 +91,7 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
   Future<bool> _confirmInternational(String estUsd, bool chargeNow) async {
     return await showDialog<bool>(
           context: context,
-          builder: (_) => AlertDialog(
+          builder: (dialogContext) => AlertDialog(
             title: const Text("International SMS charges"),
             content: Text(
               "This blast includes international recipients.\n\n"
@@ -97,11 +100,12 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.pop(context, false),
+                // ✅ must pop using dialogContext, NOT outer context
+                onPressed: () => Navigator.of(dialogContext).pop(false),
                 child: const Text("Cancel"),
               ),
               ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
+                onPressed: () => Navigator.of(dialogContext).pop(true),
                 child: Text(chargeNow ? "Confirm & Charge Now" : "Confirm & Send"),
               ),
             ],
@@ -188,7 +192,7 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
     } catch (e) {
       setState(() => status = 'Error: $e');
     } finally {
-      setState(() => busy = false);
+      if (mounted) setState(() => busy = false);
     }
   }
 
@@ -217,7 +221,6 @@ class _CreateBlastScreenState extends State<CreateBlastScreen> {
 
           final isCtrl = evt.isControlPressed || evt.isMetaPressed;
 
-          // If in body, plain Enter should be newline (TextFormField handles it).
           // Only Ctrl+Enter triggers send.
           if (isCtrl) {
             await _send();
@@ -385,38 +388,65 @@ class _GroupPicker extends StatelessWidget {
   final List<Group> groups;
   final Set<String> selected;
   final ValueChanged<String> onToggle;
+  final VoidCallback onDone;
 
   const _GroupPicker({
     required this.groups,
     required this.selected,
     required this.onToggle,
+    required this.onDone,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Bottom sheet: header + Done top-right + list with member counts
     return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const Text(
-            'Select Groups',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 12),
-          ...groups.map((g) {
-            final isSelected = selected.contains(g.id);
-            return ListTile(
-              leading: Icon(
-                Icons.group,
-                color: isSelected ? SFColors.primaryBlue : Colors.grey,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Select Groups',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                TextButton(
+                  onPressed: onDone,
+                  child: const Text("Done"),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  ...groups.map((g) {
+                    final isSelected = selected.contains(g.id);
+                    final subtitle = g.type == "meta"
+                        ? "${g.memberCount} members • Meta group (dynamic)"
+                        : "${g.memberCount} members";
+
+                    return ListTile(
+                      leading: Icon(
+                        Icons.group,
+                        color: isSelected ? SFColors.primaryBlue : Colors.grey,
+                      ),
+                      title: Text(g.name),
+                      subtitle: Text(subtitle),
+                      trailing: isSelected ? const Icon(Icons.check_circle) : null,
+                      onTap: () => onToggle(g.id),
+                    );
+                  }),
+                ],
               ),
-              title: Text(g.name),
-              subtitle: g.type == "meta" ? const Text("Meta group (dynamic)") : null,
-              trailing: isSelected ? const Icon(Icons.check_circle) : null,
-              onTap: () => onToggle(g.id),
-            );
-          }),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }
