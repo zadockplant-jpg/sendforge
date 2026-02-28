@@ -1,0 +1,4494 @@
+﻿===== RULE17 FULL ARCHITECTURE BUNDLE (20260227_083318) =====
+
+===== FILE: apps/mobile/lib/app.dart =====
+import 'package:flutter/material.dart';
+import 'core/app_state.dart';
+import 'core/auth_state.dart';
+import 'services/auth_service.dart';
+import 'ui/screens/home_screen.dart';
+import 'ui/screens/login_screen.dart';
+import 'ui/screens/register_screen.dart';
+import 'ui/colors.dart';
+import 'ui/theme/sf_input_theme.dart';
+
+class SendForgeApp extends StatefulWidget {
+  final AuthState authState;
+
+  const SendForgeApp({super.key, required this.authState});
+
+  @override
+  State<SendForgeApp> createState() => _SendForgeAppState();
+}
+
+class _SendForgeAppState extends State<SendForgeApp> {
+  final AppState appState = AppState();
+
+  @override
+  Widget build(BuildContext context) {
+    final authService = AuthService(
+      "https://comms-app-1wo0.onrender.com",
+    );
+
+    return AnimatedBuilder(
+      animation: widget.authState,
+      builder: (context, _) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: 'SendForge',
+          theme: ThemeData(
+            useMaterial3: true,
+            colorSchemeSeed: SFColors.primaryBlue,
+            scaffoldBackgroundColor: SFColors.background,
+            inputDecorationTheme: sfInputTheme(),
+          ),
+          home: widget.authState.isLoggedIn
+              ? HomeScreen(
+                  appState: appState,
+                  auth: widget.authState,
+                )
+              : LoginScreen(
+                  auth: widget.authState,
+                  service: authService,
+                ),
+          routes: {
+            '/register': (_) => RegisterScreen(
+                  auth: widget.authState,
+                  service: authService,
+                ),
+          },
+        );
+      },
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/main.dart =====
+import 'package:flutter/material.dart';
+import 'core/auth_state.dart';
+import 'app.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  final authState = AuthState();
+  await authState.load();
+
+  runApp(SendForgeRoot(authState: authState));
+}
+
+class SendForgeRoot extends StatelessWidget {
+  final AuthState authState;
+
+  const SendForgeRoot({super.key, required this.authState});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: authState,
+      builder: (context, _) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          home: authState.isInitialized
+              ? SendForgeApp(authState: authState)
+              : const Scaffold(
+                  body: Center(child: CircularProgressIndicator()),
+                ),
+        );
+      },
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/core/app_state.dart =====
+// comms-app/apps/mobile/lib/core/app_state.dart
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/group.dart';
+import '../models/contact.dart';
+import '../models/message.dart';
+import '../models/blast.dart';
+import '../services/api_client.dart';
+import '../services/groups_api.dart';
+
+class AppState extends ChangeNotifier {
+  // Auth / config
+  String? token;
+  String baseUrl = 'https://comms-app-1wo0.onrender.com';
+
+  // Identity / billing (UI only for now)
+  String userId = 'local-user';
+  String planTier = 'free';
+
+  // Core data
+  final List<Group> groups = [];
+  final List<Contact> contacts = [];
+
+  final List<Message> threads = [];
+  final Map<String, List<Message>> messagesByThread = {};
+
+  BlastDraft? activeBlast;
+
+  // ------------------------
+
+  void setBaseUrl(String v) {
+    baseUrl = v;
+    notifyListeners();
+  }
+
+  Future<void> setToken(String? t) async {
+    token = t;
+
+    final prefs = await SharedPreferences.getInstance();
+    if (t == null) {
+      await prefs.remove('token');
+    } else {
+      await prefs.setString('token', t);
+    }
+
+    notifyListeners();
+  }
+
+  void setPlanTier(String tier) {
+    planTier = tier;
+    notifyListeners();
+  }
+
+  /// ðŸ”¹ Load contacts from backend
+  Future<void> loadContacts() async {
+    final api = ApiClient(baseUrl: baseUrl);
+    final response = await api.getJson('/v1/contacts');
+
+    if (response['contacts'] is List) {
+      contacts.clear();
+
+      for (final item in response['contacts']) {
+        contacts.add(
+          Contact(
+            id: item['id'] ?? '',
+            name: item['name'] ?? 'Unknown',
+            phone: item['phone'],
+            email: item['email'],
+            organization: item['organization'],
+          ),
+        );
+      }
+
+      notifyListeners();
+    }
+  }
+
+  /// ðŸ”¹ Load groups from backend
+  Future<void> loadGroups() async {
+    final api = GroupsApi(this);
+    final data = await api.list();
+
+    groups
+      ..clear()
+      ..addAll(data);
+
+    notifyListeners();
+  }
+
+  /// Utility used by Create Blast (local UI only)
+  List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
+    final memberIds = groups
+        .where((g) => groupIds.contains(g.id))
+        .expand((g) => g.members.map((m) => m.id))
+        .toSet();
+
+    return contacts.where((c) => memberIds.contains(c.id)).toList();
+  }
+
+  /// Adds mock thread when blast queued
+  void addQueuedBlastAsThread({
+    required String blastId,
+    required String body,
+  }) {
+    final now = DateTime.now();
+
+    final root = Message(
+      id: blastId,
+      sender: 'You',
+      body: body,
+      incoming: false,
+      timestamp: now,
+    );
+
+    threads.insert(0, root);
+
+    messagesByThread.putIfAbsent(blastId, () => []);
+    messagesByThread[blastId]!.insert(
+      0,
+      Message(
+        id: '${blastId}_m1',
+        sender: 'You',
+        body: body,
+        incoming: false,
+        timestamp: now,
+      ),
+    );
+
+    notifyListeners();
+  }
+
+  /// Update a single group in memory (used after member save to fix count drift)
+  void upsertGroup(Group g) {
+    final idx = groups.indexWhere((x) => x.id == g.id);
+    if (idx >= 0) {
+      groups[idx] = g;
+    } else {
+      groups.insert(0, g);
+    }
+    notifyListeners();
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/core/auth_state.dart =====
+import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+class AuthState extends ChangeNotifier {
+  static const _storage = FlutterSecureStorage();
+  static const _tokenKey = 'auth_token';
+
+  String? _token;
+  bool _initialized = false;
+
+  bool get isLoggedIn => _token != null;
+  bool get isInitialized => _initialized;
+  String? get token => _token;
+
+  Future<void> load() async {
+    _token = await _storage.read(key: _tokenKey);
+    _initialized = true;
+    notifyListeners();
+  }
+
+  Future<void> login(String token) async {
+    _token = token;
+    await _storage.write(key: _tokenKey, value: token);
+    notifyListeners();
+  }
+
+  Future<void> logout() async {
+    _token = null;
+    await _storage.delete(key: _tokenKey);
+    notifyListeners();
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/core/auth_service.dart =====
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+
+class AuthService {
+  final String baseUrl;
+  AuthService(this.baseUrl);
+
+  Future<String> login(String email, String password) async {
+    final res = await http.post(
+      Uri.parse('$baseUrl/auth/login'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'email': email, 'password': password}),
+    );
+
+    if (res.statusCode != 200) {
+      throw Exception('login_failed');
+    }
+
+    return jsonDecode(res.body)['token'];
+  }
+
+  Future<String> register(String email, String password) async {
+    final res = await http.post(
+      Uri.parse('$baseUrl/auth/register'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'email': email, 'password': password}),
+    );
+
+    if (res.statusCode != 200) {
+      throw Exception('register_failed');
+    }
+
+    return jsonDecode(res.body)['token'];
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/core/billing_constants.dart =====
+// apps/mobile/lib/core/billing_constants.dart
+enum PlanTier { free, pro, business }
+
+class BillingCaps {
+  final int softPerBlastCents;
+  final int hardAccumCents;
+  const BillingCaps(this.softPerBlastCents, this.hardAccumCents);
+}
+
+const capsPro = BillingCaps(1000, 2000); // $10 / $20
+const capsBusiness = BillingCaps(3000, 5000); // $30 / $50
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/core/pricing/pricing_tiers.dart =====
+enum PlanTier { free, pro, business }
+
+class PricingTier {
+  final PlanTier tier;
+  final String title;
+  final double price;
+  final int monthlyRecipients;
+  final int internationalSmsCap;
+  final bool allowGroupReplies;
+  final bool allowMultiChannel;
+
+  const PricingTier({
+    required this.tier,
+    required this.title,
+    required this.price,
+    required this.monthlyRecipients,
+    required this.internationalSmsCap,
+    required this.allowGroupReplies,
+    required this.allowMultiChannel,
+  });
+}
+
+const pricingTiers = {
+  PlanTier.free: PricingTier(
+    tier: PlanTier.free,
+    title: 'Free',
+    price: 0,
+    monthlyRecipients: 25,
+    internationalSmsCap: 0,
+    allowGroupReplies: false,
+    allowMultiChannel: false,
+  ),
+  PlanTier.pro: PricingTier(
+    tier: PlanTier.pro,
+    title: 'Pro',
+    price: 29,
+    monthlyRecipients: 1000,
+    internationalSmsCap: 100,
+    allowGroupReplies: true,
+    allowMultiChannel: true,
+  ),
+  PlanTier.business: PricingTier(
+    tier: PlanTier.business,
+    title: 'Business',
+    price: 79,
+    monthlyRecipients: 5000,
+    internationalSmsCap: 999999,
+    allowGroupReplies: true,
+    allowMultiChannel: true,
+  ),
+};
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/services/api_client.dart =====
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+class ApiClient {
+  final String baseUrl;
+
+  static const _storage = FlutterSecureStorage();
+  static const _tokenKey = 'auth_token';
+
+  ApiClient({required this.baseUrl});
+
+  Future<String?> getToken() async {
+    return await _storage.read(key: _tokenKey);
+  }
+
+  Future<Map<String, String>> _headers() async {
+    final token = await getToken();
+
+    final h = <String, String>{
+      'Content-Type': 'application/json',
+    };
+
+    if (token != null && token.isNotEmpty) {
+      h['Authorization'] = 'Bearer $token';
+    }
+
+    return h;
+  }
+
+  Future<Map<String, dynamic>> getJson(String path) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final res = await http.get(uri, headers: await _headers());
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.post(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  // âœ… Added to match backend PUT routes
+  Future<Map<String, dynamic>> putJson(
+      String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.put(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+}
+
+class ApiError implements Exception {
+  final String message;
+  ApiError({required this.message});
+
+  @override
+  String toString() => message;
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/models/group.dart =====
+// comms-app/apps/mobile/lib/models/group.dart
+import 'contact.dart';
+
+class Group {
+  final String id;
+  final String name;
+  final String? avatarKey;
+  /// "snapshot" | "meta"
+  final String type;
+
+  /// For UI speed, backend returns this directly.
+  final int memberCount;
+
+  /// Backend returns members currently; keep for existing UI.
+  final List<Contact> members;
+
+  Group({
+    required this.id,
+    required this.name,
+    required this.type,
+    required this.memberCount,
+    required this.avatarKey,
+    required this.members,
+  });
+
+  int get smsCapableCount => members.where((m) => m.hasSms).length;
+  int get emailCapableCount => members.where((m) => m.hasEmail).length;
+
+  Group copyWith({
+    String? id,
+    String? name,
+    String? type,
+    int? memberCount,
+    String? avatarKey,
+    List<Contact>? members,
+  }) {
+    return Group(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      type: type ?? this.type,
+      memberCount: memberCount ?? this.memberCount,
+      avatarKey: avatarKey ?? this.avatarKey,
+      members: members ?? this.members,
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/models/group_draft.dart =====
+enum ReplyMode { private, group }
+
+class GroupMemberDraft {
+  final String id;
+  final String display;
+  final bool sms;
+  final bool email;
+
+  GroupMemberDraft({
+    required this.id,
+    required this.display,
+    required this.sms,
+    required this.email,
+  });
+}
+
+class GroupDraft {
+  String name;
+  ReplyMode replyMode;
+  List<GroupMemberDraft> members;
+
+  GroupDraft({
+    this.name = "",
+    this.replyMode = ReplyMode.private,
+    List<GroupMemberDraft>? members,
+  }) : members = members ?? [];
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/models/group_member.dart =====
+import 'member_role.dart';
+
+class GroupMember {
+  final String contactId;
+  final MemberRole role;
+
+  GroupMember({
+    required this.contactId,
+    required this.role,
+  });
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/services/groups_api.dart =====
+import '../core/app_state.dart';
+import '../models/contact.dart';
+import '../models/group.dart';
+import 'api_client.dart';
+
+class GroupsApi {
+  final AppState appState;
+  GroupsApi(this.appState);
+
+  ApiClient _client() => ApiClient(baseUrl: appState.baseUrl);
+
+  // -------------------------------
+  // LIST
+  // -------------------------------
+  Future<List<Group>> list() async {
+    final res = await _client().getJson('/v1/groups');
+    final items = (res['groups'] as List? ?? []);
+
+    return items.map((g) {
+      final membersJson = (g['members'] as List? ?? []);
+      final members = membersJson.map((c) {
+        return Contact(
+          id: c['id'] ?? '',
+          name: c['name'] ?? 'Unknown',
+          phone: c['phone'],
+          email: c['email'],
+          organization: c['organization'],
+        );
+      }).toList();
+
+      final mc = g['memberCount'];
+      final memberCount =
+          mc is num ? mc.toInt() : members.length;
+
+      return Group(
+        id: g['id'] ?? '',
+        name: g['name'] ?? '',
+        type: (g['type'] ?? 'snapshot').toString(),
+        memberCount: memberCount,
+        avatarKey: g['avatarKey'],
+        members: members,
+      );
+    }).toList();
+  }
+
+  // -------------------------------
+  // CREATE
+  // -------------------------------
+Future<Group> create({
+  required String name,
+  String type = "snapshot",
+  String? avatarKey,
+}) async {
+  final res = await _client().postJson('/v1/groups', {
+    'name': name,
+    'type': type,
+    'avatarKey': avatarKey,
+  });
+
+    final g = res['group'] as Map<String, dynamic>;
+    final membersJson = (g['members'] as List? ?? []);
+
+    final members = membersJson.map((c) {
+      return Contact(
+        id: c['id'] ?? '',
+        name: c['name'] ?? 'Unknown',
+        phone: c['phone'],
+        email: c['email'],
+        organization: c['organization'],
+      );
+    }).toList();
+
+    final mc = g['memberCount'];
+    final memberCount =
+        mc is num ? mc.toInt() : members.length;
+
+    return Group(
+      id: g['id'] ?? '',
+      name: g['name'] ?? '',
+      type: (g['type'] ?? 'snapshot').toString(),
+      avatarKey: g['avatarKey'],
+      memberCount: memberCount,
+      
+            members: members,
+    );
+  }
+
+  // -------------------------------
+  // UPDATE MEMBERS (PUT)
+  // -------------------------------
+  Future<Group> updateMembers(
+      String groupId, List<String> memberIds) async {
+    final res =
+        await _client().putJson('/v1/groups/$groupId/members', {
+      'memberIds': memberIds,
+    });
+
+    final g = res['group'] as Map<String, dynamic>;
+    final membersJson = (g['members'] as List? ?? []);
+
+    final members = membersJson.map((c) {
+      return Contact(
+        id: c['id'] ?? '',
+        name: c['name'] ?? 'Unknown',
+        phone: c['phone'],
+        email: c['email'],
+        organization: c['organization'],
+      );
+    }).toList();
+
+    final mc = g['memberCount'];
+    final memberCount =
+        mc is num ? mc.toInt() : members.length;
+
+    return Group(
+      id: g['id'] ?? '',
+      name: g['name'] ?? '',
+      type: (g['type'] ?? 'snapshot').toString(),
+      avatarKey: g['avatarKey'],
+      memberCount: memberCount,
+      members: members,
+    );
+  }
+
+  // -------------------------------
+  // UPDATE META LINKS (PUT)
+  // -------------------------------
+  Future<void> updateMetaLinks(
+      String groupId, List<String> childGroupIds) async {
+    await _client().putJson('/v1/groups/$groupId/meta-links', {
+      'childGroupIds': childGroupIds,
+    });
+  }
+
+  // -------------------------------
+  // GET META LINKS
+  // -------------------------------
+  Future<List<Group>> getMetaLinks(String groupId) async {
+    final res =
+        await _client().getJson('/v1/groups/$groupId/meta-links');
+    final items = (res['children'] as List? ?? []);
+
+    return items.map((g) {
+      return Group(
+        id: g['id'] ?? '',
+        name: g['name'] ?? '',
+        type: (g['type'] ?? 'snapshot').toString(),
+        avatarKey: g['avatarKey'],
+        memberCount: 0,
+        members: const [],
+      );
+    }).toList();
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/groups_screen.dart =====
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import '../colors.dart';
+import 'create_group_screen.dart';
+import 'groups_list_screen.dart';
+import 'import_contacts_screen.dart';
+
+class GroupsScreen extends StatefulWidget {
+  final AppState appState;
+
+  const GroupsScreen({super.key, required this.appState});
+
+  @override
+  State<GroupsScreen> createState() => _GroupsScreenState();
+}
+
+class _GroupsScreenState extends State<GroupsScreen> {
+  bool _loading = true;
+  String? _err;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    setState(() {
+      _loading = true;
+      _err = null;
+    });
+
+    try {
+      await widget.appState.loadContacts();
+      await widget.appState.loadGroups();
+    } catch (e) {
+      _err = e.toString();
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: SFColors.background,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _topButtons(context),
+                    const SizedBox(height: 14),
+
+                    if (_err != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Text(
+                          _err!,
+                          style: const TextStyle(color: Colors.red),
+                        ),
+                      ),
+
+                    Expanded(
+                      child: GroupsListScreen(
+                        appState: widget.appState,
+                        embedMode: true,
+                        onRefresh: _refresh,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+
+  Widget _topButtons(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        FilledButton(
+          onPressed: () async {
+            await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => CreateGroupScreen(
+                  appState: widget.appState,
+                  type: "snapshot",
+                ),
+              ),
+            );
+            _refresh();
+          },
+          child: const Text(
+            'Create Group',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+        const SizedBox(height: 10),
+        FilledButton(
+          onPressed: () async {
+            await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => CreateGroupScreen(
+                  appState: widget.appState,
+                  type: "meta",
+                ),
+              ),
+            );
+            _refresh();
+          },
+          child: const Text(
+            'Create Meta Group',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+        const SizedBox(height: 10),
+        OutlinedButton(
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) =>
+                  ImportContactsScreen(appState: widget.appState),
+            ),
+          ),
+          child: const Text(
+            'Manage Contacts',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/groups_list_screen.dart =====
+// comms-app/apps/mobile/lib/ui/screens/groups_list_screen.dart
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import '../../models/group.dart';
+import '../../services/groups_api.dart';
+import '../components/sf_card.dart';
+import 'group_detail_screen.dart';
+
+class GroupsListScreen extends StatefulWidget {
+  final AppState appState;
+
+  /// If true, this screen renders just the list (no scaffold),
+  /// so GroupsScreen can embed it under the buttons.
+  final bool embedMode;
+
+  final Future<void> Function()? onRefresh;
+
+  const GroupsListScreen({
+    super.key,
+    required this.appState,
+    this.embedMode = false,
+    this.onRefresh,
+  });
+
+  @override
+  State<GroupsListScreen> createState() => _GroupsListScreenState();
+}
+
+class _GroupsListScreenState extends State<GroupsListScreen> {
+  bool busy = true;
+  List<Group> groups = [];
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final api = GroupsApi(widget.appState);
+      final data = await api.list();
+
+      // keep AppState in sync
+      widget.appState.groups
+        ..clear()
+        ..addAll(data);
+
+      if (!mounted) return;
+      setState(() {
+        groups = data;
+        busy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        error = e.toString();
+        busy = false;
+      });
+    }
+  }
+
+  Widget _content() {
+    if (busy) return const Center(child: CircularProgressIndicator());
+    if (error != null) return Center(child: Text(error!, style: const TextStyle(color: Colors.red)));
+    if (groups.isEmpty) return const Center(child: Text("No groups yet."));
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _load();
+        if (widget.onRefresh != null) await widget.onRefresh!();
+      },
+      child: ListView.separated(
+        itemCount: groups.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        itemBuilder: (context, i) {
+  final g = groups[i];
+  final subtitle = g.type == "meta"
+      ? '${g.memberCount} members (dynamic)'
+      : '${g.memberCount} members';
+
+  return InkWell(
+    borderRadius: BorderRadius.circular(12),
+    onTap: () async {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GroupDetailScreen(
+            appState: widget.appState,
+            group: g,
+          ),
+        ),
+      );
+
+      _load();
+    },
+    child: SFCard(
+      title: g.name,
+      subtitle: subtitle,
+      child: const SizedBox.shrink(),
+    ),
+  );
+},
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.embedMode) return _content();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Groups')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: _content(),
+      ),
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/group_detail_screen.dart =====
+// comms-app/apps/mobile/lib/ui/screens/group_detail_screen.dart
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../core/app_state.dart';
+import '../../models/group.dart';
+import '../../models/contact.dart';
+import '../../services/groups_api.dart';
+import '../components/compact_contact_tile.dart';
+import '../colors.dart';
+
+class GroupDetailScreen extends StatefulWidget {
+  final AppState appState;
+  final Group group;
+
+  const GroupDetailScreen({
+    super.key,
+    required this.appState,
+    required this.group,
+  });
+
+  @override
+  State<GroupDetailScreen> createState() => _GroupDetailScreenState();
+}
+
+class _GroupDetailScreenState extends State<GroupDetailScreen> {
+  late Set<String> _selectedMemberIds;
+  final TextEditingController _search = TextEditingController();
+  bool _saving = false;
+
+  // Range selection support
+  int? _lastTappedIndex; // for desktop shift-select
+  bool _shiftDown = false;
+  final FocusNode _keyboardFocus = FocusNode();
+
+  // Mobile range mode
+  int? _mobileRangeAnchor;
+  bool get _inMobileRangeMode => _mobileRangeAnchor != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedMemberIds = widget.group.members.map((m) => m.id).toSet();
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    _keyboardFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (widget.group.type == "meta") {
+      // Meta group membership is dynamic; member editing happens via meta-link builder (next pass).
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Meta groups are dynamic. Edit linked groups instead.")),
+      );
+      return;
+    }
+
+    setState(() => _saving = true);
+
+    try {
+      final api = GroupsApi(widget.appState);
+      final updated = await api.updateMembers(
+        widget.group.id,
+        _selectedMemberIds.toList(),
+      );
+
+      // âœ… Fix: update AppState immediately so memberCount updates without leaving screen
+      widget.appState.upsertGroup(updated);
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Save failed: $e")),
+      );
+    }
+  }
+
+  void _toggleSingle(Contact c) {
+    setState(() {
+      if (_selectedMemberIds.contains(c.id)) {
+        _selectedMemberIds.remove(c.id);
+      } else {
+        _selectedMemberIds.add(c.id);
+      }
+    });
+  }
+
+  void _toggleRange(List<Contact> contacts, int a, int b, bool select) {
+    final start = a < b ? a : b;
+    final end = a < b ? b : a;
+
+    setState(() {
+      for (int i = start; i <= end; i++) {
+        final id = contacts[i].id;
+        if (select) {
+          _selectedMemberIds.add(id);
+        } else {
+          _selectedMemberIds.remove(id);
+        }
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allContacts = widget.appState.contacts;
+    final query = _search.text.toLowerCase();
+
+    final contacts = allContacts.where((c) {
+      return c.name.toLowerCase().contains(query) ||
+          (c.organization ?? '').toLowerCase().contains(query);
+    }).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    final header = AppBar(
+      title: Text(widget.group.name),
+      backgroundColor: SFColors.primaryBlue,
+      foregroundColor: Colors.white,
+    );
+
+    return Scaffold(
+      appBar: header,
+      body: RawKeyboardListener(
+        focusNode: _keyboardFocus,
+        autofocus: true,
+        onKey: (evt) {
+          final isShift = evt.logicalKey == LogicalKeyboardKey.shiftLeft ||
+              evt.logicalKey == LogicalKeyboardKey.shiftRight;
+          if (isShift) {
+            setState(() {
+              _shiftDown = evt is RawKeyDownEvent;
+            });
+          }
+        },
+        child: Column(
+          children: [
+            // Search + Save row (always up top)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _search,
+                      decoration: InputDecoration(
+                        hintText: "Search name or organization",
+                        isDense: true,
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  FilledButton(
+                    onPressed: _saving ? null : _save,
+                    child: _saving
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text("Save", style: TextStyle(fontWeight: FontWeight.w800)),
+                  ),
+                ],
+              ),
+            ),
+
+            if (_inMobileRangeMode)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.select_all, size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        "Range select: tap another contact to select the range. Tap again to exit.",
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => setState(() => _mobileRangeAnchor = null),
+                      child: const Text("Cancel"),
+                    ),
+                  ],
+                ),
+              ),
+
+            Expanded(
+              child: ListView.builder(
+                itemCount: contacts.length,
+                itemBuilder: (context, i) {
+                  final c = contacts[i];
+                  final selected = _selectedMemberIds.contains(c.id);
+
+                  return CompactContactTile(
+                    contact: c,
+                    selected: selected,
+
+                    // Tap on row toggles; range logic applies on desktop shift, or mobile anchor mode
+                    onToggle: () {
+                      // Desktop/web: Shift selects range
+                      final canShiftRange = (kIsWeb || !defaultTargetPlatform.toString().contains("android")) && _shiftDown;
+
+                      if (canShiftRange && _lastTappedIndex != null) {
+                        final select = !selected; // make range match current action
+                        _toggleRange(contacts, _lastTappedIndex!, i, select);
+                      } else if (_inMobileRangeMode && _mobileRangeAnchor != null) {
+                        final anchor = _mobileRangeAnchor!;
+                        final select = true; // mobile spec: selecting a range (we can add deselect-range later)
+                        _toggleRange(contacts, anchor, i, select);
+                        _mobileRangeAnchor = null;
+                      } else {
+                        _toggleSingle(c);
+                      }
+
+                      _lastTappedIndex = i;
+                    },
+
+                    // Mobile: long press on name/row sets anchor
+                    onLongPressRow: () {
+                      setState(() {
+                        _mobileRangeAnchor = i;
+                        _lastTappedIndex = i;
+                      });
+                    },
+
+                    // Org tap selects all in org (ONLY for current group)
+                    onSelectOrganization: () {
+                      final org = c.organization;
+                      if (org == null || org.isEmpty) return;
+
+                      final orgContacts = allContacts
+                          .where((x) => x.organization == org)
+                          .map((x) => x.id);
+
+                      setState(() {
+                        _selectedMemberIds.addAll(orgContacts);
+                      });
+                    },
+
+                    // Org long press = deselect all in org
+                    onDeselectOrganization: () {
+                      final org = c.organization;
+                      if (org == null || org.isEmpty) return;
+
+                      final orgContacts = allContacts
+                          .where((x) => x.organization == org)
+                          .map((x) => x.id);
+
+                      setState(() {
+                        _selectedMemberIds.removeAll(orgContacts);
+                      });
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/group_editor_screen.dart =====
+import 'package:flutter/material.dart';
+import '../../models/group.dart';
+import '../colors.dart';
+import '../icons.dart';
+
+class GroupEditorScreen extends StatefulWidget {
+  final Group group;
+  const GroupEditorScreen({super.key, required this.group});
+
+  @override
+  State<GroupEditorScreen> createState() => _GroupEditorScreenState();
+}
+
+class _GroupEditorScreenState extends State<GroupEditorScreen> {
+  late TextEditingController _nameCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl = TextEditingController(text: widget.group.name);
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Edit Group'),
+        backgroundColor: SFColors.primaryBlue,
+        foregroundColor: Colors.white,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              controller: _nameCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Group name',
+                prefixIcon: Icon(Icons.group),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Icon(SFIcons.contacts, color: SFColors.secondarySlate),
+                const SizedBox(width: 8),
+                Text(
+                  '${widget.group.members.length} members',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+            const Spacer(),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.save),
+              label: const Text('Save Changes'),
+              onPressed: () {
+                // wire later
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/create_group_screen.dart =====
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import '../../services/groups_api.dart';
+import '../colors.dart';
+import '../groups/group_avatar_catalog.dart';
+
+class CreateGroupScreen extends StatefulWidget {
+  final AppState appState;
+  final String type; // "snapshot" or "meta"
+
+  const CreateGroupScreen({
+    super.key,
+    required this.appState,
+    required this.type,
+  });
+
+  @override
+  State<CreateGroupScreen> createState() =>
+      _CreateGroupScreenState();
+}
+
+class _CreateGroupScreenState
+    extends State<CreateGroupScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _nameCtrl = TextEditingController();
+
+  String? _selectedAvatar;
+
+  bool _saving = false;
+  String? _err;
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _saving = true;
+      _err = null;
+    });
+
+    try {
+      final groupsApi = GroupsApi(widget.appState);
+
+      await groupsApi.create(
+        name: _nameCtrl.text.trim(),
+        type: widget.type,
+        avatarKey: _selectedAvatar,
+      );
+
+      await widget.appState.loadGroups();
+
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      setState(() => _err = e.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isMeta = widget.type == "meta";
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+            isMeta ? "Create Meta Group" : "Create Group"),
+        backgroundColor: SFColors.primaryBlue,
+        foregroundColor: Colors.white,
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (_err != null)
+                  Padding(
+                    padding:
+                        const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      _err!,
+                      style: const TextStyle(
+                          color: Colors.red),
+                    ),
+                  ),
+
+                Form(
+                  key: _formKey,
+                  child: TextFormField(
+                    controller: _nameCtrl,
+                    decoration:
+                        const InputDecoration(
+                      labelText: "Group Name",
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty)
+                            ? "Name required"
+                            : null,
+                  ),
+                ),
+
+                const SizedBox(height: 24),
+
+                const Text(
+                  "Select Avatar",
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600),
+                ),
+
+                const SizedBox(height: 12),
+
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: groupAvatarCatalog.map((key) {
+                    final selected =
+                        _selectedAvatar == key;
+
+                    return ChoiceChip(
+                      label: Text(key),
+                      selected: selected,
+                      onSelected: (_) {
+                        setState(
+                            () => _selectedAvatar = key);
+                      },
+                    );
+                  }).toList(),
+                ),
+
+                const SizedBox(height: 30),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed:
+                        _saving ? null : _save,
+                    child: Text(
+                      _saving
+                          ? "Saving..."
+                          : "Create",
+                      style: const TextStyle(
+                          fontWeight:
+                              FontWeight.w800),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/components/group_picker.dart =====
+import 'package:flutter/material.dart';
+import '../../models/group.dart';
+
+class GroupPicker extends StatelessWidget {
+  final List<Group> groups;
+  final Set<String> selected;
+  final ValueChanged<String> onToggle;
+
+  const GroupPicker({
+    super.key,
+    required this.groups,
+    required this.selected,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      children: groups.map((g) {
+        final checked = selected.contains(g.id);
+
+        return CheckboxListTile(
+          value: checked,
+          title: Text(g.name),
+          onChanged: (_) => onToggle(g.id),
+        );
+      }).toList(),
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/components/group_member_picker.dart =====
+import 'package:flutter/material.dart';
+import '../../models/contact.dart';
+import '../colors.dart';
+
+class GroupMemberPicker extends StatefulWidget {
+  final List<Contact> contacts;
+  final Set<String> selectedIds;
+  final ValueChanged<String> onToggle;
+
+  const GroupMemberPicker({
+    super.key,
+    required this.contacts,
+    required this.selectedIds,
+    required this.onToggle,
+  });
+
+  @override
+  State<GroupMemberPicker> createState() => _GroupMemberPickerState();
+}
+
+class _GroupMemberPickerState extends State<GroupMemberPicker> {
+  String query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = widget.contacts.where((c) {
+      return c.name.toLowerCase().contains(query.toLowerCase());
+    }).toList();
+
+    return Column(
+      children: [
+        TextField(
+          decoration: const InputDecoration(
+            hintText: 'Search contacts',
+            prefixIcon: Icon(Icons.search),
+          ),
+          onChanged: (v) => setState(() => query = v),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: ListView.builder(
+            itemCount: filtered.length,
+            itemBuilder: (_, i) {
+              final c = filtered[i];
+              final selected = widget.selectedIds.contains(c.id);
+              return ListTile(
+                leading: CircleAvatar(
+                  backgroundColor:
+                      selected ? SFColors.primaryBlue : Colors.grey.shade300,
+                  child: Text(c.name[0]),
+                ),
+                title: Text(c.name),
+                trailing: selected ? const Icon(Icons.check) : null,
+                onTap: () => widget.onToggle(c.id),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/components/compact_contact_tile.dart =====
+// comms-app/apps/mobile/lib/ui/components/compact_contact_tile.dart
+import 'package:flutter/material.dart';
+import '../../models/contact.dart';
+
+class CompactContactTile extends StatelessWidget {
+  final Contact contact;
+  final bool selected;
+
+  final VoidCallback onToggle;
+  final VoidCallback? onLongPressRow;
+
+  final VoidCallback? onSelectOrganization;
+  final VoidCallback? onDeselectOrganization;
+
+  const CompactContactTile({
+    super.key,
+    required this.contact,
+    required this.selected,
+    required this.onToggle,
+    this.onLongPressRow,
+    this.onSelectOrganization,
+    this.onDeselectOrganization,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onToggle,
+      onLongPress: onLongPressRow,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        color: selected ? Colors.blue.withOpacity(0.08) : null,
+        child: Row(
+          children: [
+            Checkbox(
+              value: selected,
+              onChanged: (_) => onToggle(),
+            ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    contact.name,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  if (contact.organization != null &&
+                      contact.organization!.isNotEmpty)
+                    GestureDetector(
+                      onTap: onSelectOrganization,
+                      onLongPress: onDeselectOrganization,
+                      child: Text(
+                        contact.organization!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.blueGrey,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/groups/group_avatar_catalog.dart =====
+const groupAvatarCatalog = [
+  "planet",
+  "rocket",
+  "shield",
+  "flame",
+  "crown",
+  "orbit",
+];
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/models/contact.dart =====
+class Contact {
+  final String id;
+  final String name;
+  final String? phone;
+  final String? email;
+  final String? organization;
+
+  String? get phoneE164 => phone;
+
+  bool get hasSms => phoneE164 != null && phoneE164!.isNotEmpty;
+  bool get hasEmail => email != null && email!.isNotEmpty;
+
+  Contact({
+    required this.id,
+    required this.name,
+    this.phone,
+    this.email,
+    this.organization,
+  });
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/services/contact_import_service.dart =====
+import '../models/contact.dart';
+import '../core/app_state.dart';
+import 'api_client.dart';
+
+class ContactImportService {
+  final ApiClient api;
+  final AppState appState;
+
+  ContactImportService(this.api, this.appState);
+
+  Future<Map<String, dynamic>> importContacts({
+    required String method,
+    required List<Contact> contacts,
+  }) async {
+    final payload = {
+      'method': method,
+      'contacts': contacts
+          .map((c) => {
+                'name': c.name,
+                'phone': c.phone,
+                'email': c.email,
+              })
+          .toList(),
+    };
+
+    final response =
+        await api.postJson('/v1/contacts/import', payload);
+
+    // ðŸ”¹ Immediately refresh contacts from backend
+    await appState.loadContacts();
+
+    return response;
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/services/csv_parser.dart =====
+// comms-app/apps/mobile/lib/services/csv_parser.dart
+import 'dart:convert';
+import 'dart:typed_data';
+import 'dart:io' show File;
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:csv/csv.dart';
+import 'package:file_picker/file_picker.dart';
+
+import '../models/contact.dart';
+
+class CsvParser {
+  /// Picks a CSV, parses it client-side, returns contacts.
+  /// Supports Desktop/Mobile (path) AND Web (bytes).
+  static Future<List<Contact>> pickAndParseCsv() async {
+    final res = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['csv'],
+      // Web: must use bytes. Desktop: path is fine.
+      withData: kIsWeb,
+    );
+
+    if (res == null || res.files.isEmpty) return [];
+
+    final file = res.files.single;
+
+    String text;
+
+    // Web path is null; use bytes
+    if (kIsWeb) {
+      final Uint8List? bytes = file.bytes;
+      if (bytes == null) return [];
+      text = utf8.decode(bytes);
+    } else {
+      final path = file.path;
+      if (path == null) return [];
+      text = await File(path).readAsString();
+    }
+
+    final rows = const CsvToListConverter(
+      shouldParseNumbers: false,
+      eol: '\n',
+    ).convert(text);
+
+    if (rows.isEmpty) return [];
+
+    // header row
+    final header =
+        rows.first.map((e) => e.toString().trim().toLowerCase()).toList();
+
+    int idxOf(List<String> names) {
+      for (final n in names) {
+        final i = header.indexOf(n);
+        if (i >= 0) return i;
+      }
+      return -1;
+    }
+
+    final nameIdx = idxOf(['name', 'full name', 'fullname']);
+    final phoneIdx = idxOf(
+        ['phone', 'mobile', 'cell', 'phone number', 'phonenumber']);
+    final emailIdx = idxOf(['email', 'email address', 'emailaddress']);
+
+    final out = <Contact>[];
+
+    for (var r = 1; r < rows.length; r++) {
+      final row = rows[r];
+      if (row.isEmpty) continue;
+
+      String pick(int i) =>
+          (i >= 0 && i < row.length) ? row[i].toString().trim() : '';
+
+      final name = pick(nameIdx);
+      final phone = pick(phoneIdx);
+      final email = pick(emailIdx);
+
+      if (phone.isEmpty && email.isEmpty) continue;
+
+      out.add(
+        Contact(
+          id: 'csv_${r}_${DateTime.now().millisecondsSinceEpoch}',
+          name: name.isEmpty ? 'Unknown' : name,
+          phone: phone.isEmpty ? null : phone,
+          email: email.isEmpty ? null : email,
+        ),
+      );
+    }
+
+    return out;
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/contacts_import_screen.dart =====
+import 'package:flutter/material.dart';
+
+import '../../core/app_state.dart';
+import '../../models/contact.dart';
+import '../../services/api_client.dart';
+import '../../services/contact_import_service.dart';
+import '../../services/csv_parser.dart';
+import '../colors.dart';
+import '../components/sf_card.dart';
+
+class ContactsImportScreen extends StatefulWidget {
+  final AppState appState;
+  const ContactsImportScreen({super.key, required this.appState});
+
+  @override
+  State<ContactsImportScreen> createState() => _ContactsImportScreenState();
+}
+
+class _ContactsImportScreenState extends State<ContactsImportScreen> {
+  List<Contact> _parsed = [];
+  bool _busy = false;
+  String? _status;
+
+  Future<void> _pickCsv() async {
+    setState(() {
+      _status = null;
+      _busy = true;
+      _parsed = [];
+    });
+
+    try {
+      final contacts = await CsvParser.pickAndParseCsv();
+      setState(() {
+        _parsed = contacts;
+        _status = contacts.isEmpty
+            ? 'No contacts found in that CSV.'
+            : 'Parsed ${contacts.length} contacts. Review then import.';
+      });
+    } catch (e) {
+      setState(() => _status = 'Error parsing CSV: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _import() async {
+    if (_parsed.isEmpty) {
+      setState(() => _status = 'Pick a CSV first.');
+      return;
+    }
+
+    setState(() {
+      _status = null;
+      _busy = true;
+    });
+
+    try {
+      final api = ApiClient(baseUrl: widget.appState.baseUrl);
+      final svc = ContactImportService(api, widget.appState);
+
+
+      final resp = await svc.importContacts(
+        method: 'csv',
+        contacts: _parsed,
+      );
+
+      // Update local state so UI can use contacts immediately
+      widget.appState.contacts.addAll(_parsed);
+      widget.appState.notifyListeners();
+
+      final added = resp['added']?.toString() ?? '?';
+      final dupes = resp['duplicates']?.toString() ?? '?';
+      final invalid = resp['invalid']?.toString() ?? '?';
+
+      setState(() {
+        _status = 'Imported âœ…  added=$added  duplicates=$dupes  invalid=$invalid';
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Contacts imported successfully')),
+      );
+    } catch (e) {
+      setState(() => _status = 'Import failed: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final preview = _parsed.take(12).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Import CSV'),
+        backgroundColor: SFColors.primaryBlue,
+        foregroundColor: Colors.white,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            SFCard(
+              title: 'Step 1 â€” Pick a CSV',
+              subtitle: 'We parse it locally first, then import to your backend.',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  FilledButton(
+                    onPressed: _busy ? null : _pickCsv,
+                    child: Text(_busy ? 'Workingâ€¦' : 'Pick CSV'),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    _parsed.isEmpty
+                        ? 'No file selected yet.'
+                        : '${_parsed.length} contact(s) parsed.',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            SFCard(
+              title: 'Step 2 â€” Preview',
+              subtitle: preview.isEmpty ? 'Pick a CSV to preview contacts.' : 'Showing first ${preview.length} items.',
+              child: preview.isEmpty
+                  ? const Text('â€”')
+                  : Column(
+                      children: preview.map((c) {
+                        final line = [
+                          c.name,
+                          if ((c.phone ?? '').isNotEmpty) c.phone!,
+                          if ((c.email ?? '').isNotEmpty) c.email!,
+                        ].join(' â€¢ ');
+                        return ListTile(
+                          dense: true,
+                          title: Text(
+                            line,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        );
+                      }).toList(),
+                    ),
+            ),
+            const SizedBox(height: 12),
+            SFCard(
+              title: 'Step 3 â€” Import to SendForge',
+              subtitle: 'This calls POST /v1/contacts/import (Render or local backend).',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  FilledButton(
+                    onPressed: _busy ? null : _import,
+                    child: Text(_busy ? 'Importingâ€¦' : 'Import to SendForge'),
+                  ),
+                  if (_status != null) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      _status!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: _status!.toLowerCase().contains('fail') ||
+                                _status!.toLowerCase().contains('error')
+                            ? Colors.redAccent
+                            : SFColors.textPrimary,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/import_contacts_screen.dart =====
+import 'package:flutter/material.dart';
+import '../../core/app_state.dart';
+import 'csv_import_screen.dart';
+import 'device_import_screen.dart';
+import 'google_contacts_import_screen.dart';
+import 'manual_add_contact_screen.dart';
+
+class ImportContactsScreen extends StatelessWidget {
+  final AppState appState;
+  const ImportContactsScreen({super.key, required this.appState});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Import Contacts')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _button(
+              label: 'Import from Device',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => DeviceContactsImportScreen(appState: appState),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _button(
+              label: 'Import from Google',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => GoogleContactsImportScreen(appState: appState),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _button(
+              label: 'Import CSV',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => CsvImportScreen(appState: appState),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _button(
+              label: 'Add Contact',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ManualAddContactScreen(appState: appState),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _button({required String label, required VoidCallback onTap}) {
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton(
+        onPressed: onTap,
+        style: FilledButton.styleFrom(
+          alignment: Alignment.centerLeft, // left align label inside button
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/manual_add_contact_screen.dart =====
+import 'package:flutter/material.dart';
+
+import '../../core/app_state.dart';
+import '../../models/contact.dart';
+import '../../services/api_client.dart';
+import '../../services/contact_import_service.dart';
+
+class ManualAddContactScreen extends StatefulWidget {
+  final AppState appState;
+  const ManualAddContactScreen({super.key, required this.appState});
+
+  @override
+  State<ManualAddContactScreen> createState() => _ManualAddContactScreenState();
+}
+
+class _ManualAddContactScreenState extends State<ManualAddContactScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _nameCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
+
+  bool busy = false;
+  String? status;
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _emailCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() => status = null);
+
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() => busy = true);
+
+    try {
+      final api = ApiClient(baseUrl: widget.appState.baseUrl);
+      final svc = ContactImportService(api, widget.appState);
+
+
+      final c = Contact(
+        id: 'manual_${DateTime.now().millisecondsSinceEpoch}',
+        name: _nameCtrl.text.trim(),
+        phone: _phoneCtrl.text.trim().isEmpty ? null : _phoneCtrl.text.trim(),
+        email: _emailCtrl.text.trim().isEmpty ? null : _emailCtrl.text.trim(),
+      );
+
+      final resp = await svc.importContacts(method: 'manual', contacts: [c]);
+
+      setState(() => status = 'Added âœ… (added: ${resp['added'] ?? 1})');
+    } catch (e) {
+      setState(() => status = 'Error: $e');
+    } finally {
+      setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Add Contact')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              TextFormField(
+                controller: _nameCtrl,
+                decoration: const InputDecoration(labelText: 'Name'),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Name required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _phoneCtrl,
+                decoration: const InputDecoration(labelText: 'Phone (optional)'),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _emailCtrl,
+                decoration: const InputDecoration(labelText: 'Email (optional)'),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: busy ? null : _save,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(busy ? 'Savingâ€¦' : 'Save Contact'),
+                  ),
+                ),
+              ),
+              if (status != null) ...[
+                const SizedBox(height: 12),
+                Text(status!),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/add_contact_screen.dart =====
+import 'package:flutter/material.dart';
+
+import '../../core/app_state.dart';
+import '../../models/contact.dart';
+import '../../services/api_client.dart';
+import '../../services/contact_import_service.dart';
+import '../colors.dart';
+import '../theme/sf_theme.dart';
+
+class AddContactScreen extends StatefulWidget {
+  final AppState appState;
+  const AddContactScreen({super.key, required this.appState});
+
+  @override
+  State<AddContactScreen> createState() => _AddContactScreenState();
+}
+
+class _AddContactScreenState extends State<AddContactScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _name = TextEditingController();
+  final _phone = TextEditingController();
+  final _email = TextEditingController();
+
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _phone.dispose();
+    _email.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final name = _name.text.trim();
+    final phone = _phone.text.trim();
+    final email = _email.text.trim();
+
+    final c = Contact(
+      id: 'manual_${DateTime.now().millisecondsSinceEpoch}',
+      name: name,
+      phone: phone.isEmpty ? null : phone,
+      email: email.isEmpty ? null : email,
+    );
+
+    setState(() => _busy = true);
+
+    try {
+      final api = ApiClient(baseUrl: widget.appState.baseUrl);
+      final svc = ContactImportService(api, widget.appState);
+
+
+      await svc.importContacts(
+        method: 'manual',
+        contacts: [c],
+      );
+
+      // local update
+      widget.appState.contacts.add(c);
+      widget.appState.notifyListeners();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Contact saved âœ…')),
+      );
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Save failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        elevation: 0,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [SFColors.headerBlueDark, SFColors.headerBlueLight],
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+            ),
+          ),
+        ),
+        title: const Text('Add Contact', style: TextStyle(fontWeight: FontWeight.w700)),
+        foregroundColor: Colors.white,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              TextFormField(
+                controller: _name,
+                decoration: const InputDecoration(labelText: 'Name'),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Name required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _phone,
+                decoration: const InputDecoration(labelText: 'Phone (optional)'),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _email,
+                decoration: const InputDecoration(labelText: 'Email (optional)'),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) return null;
+                  final ok = v.contains('@') && v.contains('.');
+                  return ok ? null : 'Invalid email';
+                },
+              ),
+              const Spacer(),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: _busy ? null : _save,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: SFColors.primaryBlue,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(SFTheme.radiusMd),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: Text(
+                    _busy ? 'Savingâ€¦' : 'Save Contact',
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/services/blast_api.dart =====
+import 'api_client.dart';
+
+class BlastsApi {
+  final ApiClient _client;
+  BlastsApi(this._client);
+
+  Future<Map<String, dynamic>> quote({
+    required String userId,
+    required List<String> recipients,
+    required String body,
+  }) async {
+    return await _client.postJson('/v1/blasts/quote', {
+      'userId': userId,
+      'recipients': recipients,
+      'body': body,
+    });
+  }
+
+  Future<Map<String, dynamic>> send({
+    required String userId,
+    required List<String> recipients,
+    required String body,
+    required Map<String, dynamic> quote,
+  }) async {
+    return await _client.postJson('/v1/blasts/send', {
+      'userId': userId,
+      'recipients': recipients,
+      'body': body,
+      'quote': quote,
+    });
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/services/blasts_api.dart =====
+// comms-app/apps/mobile/lib/services/blasts_api.dart
+import 'api_client.dart';
+
+class BlastsApi {
+  final ApiClient client;
+  BlastsApi(this.client);
+
+  Future<Map<String, dynamic>> quote({
+    required List<String> groupIds,
+    required List<String> channels, // ["sms","email"]
+    required String body,
+  }) {
+    return client.postJson('/v1/blasts/quote', {
+      'groupIds': groupIds,
+      'channels': channels,
+      'body': body,
+    });
+  }
+
+  Future<Map<String, dynamic>> send({
+    required List<String> groupIds,
+    required List<String> channels,
+    required String body,
+    required Map<String, dynamic> quote,
+  }) {
+    return client.postJson('/v1/blasts/send', {
+      'groupIds': groupIds,
+      'channels': channels,
+      'body': body,
+      'quote': quote,
+    });
+  }
+}
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/services/threads_api.dart =====
+import '../core/app_state.dart';
+import '../models/message.dart';
+
+class ThreadsApi {
+  final AppState appState;
+  ThreadsApi(this.appState);
+
+  /// Threads are represented by root messages
+  Future<List<Message>> listThreads() async {
+    return appState.threads;
+  }
+
+  Future<List<Message>> getMessages(String threadId) async {
+    return appState.messagesByThread[threadId] ?? [];
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: apps/mobile/lib/ui/screens/create_blast_screen.dart =====
+// comms-app/apps/mobile/lib/ui/screens/create_blast_screen.dart
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../core/app_state.dart';
+import '../../models/blast.dart';
+import '../../services/blasts_api.dart';
+import '../../services/api_client.dart';
+import '../colors.dart';
+import '../icons.dart';
+import '../components/sf_card.dart';
+import '../components/sf_primary_button.dart';
+import '../../models/group.dart';
+import 'threads_screen.dart';
+
+class CreateBlastScreen extends StatefulWidget {
+  final AppState appState;
+  const CreateBlastScreen({super.key, required this.appState});
+
+  @override
+  State<CreateBlastScreen> createState() => _CreateBlastScreenState();
+}
+
+class _CreateBlastScreenState extends State<CreateBlastScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final BlastDraft draft = BlastDraft();
+
+  final _nameCtrl = TextEditingController(text: 'Smoke Test');
+  final _subjectCtrl = TextEditingController();
+  final _bodyCtrl = TextEditingController();
+
+  final _nameFocus = FocusNode();
+  final _subjectFocus = FocusNode();
+  final _bodyFocus = FocusNode();
+
+  final FocusNode _kbdFocus = FocusNode();
+
+  /// Channels
+  final Set<Channel> _channels = {Channel.sms};
+
+  /// Groups (IDs)
+  final Set<String> _selectedGroupIds = {};
+
+  bool busy = false;
+  String? status;
+
+  bool get hasEmail => _channels.contains(Channel.email);
+  bool get hasSms => _channels.contains(Channel.sms);
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _subjectCtrl.dispose();
+    _bodyCtrl.dispose();
+    _nameFocus.dispose();
+    _subjectFocus.dispose();
+    _bodyFocus.dispose();
+    _kbdFocus.dispose();
+    super.dispose();
+  }
+
+  void _openGroupPicker() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (context, modalSetState) {
+            return _GroupPicker(
+              groups: widget.appState.groups,
+              selected: _selectedGroupIds,
+              onToggle: (id) {
+                modalSetState(() {});
+                setState(() {
+                  _selectedGroupIds.contains(id)
+                      ? _selectedGroupIds.remove(id)
+                      : _selectedGroupIds.add(id);
+                });
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<bool> _confirmInternational(String estUsd, bool chargeNow) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text("International SMS charges"),
+            content: Text(
+              "This blast includes international recipients.\n\n"
+              "Estimated international cost: \$$estUsd\n\n"
+              "Charges are based on destination and billed to your saved payment method.",
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text("Cancel"),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(chargeNow ? "Confirm & Charge Now" : "Confirm & Send"),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _send() async {
+    setState(() => status = null);
+
+    if (!_formKey.currentState!.validate()) return;
+
+    if (_channels.isEmpty) {
+      setState(() => status = 'Select at least one channel.');
+      return;
+    }
+
+    if (_selectedGroupIds.isEmpty) {
+      setState(() => status = 'Select at least one group.');
+      return;
+    }
+
+    draft.channels = _channels.toSet();
+    draft.name = _nameCtrl.text.trim();
+    draft.subject = _subjectCtrl.text.trim();
+    draft.body = _bodyCtrl.text.trim();
+    draft.groupIds = _selectedGroupIds.toList();
+
+    setState(() => busy = true);
+
+    try {
+      final apiClient = ApiClient(baseUrl: widget.appState.baseUrl);
+      final blastsApi = BlastsApi(apiClient);
+
+      final channels = _channels.map((c) => c == Channel.sms ? "sms" : "email").toList();
+
+      // 1) Quote
+      final quote = await blastsApi.quote(
+        groupIds: _selectedGroupIds.toList(),
+        channels: channels,
+        body: draft.body,
+      );
+
+      if (quote['blocked'] == true) {
+        setState(() => status = 'Blocked: ${quote['blockedReason'] ?? 'not allowed'}');
+        return;
+      }
+
+      final intlCount = (quote['intlCount'] ?? 0) as int;
+      final requiresConfirm = quote['requiresConfirm'] == true;
+
+      if (requiresConfirm && intlCount > 0) {
+        final est = quote['estimatedIntlUsd']?.toString() ?? '0.00';
+        final chargeNow = quote['requiresImmediateCharge'] == true;
+
+        final ok = await _confirmInternational(est, chargeNow);
+        if (!ok) return;
+      }
+
+      // 2) Send
+      final resp = await blastsApi.send(
+        groupIds: _selectedGroupIds.toList(),
+        channels: channels,
+        body: draft.body,
+        quote: quote,
+      );
+
+      final blastId = (resp['blastId'] ?? DateTime.now().millisecondsSinceEpoch.toString()).toString();
+      setState(() => status = 'Queued âœ… ($blastId)');
+
+      widget.appState.addQueuedBlastAsThread(
+        blastId: blastId,
+        body: draft.body,
+      );
+
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ThreadsScreen(appState: widget.appState),
+        ),
+      );
+    } catch (e) {
+      setState(() => status = 'Error: $e');
+    } finally {
+      setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final needsSubject = hasEmail;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Create Blast'),
+        backgroundColor: SFColors.primaryBlue,
+        foregroundColor: Colors.white,
+      ),
+      body: RawKeyboardListener(
+        focusNode: _kbdFocus,
+        autofocus: true,
+        onKey: (evt) async {
+          // Ctrl+Enter sends (desktop/web)
+          final isDown = evt is RawKeyDownEvent;
+          if (!isDown) return;
+
+          final isEnter = evt.logicalKey == LogicalKeyboardKey.enter ||
+              evt.logicalKey == LogicalKeyboardKey.numpadEnter;
+
+          if (!isEnter) return;
+
+          final isCtrl = evt.isControlPressed || evt.isMetaPressed;
+
+          // If in body, plain Enter should be newline (TextFormField handles it).
+          // Only Ctrl+Enter triggers send.
+          if (isCtrl) {
+            await _send();
+          }
+        },
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                children: [
+                  SFCard(
+                    title: 'Channels',
+                    subtitle: 'Select one or both (SMS + Email)',
+                    child: Wrap(
+                      spacing: 12,
+                      children: Channel.values.map((c) {
+                        final selected = _channels.contains(c);
+                        final label = c == Channel.sms ? 'SMS' : 'Email';
+
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () {
+                            setState(() {
+                              selected ? _channels.remove(c) : _channels.add(c);
+                            });
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              color: selected ? SFColors.primaryBlue : Colors.white,
+                              border: Border.all(
+                                color: selected ? SFColors.primaryBlue : SFColors.cardBorder,
+                              ),
+                            ),
+                            child: Text(
+                              label,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: selected ? Colors.white : SFColors.textPrimary,
+                              ),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  SFCard(
+                    title: 'Reply mode',
+                    subtitle: 'Private = sender only â€¢ Group = shared thread',
+                    child: _ReplyModeSlider(
+                      value: draft.replyMode,
+                      onChanged: (v) => setState(() => draft.replyMode = v),
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  SFCard(
+                    title: 'Message',
+                    child: Column(
+                      children: [
+                        TextFormField(
+                          controller: _nameCtrl,
+                          focusNode: _nameFocus,
+                          textInputAction: TextInputAction.next,
+                          onFieldSubmitted: (_) => FocusScope.of(context).requestFocus(_subjectFocus),
+                          decoration: const InputDecoration(
+                            labelText: 'Name',
+                            prefixIcon: Icon(Icons.edit_outlined),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _subjectCtrl,
+                          focusNode: _subjectFocus,
+                          textInputAction: TextInputAction.next,
+                          onFieldSubmitted: (_) => FocusScope.of(context).requestFocus(_bodyFocus),
+                          decoration: InputDecoration(
+                            labelText: needsSubject ? 'Subject (required for email)' : 'Subject (email only)',
+                            prefixIcon: const Icon(SFIcons.email),
+                          ),
+                          validator: (v) {
+                            if (needsSubject && (v == null || v.trim().isEmpty)) {
+                              return 'Subject required when Email is selected.';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _bodyCtrl,
+                          focusNode: _bodyFocus,
+                          textInputAction: TextInputAction.newline,
+                          keyboardType: TextInputType.multiline,
+                          minLines: 4,
+                          maxLines: 10,
+                          decoration: InputDecoration(
+                            labelText: 'Body',
+                            helperText: kIsWeb ? 'Tip: Ctrl+Enter to send' : null,
+                            prefixIcon: Icon(hasEmail && !hasSms ? SFIcons.email : SFIcons.sms),
+                          ),
+                          validator: (v) => (v == null || v.trim().isEmpty) ? 'Body is required.' : null,
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  SFCard(
+                    title: 'Groups',
+                    subtitle: 'Select one or more groups',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.group),
+                          label: const Text('Select Groups'),
+                          onPressed: _openGroupPicker,
+                        ),
+                        if (_selectedGroupIds.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            '${_selectedGroupIds.length} group(s) selected',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  SizedBox(
+                    width: double.infinity,
+                    child: SFPrimaryButton(
+                      icon: SFIcons.queue,
+                      label: busy ? 'Queuingâ€¦' : 'Queue Blast',
+                      busy: busy,
+                      onPressed: busy ? null : _send,
+                    ),
+                  ),
+
+                  if (status != null) ...[
+                    const SizedBox(height: 12),
+                    _StatusBanner(text: status!),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GroupPicker extends StatelessWidget {
+  final List<Group> groups;
+  final Set<String> selected;
+  final ValueChanged<String> onToggle;
+
+  const _GroupPicker({
+    required this.groups,
+    required this.selected,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Select Groups',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          ...groups.map((g) {
+            final isSelected = selected.contains(g.id);
+            return ListTile(
+              leading: Icon(
+                Icons.group,
+                color: isSelected ? SFColors.primaryBlue : Colors.grey,
+              ),
+              title: Text(g.name),
+              subtitle: g.type == "meta" ? const Text("Meta group (dynamic)") : null,
+              trailing: isSelected ? const Icon(Icons.check_circle) : null,
+              onTap: () => onToggle(g.id),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReplyModeSlider extends StatelessWidget {
+  final ReplyMode value;
+  final ValueChanged<ReplyMode> onChanged;
+
+  const _ReplyModeSlider({required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final isPrivate = value == ReplyMode.private;
+    return Row(
+      children: [
+        Expanded(
+          child: _chip(
+            selected: isPrivate,
+            icon: SFIcons.replyPrivate,
+            label: 'Private',
+            onTap: () => onChanged(ReplyMode.private),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: _chip(
+            selected: !isPrivate,
+            icon: SFIcons.replyGroup,
+            label: 'Group',
+            onTap: () => onChanged(ReplyMode.group),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chip({
+    required bool selected,
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: selected ? SFColors.primaryBlue : Colors.white,
+          border: Border.all(
+            color: selected ? SFColors.primaryBlue : Colors.black12,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: selected ? Colors.white : SFColors.primaryBlue),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+                color: selected ? Colors.white : SFColors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusBanner extends StatelessWidget {
+  final String text;
+  const _StatusBanner({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final isError = text.toLowerCase().contains('error') ||
+        text.toLowerCase().contains('blocked') ||
+        text.toLowerCase().contains('required');
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isError ? Colors.redAccent.withOpacity(0.10) : Colors.green.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: isError ? Colors.redAccent : Colors.green),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isError ? SFIcons.warning : Icons.check_circle_outline,
+            color: isError ? Colors.redAccent : Colors.green,
+          ),
+          const SizedBox(width: 10),
+          Expanded(child: Text(text)),
+        ],
+      ),
+    );
+  }
+}
+
+===== END FILE =====
+
+===== FILE: services/backend/src/app.js =====
+import express from "express";
+import cors from "cors";
+import { env } from "./config/env.js";
+import { healthRouter } from "./routes/health.routes.js";
+import { authRouter } from "./routes/auth.routes.js";
+import { verificationRouter } from "./routes/verification.routes.js"; // âœ… NEW
+import { groupsRouter } from "./routes/groups.routes.js";
+import { templatesRouter } from "./routes/templates.routes.js";
+import { blastsRouter } from "./routes/blasts.routes.js";
+import { billingRouter } from "./routes/billing.routes.js";
+import { webhooksRouter } from "./routes/webhooks.routes.js";
+import { threadsRouter } from "./routes/threads.routes.js";
+import { usageRouter } from "./routes/usage.routes.js";
+import contactsImportRoutes from "./routes/contacts.import.routes.js";
+import { blastsQuoteRouter } from "./routes/blasts.quote.routes.js";
+import { blastsSendRouter } from "./routes/blasts.send.routes.js";
+import { stripeWebhooksRouter } from "./routes/stripe.webhooks.routes.js";
+
+export const app = express();
+
+app.set("trust proxy", 1);
+
+app.use(express.urlencoded({ extended: false }));
+
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+
+// ----- CORE ROUTES -----
+app.use("/health", healthRouter);
+app.use("/v1/auth", authRouter);
+app.use("/v1/auth", verificationRouter); // âœ… NEW: /v1/auth/verify
+app.use("/v1/contacts", contactsImportRoutes);
+app.use("/v1/groups", groupsRouter);
+app.use("/v1/templates", templatesRouter);
+app.use("/v1/blasts", blastsRouter);
+app.use("/v1/threads", threadsRouter);
+app.use("/v1/billing", billingRouter);
+app.use("/v1/usage", usageRouter);
+
+// ----- BLAST QUOTE / SEND -----
+app.use("/v1/blasts/quote", blastsQuoteRouter);
+app.use("/v1/blasts/send", blastsSendRouter);
+
+// ----- WEBHOOKS -----
+app.use("/v1/webhooks", webhooksRouter);
+app.use("/v1/webhooks/stripe", stripeWebhooksRouter);
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "SendForge API",
+    env: process.env.NODE_ENV,
+  });
+});
+
+===== END FILE =====
+
+===== FILE: services/backend/src/server.js =====
+import "dotenv/config";
+import { env } from "./config/env.js";
+import { app } from "./app.js";
+
+app.listen(env.port, "0.0.0.0", () => {
+  console.log(`[api] listening on ${env.port}`);
+});
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/routes/groups.routes.js =====
+// comms-app/services/backend/src/routes/groups.routes.js
+import { Router } from "express";
+import crypto from "crypto";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+
+export const groupsRouter = Router();
+
+/**
+ * Helpers
+ */
+
+async function resolveSnapshotGroupIds(userId, groupIds) {
+  // Returns DISTINCT snapshot group IDs including:
+  // - any selected snapshot groups
+  // - any snapshot descendants of selected meta groups (meta_group_links recursion)
+  const rows = await db.raw(
+    `
+    WITH RECURSIVE descendants AS (
+      SELECT g.id, g.type
+      FROM groups g
+      WHERE g.user_id = ? AND g.id = ANY(?)
+
+      UNION ALL
+
+      SELECT child.id, child.type
+      FROM meta_group_links l
+      JOIN groups parent ON parent.id = l.parent_group_id
+      JOIN groups child ON child.id = l.child_group_id
+      JOIN descendants d ON d.id = parent.id
+      WHERE parent.user_id = ?
+    )
+    SELECT DISTINCT id
+    FROM descendants
+    WHERE type = 'snapshot'
+    `,
+    [userId, groupIds, userId],
+  );
+
+  return (rows?.rows || []).map((r) => r.id);
+}
+
+async function resolveContactsForGroup(userId, groupId) {
+  // Decide if group is snapshot or meta
+  const g = await db("groups").where({ id: groupId, user_id: userId }).first();
+  if (!g) return null;
+
+  const type = g.type || "snapshot";
+
+  let snapshotIds = [];
+  if (type === "snapshot") {
+    snapshotIds = [groupId];
+  } else {
+    snapshotIds = await resolveSnapshotGroupIds(userId, [groupId]);
+  }
+
+  if (!snapshotIds.length) return { group: g, contacts: [] };
+
+  const rows = await db("group_members as gm")
+    .join("contacts as c", "c.id", "gm.contact_id")
+    .select("c.id", "c.name", "c.phone_e164 as phone", "c.email", "c.organization")
+    .where("c.user_id", userId)
+    .whereIn("gm.group_id", snapshotIds);
+
+  // de-dupe contacts across overlapping snapshot groups in meta groups
+  const seen = new Set();
+  const out = [];
+  for (const c of rows) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    out.push(c);
+  }
+
+  return { group: g, contacts: out };
+}
+
+/**
+ * GET /v1/groups
+ * Auth required
+ * Returns groups with members (for now) + memberCount.
+ */
+groupsRouter.get("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const groups = await db("groups")
+      .select("id", "name", "type", "avatar_key")
+      .where({ user_id: userId })
+      .orderBy("created_at", "desc");
+
+    const result = [];
+    for (const g of groups) {
+      const resolved = await resolveContactsForGroup(userId, g.id);
+      const contacts = resolved?.contacts || [];
+      result.push({
+        id: g.id,
+        name: g.name,
+        type: g.type || "snapshot",
+        avatarKey: g.avatar_key,
+        memberCount: contacts.length,
+        members: contacts,
+      });
+    }
+
+    return res.json({ ok: true, groups: result });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "groups_list_failed" });
+  }
+});
+
+/**
+ * POST /v1/groups
+ * Body: { name, type?: "snapshot"|"meta" }
+ */
+groupsRouter.post("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+    const avatarKey = req.body?.avatarKey ?? null;
+    const name = String(req.body?.name ?? "").trim();
+    const type = String(req.body?.type ?? "snapshot");
+
+    if (!name) return res.status(400).json({ error: "name_required" });
+    if (!["snapshot", "meta"].includes(type)) return res.status(400).json({ error: "invalid_type" });
+
+    const id = crypto.randomUUID();
+
+    await db("groups").insert({
+      id,
+      user_id: userId,
+      name,
+      type,
+      created_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+
+    return res.json({ ok: true, group: { id, name, type, memberCount: 0, members: [] } });
+  } catch (e) {
+  console.error("GROUP CREATE ERROR:", e);
+  return res.status(500).json({
+    ok: false,
+    error: e.message || "group_create_failed"
+  });
+
+  }
+});
+
+/**
+ * PUT /v1/groups/:id/members
+ * Snapshot groups only.
+ * Body: { memberIds: ["contactId", ...] }
+ */
+groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const groupId = String(req.params.id);
+    const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(String) : [];
+
+    const g = await db("groups").where({ id: groupId, user_id: userId }).first();
+    if (!g) return res.status(404).json({ error: "group_not_found" });
+
+    const type = g.type || "snapshot";
+    if (type !== "snapshot") return res.status(400).json({ error: "meta_group_membership_is_dynamic" });
+
+    // Replace membership
+    await db("group_members").where({ group_id: groupId }).del();
+
+    if (memberIds.length) {
+      // Only allow contacts owned by user
+      const validContacts = await db("contacts")
+        .select("id")
+        .where({ user_id: userId })
+        .whereIn("id", memberIds);
+
+      const validIds = validContacts.map((c) => c.id);
+
+      const rows = validIds.map((contactId) => ({
+  id: crypto.randomUUID(),
+  user_id: userId,
+  group_id: groupId,
+  avatar_key: avatarKey,
+  contact_id: contactId,
+  created_at: db.fn.now(),
+}));
+
+      if (rows.length) await db("group_members").insert(rows);
+    }
+
+    const resolved = await resolveContactsForGroup(userId, groupId);
+    return res.json({
+      ok: true,
+      group: {
+        id: g.id,
+        name: g.name,
+        type,
+        avatarKey,
+        memberCount: resolved?.contacts?.length || 0,
+        members: resolved?.contacts || [],
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "members_update_failed" });
+  }
+});
+
+/**
+ * PUT /v1/groups/:id/meta-links
+ * Meta groups only.
+ * Body: { childGroupIds: ["groupId", ...] }
+ * Allows meta groups containing other meta groups.
+ */
+groupsRouter.put("/:id/meta-links", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const parentId = String(req.params.id);
+    const childGroupIds = Array.isArray(req.body?.childGroupIds) ? req.body.childGroupIds.map(String) : [];
+
+    const parent = await db("groups").where({ id: parentId, user_id: userId }).first();
+    if (!parent) return res.status(404).json({ error: "group_not_found" });
+    if ((parent.type || "snapshot") !== "meta") return res.status(400).json({ error: "not_a_meta_group" });
+
+    // Ensure all children exist and belong to user
+    const children = childGroupIds.length
+      ? await db("groups").select("id").where({ user_id: userId }).whereIn("id", childGroupIds)
+      : [];
+    const validChildIds = children.map((c) => c.id);
+
+    // Replace links
+    await db("meta_group_links").where({ parent_group_id: parentId }).del();
+
+    if (validChildIds.length) {
+      const rows = validChildIds.map((cid) => ({
+        parent_group_id: parentId,
+        child_group_id: cid,
+        created_at: db.fn.now(),
+      }));
+      await db("meta_group_links").insert(rows);
+    }
+
+    return res.json({ ok: true, childGroupIds: validChildIds });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "meta_links_update_failed" });
+  }
+});
+
+/**
+ * GET /v1/groups/:id/meta-links
+ */
+groupsRouter.get("/:id/meta-links", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+
+    const parentId = String(req.params.id);
+    const parent = await db("groups").where({ id: parentId, user_id: userId }).first();
+    if (!parent) return res.status(404).json({ error: "group_not_found" });
+    if ((parent.type || "snapshot") !== "meta") return res.status(400).json({ error: "not_a_meta_group" });
+
+    const links = await db("meta_group_links as l")
+      .join("groups as g", "g.id", "l.child_group_id")
+      .select("g.id", "g.name", "g.type")
+      .where("l.parent_group_id", parentId)
+      .where("g.user_id", userId)
+      .orderBy("g.name", "asc");
+
+    return res.json({ ok: true, children: links });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "meta_links_fetch_failed" });
+  }
+});
+
+===== END FILE =====
+
+===== FILE: services/backend/src/routes/contacts.routes.js =====
+import express from "express";
+import { importContacts } from "../services/contactImport.service.js";
+
+const router = express.Router();
+
+/**
+ * POST /v1/contacts/import
+ * Body:
+ * {
+ *   method: "google" | "csv" | "manual",
+ *   contacts: [{ name, phone, email, sourceMeta? }]
+ * }
+ */
+router.post("/import", async (req, res) => {
+  try {
+   const userId = req.user?.sub;
+if (!userId) {
+  return res.status(401).json({ error: "missing_token" });
+}
+    const { method, contacts } = req.body || {};
+
+    if (!Array.isArray(contacts)) {
+      throw new Error("contacts must be an array");
+    }
+
+    const result = await importContacts({
+      userId,
+      method,
+      contacts,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      ...result,
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err?.message || String(err),
+    });
+  }
+});
+
+export default router;
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/routes/contacts.import.routes.js =====
+// comms-app/services/backend/src/routes/contacts.import.routes.js
+import express from "express";
+import { requireAuth } from "../middleware/auth.js";
+import { importContacts } from "../services/contactImport.service.js";
+import { db } from "../config/db.js";
+
+const router = express.Router();
+
+/**
+ * GET /v1/contacts
+ * Auth required
+ */
+router.get("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ ok: false, error: "missing_token" });
+
+    const rows = await db("contacts")
+      .where({ user_id: userId })
+      .orderBy("created_at", "desc");
+
+    return res.json({ ok: true, contacts: rows });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "failed_to_fetch_contacts" });
+  }
+});
+
+/**
+ * POST /v1/contacts/import
+ * Auth required
+ * Body:
+ * {
+ *   method: "google" | "csv" | "device" | "manual",
+ *   contacts: [{ name, phone, email, organization? }]
+ * }
+ */
+router.post("/import", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ ok: false, error: "missing_token" });
+
+    const { method, contacts } = req.body || {};
+
+    if (!method || typeof method !== "string") {
+      return res.status(400).json({ ok: false, error: "invalid_method" });
+    }
+    if (!Array.isArray(contacts)) {
+      return res.status(400).json({ ok: false, error: "contacts_must_be_array" });
+    }
+
+    const result = await importContacts({ userId, method, contacts });
+
+    return res.status(200).json({
+      ok: true,
+      ...result,
+    });
+  } catch (err) {
+    const msg = err?.message || String(err);
+    return res.status(400).json({ ok: false, error: msg });
+  }
+});
+
+export default router;
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/contactImport.service.js =====
+// comms-app/services/backend/src/services/contactImport.service.js
+import { dedupeContacts } from "./dedupe.service.js";
+import { auditLog } from "./audit.service.js";
+import { db } from "../config/db.js";
+
+export async function importContacts({ userId, method, contacts }) {
+  if (!userId) throw new Error("missing_user");
+
+  const normalized = (contacts || []).map(normalize).filter(Boolean);
+
+  const { unique, duplicates } = dedupeContacts(normalized);
+
+  let inserted = 0;
+
+  // Insert best-effort; count actual inserts (not just attempts)
+  for (const c of unique) {
+      const rows = await db("contacts")
+  .insert({
+    user_id: userId,
+    name: c.name,
+    phone: c.phone,
+    email: c.email,
+    organization: c.organization || null,
+    source: method,
+    created_at: new Date(),
+  })
+  .onConflict(["user_id", "phone", "email"])
+  .ignore()
+  .returning(["id"]);
+
+    if (Array.isArray(rows) && rows.length > 0) inserted++;
+  }
+
+  // Audit should never block import success
+  try {
+    await auditLog(userId, "contacts_import", {
+      method,
+      inserted,
+      duplicates: duplicates.length,
+      invalid: (contacts?.length || 0) - normalized.length,
+    });
+  } catch (_) {
+    // ignore
+  }
+
+  return {
+    added: inserted,
+    duplicates: duplicates.length,
+    invalid: (contacts?.length || 0) - normalized.length,
+    // keep these if you want them for debugging/UI (safe-ish)
+    unique,
+    duplicatesList: duplicates,
+  };
+}
+
+function normalize(c) {
+  if (!c) return null;
+
+  const phone = typeof c.phone === "string" ? c.phone.trim() : "";
+  const email = typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
+
+  if (!phone && !email) return null;
+
+  return {
+    name: typeof c.name === "string" ? c.name.trim() : "",
+    phone: phone || null,
+    email: email || null,
+  };
+}
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/dedupe.service.js =====
+
+// Keep your existing export
+export function dedupeDestinations(list = []) {
+  const seen = new Set();
+  const unique = [];
+  const duplicates = [];
+
+  for (const c of list) {
+    const key = `${c.phone || ""}|${c.email || ""}`;
+
+    if (seen.has(key)) {
+      duplicates.push(c);
+    } else {
+      seen.add(key);
+      unique.push(c);
+    }
+  }
+
+  return { unique, duplicates };
+}
+
+
+// âœ… Add this NEW export (used by contactImport.service.js)
+export function dedupeContacts(contacts) {
+  const seen = new Set();
+  const unique = [];
+  const duplicates = [];
+
+  for (const c of contacts || []) {
+    const phone = (c?.phone || "").trim();
+    const email = (c?.email || "").trim().toLowerCase();
+
+    // key matches your DB conflict intent: user_id + phone + email
+    // if one is missing, still dedupe on whatever exists
+    const key = `${phone}|${email}`;
+    if (key === "|" || key === "") continue;
+
+    if (seen.has(key)) {
+      duplicates.push(c);
+      continue;
+    }
+    seen.add(key);
+    unique.push(c);
+  }
+
+  return { unique, duplicates };
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/audit.service.js =====
+import crypto from "crypto";
+import { db } from "../config/db.js";
+
+export async function logMessageEvent({
+  userId,
+  blastId,
+  blastRecipientId,
+  eventType,
+  payload = {},
+}) {
+  await db("message_events").insert({
+    id: crypto.randomUUID(),
+    user_id: userId,
+    blast_id: blastId,
+    blast_recipient_id: blastRecipientId,
+    event_type: eventType,
+    payload: JSON.stringify(payload),
+  });
+}
+
+// NEW: explicit audit primitive used by contact import
+export async function auditLog(userId, action, metadata = {}) {
+  await db("audit_log").insert({
+    id: crypto.randomUUID(),
+    user_id: userId,
+    action,
+    metadata: JSON.stringify(metadata),
+    created_at: new Date(),
+  });
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/config/pricingpolicy.js =====
+// Centralized pricing + plan rules (LOCKED)
+
+export const PLAN = {
+  FREE: "free",
+  PRO: "pro",
+  BUSINESS: "business",
+};
+
+// International SMS caps (USD cents)
+// US / CA are NOT included here (domestic)
+export const INTL_CAPS_CENTS = {
+  pro: {
+    soft_per_blast: 1000,   // $10
+    hard_accum: 2000,       // $20
+  },
+  business: {
+    soft_per_blast: 3000,   // $30
+    hard_accum: 5000,       // $50
+  },
+};
+
+// Region multipliers (applied to Twilio base cost)
+export const INTL_MULTIPLIERS = {
+  tier1: 1.3, // UK / EU / AU
+  tier2: 1.6, // LATAM / JP
+};
+
+// US & Canada are treated as domestic
+export function isDomesticUSCA(countryCode) {
+  return countryCode === "US" || countryCode === "CA";
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/intlTier.service.js =====
+import { INTL_MULTIPLIERS } from "../config/pricingpolicy.js";
+
+// Keep this simple; expand later.
+const TIER1 = new Set(["GB", "IE", "FR", "DE", "ES", "IT", "NL", "BE", "SE", "NO", "DK", "FI", "AT", "CH", "PT", "AU", "NZ"]);
+const TIER2 = new Set(["BR", "MX", "AR", "CL", "CO", "PE", "JP"]);
+
+// Tier3 = everything else (high-risk) unless you add allowlist entries
+export function getIntlTier(countryCode) {
+  if (TIER1.has(countryCode)) return "tier1";
+  if (TIER2.has(countryCode)) return "tier2";
+  return "tier3";
+}
+
+export function isTierBlocked(tier) {
+  return tier === "tier3";
+}
+
+export function getMultiplierForTier(tier) {
+  return INTL_MULTIPLIERS[tier] ?? null;
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/phone_country.service.js =====
+// services/backend/src/services/phone_country.service.js
+import { parsePhoneNumberFromString } from "libphonenumber-js";
+
+export function parseE164CountryCode(e164) {
+  try {
+    const p = parsePhoneNumberFromString(String(e164 || ""));
+    if (!p || !p.isValid()) return null;
+    return p.country; // e.g. 'US', 'GB'
+  } catch {
+    return null;
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/phoneCountry.service.js =====
+import { parsePhoneNumberFromString } from "libphonenumber-js";
+
+// Add libphonenumber-js dependency if you don't have it:
+// npm i libphonenumber-js
+
+export function parseE164CountryCode(e164) {
+  try {
+    const p = parsePhoneNumberFromString(e164);
+    if (!p || !p.isValid()) return null;
+    return p.country; // e.g. 'US', 'CA', 'GB'
+  } catch {
+    return null;
+  }
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/usage_gate.service.js =====
+import { getActivePlan, getUsage } from "./entitlement.service.js";
+
+export async function checkCanSend({ userId, channel, intendedCount }) {
+  const { plan, limits } = await getActivePlan(userId);
+  const period = new Date();
+  const used = await getUsage(userId, channel);
+
+  const limit = limits[channel] ?? 0;
+  const remaining = Math.max(0, limit - used);
+
+  const ok = intendedCount <= remaining;
+  return {
+    ok,
+    plan,
+    used,
+    limit,
+    remaining,
+    intendedCount,
+    reason: ok ? "" : "over_limit",
+  };
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/recipientsResolve.service.js =====
+import { db } from "../config/db.js";
+
+/**
+ * Resolve recipients based on groupIds/contactIds for THIS user.
+ * Returns:
+ * {
+ *   sms: string[] (phone_e164),
+ *   email: string[] (lowercased)
+ * }
+ */
+export async function resolveRecipients({
+  userId,
+  groupIds = [],
+  contactIds = [],
+}) {
+  const gIds = Array.isArray(groupIds) ? groupIds.map(String) : [];
+  const cIds = Array.isArray(contactIds) ? contactIds.map(String) : [];
+
+  // group member contacts
+  let groupMemberIds = [];
+  if (gIds.length) {
+    const rows = await db("group_members")
+      .select("contact_id")
+      .whereIn("group_id", gIds);
+    groupMemberIds = rows.map((r) => r.contact_id);
+  }
+
+  const merged = Array.from(new Set([...cIds, ...groupMemberIds])).filter(Boolean);
+
+  if (!merged.length) {
+    return { sms: [], email: [] };
+  }
+
+  const contacts = await db("contacts")
+    .select("phone_e164", "email")
+    .where({ user_id: userId })
+    .whereIn("id", merged);
+
+  const sms = [];
+  const email = [];
+
+  for (const c of contacts) {
+    if (c.phone_e164) sms.push(String(c.phone_e164));
+    if (c.email) email.push(String(c.email).toLowerCase());
+  }
+
+  return { sms, email };
+}
+
+===== END FILE =====
+
+===== FILE: services/backend/src/routes/blasts.quote.routes.js =====
+// comms-app/services/backend/src/routes/blasts.quote.routes.js
+import { Router } from "express";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+import {
+  PLAN,
+  INTL_CAPS_CENTS,
+  INTL_MULTIPLIERS,
+  isDomesticUSCA,
+} from "../config/pricingpolicy.js";
+import { parseE164CountryCode } from "../services/phone_country.service.js";
+import { getIntlTier } from "../services/intlTier.service.js";
+import { getTwilioSmsUnitPriceUSD } from "../services/twilio_pricing.service.js";
+
+export const blastsQuoteRouter = Router();
+
+/**
+ * POST /v1/blasts/quote
+ * Auth: Bearer JWT required
+ * Body: {
+ *   groupIds: ["..."],
+ *   channels: ["sms","email"],
+ *   body: "..."
+ * }
+ *
+ * Quote is only relevant for SMS international pricing.
+ * If SMS not selected -> intlCount 0 / no confirm flow.
+ */
+blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    const groupIds = Array.isArray(req.body?.groupIds) ? req.body.groupIds.map(String) : [];
+    const channels = Array.isArray(req.body?.channels) ? req.body.channels.map(String) : [];
+    const wantsSms = channels.includes("sms");
+
+    if (!userId) return res.status(401).json({ error: "missing_token" });
+    if (!groupIds.length) return res.status(400).json({ error: "groupIds[] required" });
+
+    // If not sending SMS, no intl pricing flow needed.
+    if (!wantsSms) {
+      return res.json({
+        blocked: false,
+        domesticCount: 0,
+        intlCount: 0,
+        estimatedIntlCents: 0,
+        requiresConfirm: false,
+        requiresImmediateCharge: false,
+      });
+    }
+
+    const user = await db("users").where({ id: userId }).first();
+    if (!user) return res.status(404).json({ error: "user_not_found" });
+
+    const plan = user.plan_tier || PLAN.FREE;
+
+    // Hard blocks
+    if (plan === PLAN.FREE) {
+      return res.json({ blocked: true, blockedReason: "free_plan_intl_blocked" });
+    }
+    if (user.intl_blocked_reason) {
+      return res.json({ blocked: true, blockedReason: user.intl_blocked_reason });
+    }
+    if (!user.stripe_payment_method_attached) {
+      return res.json({ blocked: true, blockedReason: "no_payment_method_for_intl" });
+    }
+
+    // Resolve recipients (phones) from selected groups (snapshot + meta)
+    // Meta groups: resolve descendant snapshot groups via recursive CTE.
+    const rows = await db.raw(
+      `
+      WITH RECURSIVE descendants AS (
+        SELECT g.id, g.type
+        FROM groups g
+        WHERE g.user_id = ? AND g.id = ANY(?)
+
+        UNION ALL
+
+        SELECT child.id, child.type
+        FROM meta_group_links l
+        JOIN groups parent ON parent.id = l.parent_group_id
+        JOIN groups child ON child.id = l.child_group_id
+        JOIN descendants d ON d.id = parent.id
+        WHERE parent.user_id = ?
+      ),
+      snapshot_groups AS (
+        SELECT DISTINCT id
+        FROM descendants
+        WHERE type = 'snapshot'
+      ),
+      member_contacts AS (
+        SELECT DISTINCT c.phone_e164 AS phone
+        FROM group_members gm
+        JOIN snapshot_groups sg ON sg.id = gm.group_id
+        JOIN contacts c ON c.id = gm.contact_id
+        WHERE c.user_id = ? AND c.phone_e164 IS NOT NULL AND c.phone_e164 <> ''
+      )
+      SELECT phone FROM member_contacts
+      `,
+      [userId, groupIds, userId, userId],
+    );
+
+    const recipients = (rows?.rows || []).map((r) => r.phone).filter(Boolean);
+
+    if (!recipients.length) {
+      return res.status(400).json({ error: "no_sms_recipients" });
+    }
+
+    let intlCount = 0;
+    let domesticCount = 0;
+
+    // Count by country to minimize Twilio calls
+    const countryCounts = new Map();
+
+    for (const e164 of recipients) {
+      const cc = parseE164CountryCode(e164);
+      if (!cc) return res.status(400).json({ error: `invalid_phone:${e164}` });
+
+      if (isDomesticUSCA(cc)) {
+        domesticCount++;
+        continue;
+      }
+
+      const tier = getIntlTier(cc);
+      if (tier === "tier3") {
+        return res.json({ blocked: true, blockedReason: `intl_blocked_country_${cc}` });
+      }
+
+      intlCount++;
+      countryCounts.set(cc, (countryCounts.get(cc) || 0) + 1);
+    }
+
+    // If no intl recipients, no intl charge flow
+    if (intlCount === 0) {
+      return res.json({
+        blocked: false,
+        domesticCount,
+        intlCount: 0,
+        estimatedIntlCents: 0,
+        requiresConfirm: false,
+        requiresImmediateCharge: false,
+      });
+    }
+
+    let estimatedIntlCents = 0;
+
+    for (const [cc, count] of countryCounts.entries()) {
+      const tier = getIntlTier(cc);
+      const mult =
+  tier === "tier1"
+    ? INTL_MULTIPLIERS.tier1
+    : INTL_MULTIPLIERS.tier2;
+
+      const unitUsd = await getTwilioSmsUnitPriceUSD(cc);
+      const unitCents = Math.round(unitUsd * 100);
+      const billedUnitCents = Math.ceil(unitCents * mult);
+
+      estimatedIntlCents += billedUnitCents * count;
+    }
+
+    const caps = plan === PLAN.PRO ? INTL_CAPS_CENTS.pro : INTL_CAPS_CENTS.business;
+    const since = user.intl_spend_since_charge_cents || 0;
+
+    const breachesSoftPerBlast = estimatedIntlCents > caps.soft_per_blast;
+    const breachesHardAccum = since + estimatedIntlCents > caps.hard_accum;
+
+    const requiresImmediateCharge = breachesSoftPerBlast || breachesHardAccum;
+
+    return res.json({
+      blocked: false,
+      domesticCount,
+      intlCount,
+      estimatedIntlCents,
+      estimatedIntlUsd: (estimatedIntlCents / 100).toFixed(2),
+      caps,
+      intlSpendSinceChargeCents: since,
+      requiresConfirm: true,
+      requiresImmediateCharge,
+      reason: breachesSoftPerBlast ? "softcap_per_blast" : breachesHardAccum ? "hardcap_accum" : null,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: "quote_failed" });
+  }
+});
+
+===== END FILE =====
+
+===== FILE: services/backend/src/routes/blasts.routes.js =====
+import { Router } from "express";
+import crypto from "crypto";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+
+export const blastsRouter = Router();
+
+/**
+ * POST /v1/blasts
+ * Auth: Bearer JWT required
+ * body: { name, subject, body, channels: ["sms","email"], replyMode }
+ */
+blastsRouter.post("/", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "missing_token" });
+
+  const name = String(req.body?.name ?? "").trim();
+  const subject = String(req.body?.subject ?? "").trim();
+  const body = String(req.body?.body ?? "").trim();
+  const replyMode = String(req.body?.replyMode ?? "private");
+  const channels = Array.isArray(req.body?.channels) ? req.body.channels.map(String) : [];
+
+  if (!name) return res.status(400).json({ error: "name required" });
+  if (!body) return res.status(400).json({ error: "body required" });
+  if (!channels.length) return res.status(400).json({ error: "channels required" });
+
+  const id = crypto.randomUUID();
+
+  await db("blasts").insert({
+    id,
+    user_id: userId,
+    name,
+    subject,
+    body,
+    channels: JSON.stringify(channels),
+    reply_mode: replyMode,
+    created_at: db.fn.now(),
+    updated_at: db.fn.now(),
+  });
+
+  res.json({ id, name, subject, body, channels, replyMode });
+});
+
+===== END FILE =====
+
+===== FILE: services/backend/src/routes/blasts.send.routes.js =====
+import { Router } from "express";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+import { chargeIntlNow } from "../services/stripe_charge.service.js";
+import { resolveRecipients } from "../services/recipientsResolve.service.js";
+
+export const blastsSendRouter = Router();
+
+/**
+ * POST /v1/blasts/send
+ * Auth: Bearer JWT required
+ *
+ * Body:
+ * {
+ *   groupIds: [],
+ *   contactIds: [],
+ *   channels: ["sms","email"],
+ *   body: "...",
+ *   quote: {...}
+ * }
+ */
+blastsSendRouter.post("/", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "missing_token" });
+
+  const { groupIds, contactIds, channels, body, quote } = req.body || {};
+
+  const ch = Array.isArray(channels) ? channels.map(String) : ["sms"];
+  const msgBody = String(body || "").trim();
+  if (!msgBody) return res.status(400).json({ error: "body required" });
+
+  const user = await db("users").where({ id: userId }).first();
+  if (!user) return res.status(404).json({ error: "user not found" });
+
+  if (user.intl_blocked_reason) {
+    return res.status(402).json({ error: "intl_blocked", reason: user.intl_blocked_reason });
+  }
+
+  const resolved = await resolveRecipients({
+    userId,
+    groupIds,
+    contactIds,
+  });
+
+  const smsRecipients = resolved.sms;
+  const emailRecipients = resolved.email;
+
+  const wantsSms = ch.includes("sms");
+  const wantsEmail = ch.includes("email");
+
+  const totalQueued =
+    (wantsSms ? smsRecipients.length : 0) + (wantsEmail ? emailRecipients.length : 0);
+
+  if (totalQueued === 0) {
+    return res.status(400).json({ error: "No recipients (missing destinations for selected channels)" });
+  }
+
+  // If intl requires immediate charge, do it BEFORE sending
+  if (quote?.requiresImmediateCharge === true && Number(quote?.estimatedIntlCents || 0) > 0) {
+    try {
+      await chargeIntlNow({
+        userId,
+        amountCents: Number(quote.estimatedIntlCents),
+        reason: String(quote.reason || "intl"),
+      });
+
+      await db("users")
+        .where({ id: userId })
+        .update({
+          intl_spend_since_charge_cents: db.raw("intl_spend_since_charge_cents + ?", [Number(quote.estimatedIntlCents)]),
+          intl_spend_cycle_cents: db.raw("intl_spend_cycle_cents + ?", [Number(quote.estimatedIntlCents)]),
+        });
+    } catch (e) {
+      await db("users").where({ id: userId }).update({ intl_blocked_reason: "payment_failed" });
+      return res.status(402).json({ error: "payment_failed", detail: String(e?.message || e) });
+    }
+  }
+
+  // MVP: mock queue (real enqueue later)
+  const blastId = cryptoRandomId();
+
+  return res.json({
+    ok: true,
+    blastId,
+    queued: totalQueued,
+    queuedSms: wantsSms ? smsRecipients.length : 0,
+    queuedEmail: wantsEmail ? emailRecipients.length : 0,
+  });
+});
+
+function cryptoRandomId() {
+  // avoid importing crypto in case this file is executed in constrained envs
+  return `${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+}
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/twilioPricing.service.js =====
+import axios from "axios";
+import { redis } from "../config/redis.js"; // assumes you have a redis config; adjust if yours differs
+
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+
+// Twilio Pricing API base
+const BASE = "https://pricing.twilio.com/v1/Messaging/Countries";
+
+// cache TTL seconds
+const TTL = 3600;
+
+function authHeader() {
+  const b64 = Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString("base64");
+  return { Authorization: `Basic ${b64}` };
+}
+
+/**
+ * Returns unit price per SMS segment in USD for a destination country.
+ * NOTE: This is destination pricing; carrier price can vary but this is the correct preflight.
+ */
+export async function getTwilioSmsUnitPriceUSD(countryCode) {
+  const key = `twilio:pricing:sms:${countryCode}`;
+  const cached = await redis.get(key);
+  if (cached) return Number(cached);
+
+  const url = `${BASE}/${encodeURIComponent(countryCode)}`;
+  const res = await axios.get(url, { headers: authHeader() });
+
+  // Twilio response: look for outbound sms prices
+  // Structure can vary slightly; keep robust:
+  const prices = res.data?.outbound_sms_prices || res.data?.outbound_sms_price || res.data?.outbound_sms_prices;
+  if (!Array.isArray(prices) || prices.length === 0) {
+    throw new Error(`Twilio pricing missing outbound_sms_prices for ${countryCode}`);
+  }
+
+  // Prefer "carrier" null / generic price if present
+  const unit = Number(prices[0]?.prices?.[0]?.current_price ?? prices[0]?.current_price ?? prices[0]?.price);
+  if (!Number.isFinite(unit)) {
+    throw new Error(`Twilio pricing parse failed for ${countryCode}`);
+  }
+
+  await redis.setex(key, TTL, String(unit));
+  return unit;
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/services/twilio_pricing.service.js =====
+// services/backend/src/services/twilio_pricing.service.js
+import axios from "axios";
+
+// NOTE: if you have redis, you can cache results.
+// This version is â€œno-cacheâ€ to compile everywhere first.
+
+const SID = process.env.TWILIO_ACCOUNT_SID;
+const TOKEN = process.env.TWILIO_AUTH_TOKEN;
+
+const BASE = "https://pricing.twilio.com/v1/Messaging/Countries";
+
+function authHeader() {
+  const b64 = Buffer.from(`${SID}:${TOKEN}`).toString("base64");
+  return { Authorization: `Basic ${b64}` };
+}
+
+// Returns USD per segment (approx) for outbound SMS to that country
+export async function getTwilioSmsUnitPriceUSD(countryCode) {
+  const url = `${BASE}/${encodeURIComponent(countryCode)}`;
+  const res = await axios.get(url, { headers: authHeader() });
+
+  const prices = res.data?.outbound_sms_prices;
+  if (!Array.isArray(prices) || prices.length === 0) {
+    throw new Error(`Twilio pricing missing outbound_sms_prices for ${countryCode}`);
+  }
+
+  // Take first available price. (Good enough for preflight guardrails.)
+  const raw = prices[0]?.prices?.[0]?.current_price ?? prices[0]?.current_price;
+  const unit = Number(raw);
+  if (!Number.isFinite(unit)) throw new Error(`Twilio pricing parse failed for ${countryCode}`);
+
+  return unit;
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/db/migrations/002_core_entities.js =====
+export async function up(knex) {
+  // Contacts
+  await knex.schema.createTable("contacts", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable().defaultTo("");
+    t.text("email");          // optional
+    t.text("phone_e164");     // optional
+    t.text("tags").notNullable().defaultTo(""); // comma list (simple for v1)
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "email"]);
+    t.unique(["user_id", "phone_e164"]);
+  });
+
+  // Groups
+  await knex.schema.createTable("groups", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable();
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "name"]);
+  });
+
+  // Group Members
+  await knex.schema.createTable("group_members", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("group_id").notNullable().index();
+    t.uuid("contact_id").notNullable().index();
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["group_id", "contact_id"]);
+  });
+
+  // Templates
+  await knex.schema.createTable("templates", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable();
+    t.text("channel").notNullable(); // sms|email
+    t.text("subject").notNullable().defaultTo(""); // email optional
+    t.text("body").notNullable(); // supports {{name}} etc (render later)
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "name", "channel"]);
+  });
+
+  // Blasts
+  await knex.schema.createTable("blasts", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable().defaultTo("");
+    t.text("channel").notNullable(); // sms|email
+    t.text("subject").notNullable().defaultTo("");
+    t.text("body").notNullable();
+    t.text("status").notNullable().defaultTo("draft"); // draft|queued|sending|done
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+  });
+
+  // Blast Recipients
+  await knex.schema.createTable("blast_recipients", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("blast_id").notNullable().index();
+    t.uuid("contact_id").notNullable().index();
+    t.text("destination").notNullable(); // email or phone
+    t.text("status").notNullable().defaultTo("queued"); // queued|sent|failed
+    t.text("fail_code").notNullable().defaultTo("");
+    t.text("provider_message_id").notNullable().defaultTo("");
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["blast_id", "destination"]);
+  });
+
+  // Message events (audit trail for delivery + internal status)
+  await knex.schema.createTable("message_events", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("blast_id").notNullable().index();
+    t.uuid("blast_recipient_id").notNullable().index();
+    t.text("event_type").notNullable(); // queued|sending|sent|failed|provider_update
+    t.jsonb("payload").notNullable().defaultTo("{}");
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+  });
+}
+
+export async function down(knex) {
+  await knex.schema.dropTableIfExists("message_events");
+  await knex.schema.dropTableIfExists("blast_recipients");
+  await knex.schema.dropTableIfExists("blasts");
+  await knex.schema.dropTableIfExists("templates");
+  await knex.schema.dropTableIfExists("group_members");
+  await knex.schema.dropTableIfExists("groups");
+  await knex.schema.dropTableIfExists("contacts");
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/db/migrations/008_billing_intl_fields.js =====
+// services/backend/src/db/migrations/008_billing_intl_fields.js
+export async function up(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  await knex.schema.alterTable("users", (t) => {
+    t.string("plan_tier").notNullable().defaultTo("free"); // free|pro|business
+
+    t.string("stripe_customer_id").nullable();
+    t.boolean("stripe_payment_method_attached").notNullable().defaultTo(false);
+
+    // International spend tracking (in cents)
+    t.integer("intl_spend_since_charge_cents").notNullable().defaultTo(0);
+    t.integer("intl_spend_cycle_cents").notNullable().defaultTo(0);
+
+    // If payment fails, block intl sends until resolved
+    t.string("intl_blocked_reason").nullable(); // e.g. payment_failed
+  });
+}
+
+export async function down(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  await knex.schema.alterTable("users", (t) => {
+    t.dropColumn("plan_tier");
+    t.dropColumn("stripe_customer_id");
+    t.dropColumn("stripe_payment_method_attached");
+    t.dropColumn("intl_spend_since_charge_cents");
+    t.dropColumn("intl_spend_cycle_cents");
+    t.dropColumn("intl_blocked_reason");
+  });
+}
+
+
+===== END FILE =====
+
+===== FILE: services/backend/src/db/migrations/20260117_add_billing_and_intl_caps.js =====
+export async function up(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  // plan_tier
+  if (!(await knex.schema.hasColumn("users", "plan_tier"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("plan_tier").notNullable().defaultTo("free");
+    });
+  }
+
+  // billing_source
+  if (!(await knex.schema.hasColumn("users", "billing_source"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("billing_source").notNullable().defaultTo("stripe");
+    });
+  }
+
+  // stripe_customer_id
+  if (!(await knex.schema.hasColumn("users", "stripe_customer_id"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("stripe_customer_id").nullable();
+    });
+  }
+
+  // stripe_payment_method_attached
+  if (!(await knex.schema.hasColumn("users", "stripe_payment_method_attached"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.boolean("stripe_payment_method_attached").notNullable().defaultTo(false);
+    });
+  }
+
+  // intl_spend_since_charge_cents
+  if (!(await knex.schema.hasColumn("users", "intl_spend_since_charge_cents"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.integer("intl_spend_since_charge_cents").notNullable().defaultTo(0);
+    });
+  }
+
+  // intl_spend_cycle_cents
+  if (!(await knex.schema.hasColumn("users", "intl_spend_cycle_cents"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.integer("intl_spend_cycle_cents").notNullable().defaultTo(0);
+    });
+  }
+
+  // intl_blocked_reason
+  if (!(await knex.schema.hasColumn("users", "intl_blocked_reason"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("intl_blocked_reason").nullable();
+    });
+  }
+}
+export async function down(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  await knex.schema.alterTable("users", (t) => {
+    t.dropColumn("plan_tier");
+    t.dropColumn("billing_source");
+    t.dropColumn("stripe_customer_id");
+    t.dropColumn("stripe_payment_method_attached");
+    t.dropColumn("intl_spend_since_charge_cents");
+    t.dropColumn("intl_spend_cycle_cents");
+    t.dropColumn("intl_blocked_reason");
+  });
+}
+
+
+===== END FILE =====

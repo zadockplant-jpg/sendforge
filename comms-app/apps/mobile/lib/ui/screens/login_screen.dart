@@ -14,30 +14,30 @@ class LoginScreen extends StatefulWidget {
     required this.service,
   });
 
-
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
   @override
-void initState() {
-  super.initState();
+  void initState() {
+    super.initState();
 
-  final uri = Uri.base;
+    final uri = Uri.base;
 
-  if (uri.queryParameters["verified"] == "1") {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+    if (uri.queryParameters["verified"] == "1") {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Email verified successfully ✅"),
-        ),
-      );
-    });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Email verified successfully ✅"),
+          ),
+        );
+      });
+    }
   }
-}
+
   final emailCtrl = TextEditingController();
   final passCtrl = TextEditingController();
 
@@ -63,7 +63,6 @@ void initState() {
       final msg = e.toString();
 
       setState(() {
-        // backend throws "Exception: email_not_verified"
         needsVerify = msg.contains("email_not_verified");
         error = needsVerify
             ? "Please verify your email before logging in."
@@ -97,6 +96,7 @@ void initState() {
   }
 
   Future<void> demoLogin() async {
+    // ✅ No dev-user wiring here; demo token stays as-is (existing behavior)
     await widget.auth.login("demo-token");
   }
 
@@ -145,12 +145,19 @@ void initState() {
                     TextField(
                       controller: emailCtrl,
                       decoration: const InputDecoration(labelText: 'Email'),
+                      textInputAction: TextInputAction.next,
+                      onSubmitted: (_) {
+                        // Enter moves focus to password (default behavior on most platforms)
+                      },
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: passCtrl,
                       obscureText: true,
                       decoration: const InputDecoration(labelText: 'Password'),
+                      textInputAction: TextInputAction.done,
+                      // ✅ Enter submits login
+                      onSubmitted: (_) => submit(),
                     ),
                     const SizedBox(height: 20),
 

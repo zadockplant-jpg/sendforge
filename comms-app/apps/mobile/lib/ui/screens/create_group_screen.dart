@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
 import '../../services/groups_api.dart';
 import '../colors.dart';
-import '../groups/group_avatar_catalog.dart';
+import '../groups/avatar_picker_modal.dart';
+import '../groups/group_avatar_atlas.dart';
 
 class CreateGroupScreen extends StatefulWidget {
   final AppState appState;
@@ -15,12 +16,10 @@ class CreateGroupScreen extends StatefulWidget {
   });
 
   @override
-  State<CreateGroupScreen> createState() =>
-      _CreateGroupScreenState();
+  State<CreateGroupScreen> createState() => _CreateGroupScreenState();
 }
 
-class _CreateGroupScreenState
-    extends State<CreateGroupScreen> {
+class _CreateGroupScreenState extends State<CreateGroupScreen> {
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
 
@@ -28,6 +27,16 @@ class _CreateGroupScreenState
 
   bool _saving = false;
   String? _err;
+
+  Future<void> _pickAvatar() async {
+    await showDialog(
+      context: context,
+      builder: (_) => AvatarPickerModal(
+        selected: _selectedAvatar,
+        onSelected: (k) => setState(() => _selectedAvatar = k),
+      ),
+    );
+  }
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
@@ -43,7 +52,7 @@ class _CreateGroupScreenState
       await groupsApi.create(
         name: _nameCtrl.text.trim(),
         type: widget.type,
-        avatarKey: _selectedAvatar,
+        avatarKey: _selectedAvatar, // ✅ store avatarKey string only
       );
 
       await widget.appState.loadGroups();
@@ -62,8 +71,7 @@ class _CreateGroupScreenState
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-            isMeta ? "Create Meta Group" : "Create Group"),
+        title: Text(isMeta ? "Create Meta Group" : "Create Group"),
         backgroundColor: SFColors.primaryBlue,
         foregroundColor: Colors.white,
       ),
@@ -76,73 +84,85 @@ class _CreateGroupScreenState
               children: [
                 if (_err != null)
                   Padding(
-                    padding:
-                        const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.only(bottom: 12),
                     child: Text(
                       _err!,
-                      style: const TextStyle(
-                          color: Colors.red),
+                      style: const TextStyle(color: Colors.red),
                     ),
                   ),
-
                 Form(
                   key: _formKey,
                   child: TextFormField(
                     controller: _nameCtrl,
-                    decoration:
-                        const InputDecoration(
+                    decoration: const InputDecoration(
                       labelText: "Group Name",
                     ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty)
-                            ? "Name required"
-                            : null,
+                    validator: (v) => (v == null || v.trim().isEmpty)
+                        ? "Name required"
+                        : null,
                   ),
                 ),
-
-                const SizedBox(height: 24),
-
+                const SizedBox(height: 22),
                 const Text(
                   "Select Avatar",
-                  style: TextStyle(
-                      fontWeight: FontWeight.w600),
+                  style: TextStyle(fontWeight: FontWeight.w700),
                 ),
-
-                const SizedBox(height: 12),
-
-                Wrap(
-                  spacing: 10,
-                  runSpacing: 10,
-                  children: groupAvatarCatalog.map((key) {
-                    final selected =
-                        _selectedAvatar == key;
-
-                    return ChoiceChip(
-                      label: Text(key),
-                      selected: selected,
-                      onSelected: (_) {
-                        setState(
-                            () => _selectedAvatar = key);
-                      },
-                    );
-                  }).toList(),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    if (_selectedAvatar != null)
+                      GroupAvatarAtlas(
+                        avatarKey: _selectedAvatar!,
+                        size: 56,
+                      )
+                    else
+                      Container(
+                        width: 56,
+                        height: 56,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(Icons.image_outlined),
+                      ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: _pickAvatar,
+                        child: Text(
+                          _selectedAvatar == null ? "Choose Avatar" : "Change Avatar",
+                          style: const TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    ),
+                    if (_selectedAvatar != null) ...[
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: "Clear",
+                        onPressed: () => setState(() => _selectedAvatar = null),
+                        icon: const Icon(Icons.clear),
+                      ),
+                    ],
+                  ],
                 ),
-
-                const SizedBox(height: 30),
-
+                const SizedBox(height: 26),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
-                    onPressed:
-                        _saving ? null : _save,
+                    onPressed: _saving ? null : _save,
                     child: Text(
-                      _saving
-                          ? "Saving..."
-                          : "Create",
-                      style: const TextStyle(
-                          fontWeight:
-                              FontWeight.w800),
+                      _saving ? "Saving..." : "Create",
+                      style: const TextStyle(fontWeight: FontWeight.w800),
                     ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  "Note: make sure the avatar atlas asset is included at "
+                  "assets/avatars/group_avatars.png in pubspec.yaml.",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: SFColors.textPrimary.withOpacity(0.7),
                   ),
                 ),
               ],

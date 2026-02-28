@@ -4,7 +4,7 @@ import '../../core/auth_state.dart';
 import '../colors.dart';
 
 class RegisterScreen extends StatefulWidget {
-  final AuthState auth; // kept for signature consistency (not used in Option A)
+  final AuthState auth; // signature unchanged
   final AuthService service;
 
   const RegisterScreen({
@@ -80,6 +80,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 TextField(
                   controller: emailCtrl,
                   decoration: const InputDecoration(labelText: "Email"),
+                  textInputAction: TextInputAction.next,
                 ),
                 const SizedBox(height: 16),
 
@@ -87,6 +88,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   controller: passCtrl,
                   obscureText: true,
                   decoration: const InputDecoration(labelText: "Password (8+ chars)"),
+                  textInputAction: TextInputAction.done,
+                  // ✅ Enter submits register
+                  onSubmitted: (_) => submit(),
                 ),
                 const SizedBox(height: 24),
 

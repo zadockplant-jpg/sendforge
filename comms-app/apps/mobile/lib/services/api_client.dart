@@ -45,8 +45,7 @@ class ApiClient {
     return (decoded as Map<String, dynamic>);
   }
 
-  Future<Map<String, dynamic>> postJson(
-      String path, Map<String, dynamic> body) async {
+  Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body) async {
     final uri = Uri.parse('$baseUrl$path');
 
     final res = await http.post(
@@ -68,9 +67,8 @@ class ApiClient {
     return (decoded as Map<String, dynamic>);
   }
 
-  // ✅ Added to match backend PUT routes
-  Future<Map<String, dynamic>> putJson(
-      String path, Map<String, dynamic> body) async {
+  // ✅ match backend PUT routes
+  Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body) async {
     final uri = Uri.parse('$baseUrl$path');
 
     final res = await http.put(
@@ -90,6 +88,23 @@ class ApiClient {
     }
 
     return (decoded as Map<String, dynamic>);
+  }
+
+  // ✅ required for HARD delete contacts
+  Future<void> deleteJson(String path) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.delete(uri, headers: await _headers());
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
   }
 }
 
