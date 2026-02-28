@@ -1,0 +1,2048 @@
+
+
+===== FILE: services/backend/src/services/contactImport.service.js =====
+
+// comms-app/services/backend/src/services/contactImport.service.js
+import { parsePhoneNumberFromString } from "libphonenumber-js";
+
+import { dedupeContacts } from "./dedupe.service.js";
+import { auditLog } from "./audit.service.js";
+import { db } from "../config/db.js";
+
+/**
+ * Normalize phone input to E.164 at ingestion.
+ *
+ * Goals:
+ * - US numbers no longer flagged intl incorrectly (default region US when no +country code)
+ * - Preserve existing import behavior (best-effort; invalids filtered)
+ * - Do NOT touch tier logic
+ *
+ * Storage:
+ * - contacts.phone_e164 receives normalized E.164
+ * - we keep normalized object field "phone" as E.164 to remain compatible with dedupeContacts()
+ */
+function normalizePhoneToE164(raw) {
+  if (typeof raw !== "string") return null;
+
+  let s = raw.trim();
+  if (!s) return null;
+
+  // Remove common separators but keep leading +
+  s = s.replace(/[()\-\.\s]/g, "");
+
+  // Convert 00 prefix to +
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+
+  // If it has letters, discard (avoid garbage)
+  if (/[a-zA-Z]/.test(s)) return null;
+
+  // If it’s all digits, treat as national (US default)
+  // Examples:
+  //  - 10 digits -> US
+  //  - 11 digits starting with 1 -> US
+  //  - anything else -> attempt parse with US then fallback null
+  const isDigitsOnly = /^[0-9]+$/.test(s);
+
+  try {
+    if (s.startsWith("+")) {
+      const p = parsePhoneNumberFromString(s);
+      if (p && p.isValid()) return p.number; // E.164
+      return null;
+    }
+
+    if (isDigitsOnly) {
+      if (s.length === 10) {
+        const p = parsePhoneNumberFromString(s, "US");
+        if (p && p.isValid()) return p.number;
+        return null;
+      }
+      if (s.length === 11 && s.startsWith("1")) {
+        const p = parsePhoneNumberFromString(s.slice(1), "US");
+        if (p && p.isValid()) return p.number;
+        return null;
+      }
+
+      // last-ditch: try parsing as US
+      const p = parsePhoneNumberFromString(s, "US");
+      if (p && p.isValid()) return p.number;
+      return null;
+    }
+
+    // Non-digit national format: still try US (best-effort)
+    const p = parsePhoneNumberFromString(s, "US");
+    if (p && p.isValid()) return p.number;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function importContacts({ userId, method, contacts }) {
+  if (!userId) throw new Error("missing_user");
+
+  const normalized = (contacts || []).map(normalize).filter(Boolean);
+
+  const { unique, duplicates } = dedupeContacts(normalized);
+
+  let inserted = 0;
+
+  // Insert best-effort; count actual inserts (not just attempts)
+  for (const c of unique) {
+    const rows = await db("contacts")
+      .insert({
+        user_id: userId,
+        name: c.name,
+        // ✅ store E.164
+        phone_e164: c.phone, // "phone" is E.164 in normalized object
+        email: c.email,
+        organization: c.organization || null,
+        source: method,
+        created_at: new Date(),
+      })
+      .onConflict(["user_id", "phone_e164", "email"])
+      .ignore()
+      .returning(["id"]);
+
+    if (Array.isArray(rows) && rows.length > 0) inserted++;
+  }
+
+  // Audit should never block import success
+  try {
+    await auditLog(userId, "contacts_import", {
+      method,
+      inserted,
+      duplicates: duplicates.length,
+      invalid: (contacts?.length || 0) - normalized.length,
+    });
+  } catch (_) {
+    // ignore
+  }
+
+  return {
+    added: inserted,
+    duplicates: duplicates.length,
+    invalid: (contacts?.length || 0) - normalized.length,
+    // keep these if you want them for debugging/UI (safe-ish)
+    unique,
+    duplicatesList: duplicates,
+  };
+}
+
+function normalize(c) {
+  if (!c) return null;
+
+  const name = typeof c.name === "string" ? c.name.trim() : "";
+  const organization = typeof c.organization === "string" ? c.organization.trim() : "";
+
+  const rawPhone = typeof c.phone === "string" ? c.phone.trim() : "";
+  const rawEmail = typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
+
+  const phoneE164 = rawPhone ? normalizePhoneToE164(rawPhone) : null;
+  const email = rawEmail || null;
+
+  // If both missing after normalization, skip
+  if (!phoneE164 && !email) return null;
+
+  return {
+    name,
+    organization: organization || null,
+    // ✅ keep property name "phone" for dedupe compatibility, but value is E.164
+    phone: phoneE164,
+    email,
+  };
+}
+
+
+===== FILE: services/backend/src/routes/contacts.routes.js =====
+
+import express from "express";
+import { db } from "../config/db.js";
+import { importContacts } from "../services/contactImport.service.js";
+
+const router = express.Router();
+
+/**
+ * POST /v1/contacts/import
+ * Auth required (req.user injected by upstream auth middleware)
+ * Body:
+ * {
+ *   method: "google" | "csv" | "manual",
+ *   contacts: [{ name, phone, email, organization?, sourceMeta? }]
+ * }
+ */
+router.post("/import", async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) {
+      return res.status(401).json({ error: "missing_token" });
+    }
+
+    const { method, contacts } = req.body || {};
+
+    if (!Array.isArray(contacts)) {
+      throw new Error("contacts must be an array");
+    }
+
+    const result = await importContacts({
+      userId,
+      method,
+      contacts,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      ...result,
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err?.message || String(err),
+    });
+  }
+});
+
+/**
+ * DELETE /v1/contacts/:id
+ * HARD delete
+ * - deletes group_members rows first (manual cascade)
+ * - then deletes contact
+ */
+router.delete("/:id", async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) {
+      return res.status(401).json({ error: "missing_token" });
+    }
+
+    const contactId = String(req.params.id || "");
+
+    if (!contactId) {
+      return res.status(400).json({ ok: false, error: "missing_contact_id" });
+    }
+
+    // ensure the contact belongs to user (soft guard)
+    const exists = await db("contacts")
+      .select("id")
+      .where({ id: contactId, user_id: userId })
+      .first();
+
+    if (!exists) {
+      return res.status(404).json({ ok: false, error: "contact_not_found" });
+    }
+
+    // manual cascade (do NOT assume FK cascade exists)
+    await db("group_members").where({ user_id: userId, contact_id: contactId }).del();
+
+    await db("contacts").where({ user_id: userId, id: contactId }).del();
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+export default router;
+
+
+===== FILE: services/backend/src/config/db.js =====
+
+import knex from "knex";
+import { env } from "./env.js";
+
+export const db = knex({ client: "pg", connection: env.databaseUrl });
+
+
+
+===== FILE: services/backend/knexfile.cjs =====
+
+// knexfile.cjs
+require("dotenv").config(); // <-- loads .env for knex CLI
+
+module.exports = {
+  client: "pg",
+  connection: process.env.DATABASE_URL,
+  migrations: { directory: "./src/db/migrations" },
+};
+
+
+
+===== FILE: services/backend/migrations =====
+
+[MISSING] services/backend/migrations
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\001_init.js =====
+
+export async function up(knex) {
+  await knex.schema.createTable("users", (t) => {
+    t.uuid("id").primary();
+    t.text("email").notNullable().unique();
+    t.text("password_hash").notNullable();
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+  });
+}
+
+export async function down(knex) {
+  await knex.schema.dropTableIfExists("users");
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\002_core_entities.js =====
+
+export async function up(knex) {
+  // Contacts
+  await knex.schema.createTable("contacts", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable().defaultTo("");
+    t.text("email");          // optional
+    t.text("phone_e164");     // optional
+    t.text("tags").notNullable().defaultTo(""); // comma list (simple for v1)
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "email"]);
+    t.unique(["user_id", "phone_e164"]);
+  });
+
+  // Groups
+  await knex.schema.createTable("groups", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable();
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "name"]);
+  });
+
+  // Group Members
+  await knex.schema.createTable("group_members", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("group_id").notNullable().index();
+    t.uuid("contact_id").notNullable().index();
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["group_id", "contact_id"]);
+  });
+
+  // Templates
+  await knex.schema.createTable("templates", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable();
+    t.text("channel").notNullable(); // sms|email
+    t.text("subject").notNullable().defaultTo(""); // email optional
+    t.text("body").notNullable(); // supports {{name}} etc (render later)
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "name", "channel"]);
+  });
+
+  // Blasts
+  await knex.schema.createTable("blasts", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("name").notNullable().defaultTo("");
+    t.text("channel").notNullable(); // sms|email
+    t.text("subject").notNullable().defaultTo("");
+    t.text("body").notNullable();
+    t.text("status").notNullable().defaultTo("draft"); // draft|queued|sending|done
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+  });
+
+  // Blast Recipients
+  await knex.schema.createTable("blast_recipients", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("blast_id").notNullable().index();
+    t.uuid("contact_id").notNullable().index();
+    t.text("destination").notNullable(); // email or phone
+    t.text("status").notNullable().defaultTo("queued"); // queued|sent|failed
+    t.text("fail_code").notNullable().defaultTo("");
+    t.text("provider_message_id").notNullable().defaultTo("");
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["blast_id", "destination"]);
+  });
+
+  // Message events (audit trail for delivery + internal status)
+  await knex.schema.createTable("message_events", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("blast_id").notNullable().index();
+    t.uuid("blast_recipient_id").notNullable().index();
+    t.text("event_type").notNullable(); // queued|sending|sent|failed|provider_update
+    t.jsonb("payload").notNullable().defaultTo("{}");
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+  });
+}
+
+export async function down(knex) {
+  await knex.schema.dropTableIfExists("message_events");
+  await knex.schema.dropTableIfExists("blast_recipients");
+  await knex.schema.dropTableIfExists("blasts");
+  await knex.schema.dropTableIfExists("templates");
+  await knex.schema.dropTableIfExists("group_members");
+  await knex.schema.dropTableIfExists("groups");
+  await knex.schema.dropTableIfExists("contacts");
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\003_compliance_unsub_suppressions.js =====
+
+export async function up(knex) {
+  // Global suppressions: opt-outs, bounces, complaints, manual blocks
+  await knex.schema.createTable("suppressions", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("channel").notNullable();      // sms|email
+    t.text("destination").notNullable();  // phone/email
+    t.text("reason").notNullable().defaultTo(""); // stop|bounce|complaint|manual
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "channel", "destination"]);
+  });
+
+  // Unsubscribe tokens for email links (maps token -> user + destination)
+  await knex.schema.createTable("unsubscribe_tokens", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.text("channel").notNullable();     // email
+    t.text("destination").notNullable(); // email
+    t.text("token").notNullable().unique();
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+  });
+}
+
+export async function down(knex) {
+  await knex.schema.dropTableIfExists("unsubscribe_tokens");
+  await knex.schema.dropTableIfExists("suppressions");
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\004_billing.js =====
+
+export async function up(knex) {
+  await knex.schema.createTable("subscriptions", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+
+    t.text("provider").notNullable(); // apple|google|stripe|manual
+    t.text("provider_customer_id").notNullable().defaultTo(""); // stripe customer id, etc
+    t.text("provider_subscription_id").notNullable().defaultTo(""); // stripe sub id, etc
+
+    t.text("plan").notNullable(); // basic|pro|enterprise
+    t.text("status").notNullable(); // active|canceled|expired|trialing|past_due
+    t.timestamp("current_period_start", { useTz: true });
+    t.timestamp("current_period_end", { useTz: true });
+
+    t.jsonb("raw").notNullable().defaultTo("{}"); // store provider payloads safely
+
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+
+    t.index(["user_id", "status"]);
+  });
+
+  await knex.schema.createTable("usage_counters", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+
+    // YYYY-MM for monthly bucket (simple + effective)
+    t.text("period").notNullable(); // e.g. "2025-12"
+    t.text("channel").notNullable(); // sms|email
+    t.integer("count").notNullable().defaultTo(0);
+
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "period", "channel"]);
+  });
+}
+
+export async function down(knex) {
+  await knex.schema.dropTableIfExists("usage_counters");
+  await knex.schema.dropTableIfExists("subscriptions");
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\006_threads_messages.js =====
+
+export async function up(knex) {
+  await knex.schema.createTable("threads", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("group_id").nullable().index();
+    t.text("channel").notNullable(); // sms|email
+    t.text("peer").notNullable(); // phone/email
+    t.text("title").notNullable().defaultTo("");
+    t.timestamp("last_message_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.unique(["user_id", "channel", "peer"]);
+  });
+
+  await knex.schema.createTable("messages", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+    t.uuid("thread_id").notNullable().index();
+    t.text("direction").notNullable(); // inbound|outbound
+    t.text("channel").notNullable(); // sms|email
+    t.text("from").notNullable().defaultTo("");
+    t.text("to").notNullable().defaultTo("");
+    t.text("body").notNullable().defaultTo("");
+    t.text("provider").notNullable().defaultTo(""); // twilio|sendgrid
+    t.text("provider_message_id").notNullable().defaultTo("");
+    t.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.index(["thread_id", "created_at"]);
+  });
+}
+
+export async function down(knex) {
+  await knex.schema.dropTableIfExists("messages");
+  await knex.schema.dropTableIfExists("threads");
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\007_usage_counters.js =====
+
+// services/backend/src/db/migrations/007_usage_counters.js
+export async function up(knex) {
+  const exists = await knex.schema.hasTable("usage_counters");
+  if (exists) return;
+
+  await knex.schema.createTable("usage_counters", (t) => {
+    t.uuid("id").primary();
+    t.uuid("user_id").notNullable().index();
+
+    t.integer("sms_sent_month").notNullable().defaultTo(0);
+    t.integer("email_sent_month").notNullable().defaultTo(0);
+    t.integer("recipients_month").notNullable().defaultTo(0);
+
+    t.timestamp("month_start", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
+
+    t.unique(["user_id"]);
+  });
+}
+
+export async function down(knex) {
+  await knex.schema.dropTableIfExists("usage_counters");
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\008_billing_intl_fields.js =====
+
+// services/backend/src/db/migrations/008_billing_intl_fields.js
+export async function up(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  await knex.schema.alterTable("users", (t) => {
+    t.string("plan_tier").notNullable().defaultTo("free"); // free|pro|business
+
+    t.string("stripe_customer_id").nullable();
+    t.boolean("stripe_payment_method_attached").notNullable().defaultTo(false);
+
+    // International spend tracking (in cents)
+    t.integer("intl_spend_since_charge_cents").notNullable().defaultTo(0);
+    t.integer("intl_spend_cycle_cents").notNullable().defaultTo(0);
+
+    // If payment fails, block intl sends until resolved
+    t.string("intl_blocked_reason").nullable(); // e.g. payment_failed
+  });
+}
+
+export async function down(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  await knex.schema.alterTable("users", (t) => {
+    t.dropColumn("plan_tier");
+    t.dropColumn("stripe_customer_id");
+    t.dropColumn("stripe_payment_method_attached");
+    t.dropColumn("intl_spend_since_charge_cents");
+    t.dropColumn("intl_spend_cycle_cents");
+    t.dropColumn("intl_blocked_reason");
+  });
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\009_update_contacts_schema.cjs =====
+
+/**
+ * 009_update_contacts_schema.cjs
+ */
+
+exports.up = async function (knex) {
+  const hasPhone = await knex.schema.hasColumn('contacts', 'phone');
+  if (!hasPhone) {
+    await knex.schema.alterTable('contacts', (table) => {
+      table.string('phone');
+    });
+  }
+
+  const hasSource = await knex.schema.hasColumn('contacts', 'source');
+  if (!hasSource) {
+    await knex.schema.alterTable('contacts', (table) => {
+      table.string('source').defaultTo('manual');
+    });
+  }
+
+  const hasUserId = await knex.schema.hasColumn('contacts', 'user_id');
+  if (!hasUserId) {
+    await knex.schema.alterTable('contacts', (table) => {
+      table.string('user_id').notNullable().defaultTo('local-user');
+    });
+  }
+
+  // Composite uniqueness (safe attempt)
+  try {
+    await knex.schema.alterTable('contacts', (table) => {
+      table.unique(['user_id', 'phone', 'email']);
+    });
+  } catch (e) {
+    // index may already exist — ignore
+  }
+};
+
+exports.down = async function (knex) {
+  await knex.schema.alterTable('contacts', (table) => {
+    table.dropColumn('phone');
+    table.dropColumn('source');
+  });
+};
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\010_email_verification.cjs =====
+
+/**
+ * 010_email_verification.cjs
+ *
+ * Adds email verification fields to users table.
+ */
+
+module.exports.up = async function up(knex) {
+  const hasEmailVerified = await knex.schema.hasColumn("users", "email_verified");
+  if (!hasEmailVerified) {
+    await knex.schema.alterTable("users", (t) => {
+      t.boolean("email_verified").notNullable().defaultTo(false);
+    });
+  }
+
+  const hasVerifiedAt = await knex.schema.hasColumn("users", "verified_at");
+  if (!hasVerifiedAt) {
+    await knex.schema.alterTable("users", (t) => {
+      t.timestamp("verified_at").nullable();
+    });
+  }
+
+  const hasTokenHash = await knex.schema.hasColumn("users", "verification_token_hash");
+  if (!hasTokenHash) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("verification_token_hash").nullable();
+    });
+  }
+
+  const hasSentAt = await knex.schema.hasColumn("users", "verification_sent_at");
+  if (!hasSentAt) {
+    await knex.schema.alterTable("users", (t) => {
+      t.timestamp("verification_sent_at").nullable();
+    });
+  }
+
+  // Helpful index (safe attempt)
+  try {
+    await knex.schema.alterTable("users", (t) => {
+      t.index(["verification_token_hash"], "users_verification_token_hash_idx");
+    });
+  } catch (_) {}
+};
+
+module.exports.down = async function down(knex) {
+  // Down migrations are best-effort
+  const cols = [
+    "email_verified",
+    "verified_at",
+    "verification_token_hash",
+    "verification_sent_at",
+  ];
+
+  for (const c of cols) {
+    const has = await knex.schema.hasColumn("users", c);
+    if (has) {
+      await knex.schema.alterTable("users", (t) => t.dropColumn(c));
+    }
+  }
+};
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\011_fix_email_verification_columns.cjs =====
+
+/**
+ * 011_fix_email_verification_columns.cjs
+ *
+ * Cleans legacy email verification schema.
+ * - Drops email_verify_token
+ * - Ensures verification_token_hash
+ * - Ensures verification_sent_at
+ * - Ensures verified_at
+ */
+
+module.exports.up = async function up(knex) {
+  const hasLegacy = await knex.schema.hasColumn("users", "email_verify_token");
+
+  if (hasLegacy) {
+    await knex.schema.alterTable("users", (t) => {
+      t.dropColumn("email_verify_token");
+    });
+  }
+
+  const ensure = async (col, builder) => {
+    const has = await knex.schema.hasColumn("users", col);
+    if (!has) {
+      await knex.schema.alterTable("users", builder);
+    }
+  };
+
+  await ensure("verification_token_hash", (t) =>
+    t.string("verification_token_hash").nullable()
+  );
+
+  await ensure("verification_sent_at", (t) =>
+    t.timestamp("verification_sent_at").nullable()
+  );
+
+  await ensure("verified_at", (t) =>
+    t.timestamp("verified_at").nullable()
+  );
+};
+
+module.exports.down = async function down(knex) {
+  // No destructive rollback for safety
+};
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\012_contacts_uuid_and_org.cjs =====
+
+// 0XX_contacts_org_and_uuid_default.cjs
+// Adds contacts.organization + ensures contacts.id defaults to gen_random_uuid()
+
+exports.up = async function (knex) {
+  // gen_random_uuid() lives in pgcrypto on many Postgres installs
+  await knex.raw('CREATE EXTENSION IF NOT EXISTS "pgcrypto"');
+
+  // 1) organization column
+  const hasOrg = await knex.schema.hasColumn("contacts", "organization");
+  if (!hasOrg) {
+    await knex.schema.alterTable("contacts", (t) => {
+      t.text("organization").nullable();
+    });
+  }
+
+  // 2) DB default UUID for contacts.id (safe even if already set)
+  // If contacts.id is UUID type, this is correct.
+  // If contacts.id is TEXT, STOP and tell me—this would be wrong.
+  await knex.raw(`
+    ALTER TABLE contacts
+    ALTER COLUMN id SET DEFAULT gen_random_uuid();
+  `);
+};
+
+exports.down = async function (knex) {
+  // Drop column if present
+  const hasOrg = await knex.schema.hasColumn("contacts", "organization");
+  if (hasOrg) {
+    await knex.schema.alterTable("contacts", (t) => {
+      t.dropColumn("organization");
+    });
+  }
+
+  // Remove default (doesn't drop the column or type)
+  await knex.raw(`
+    ALTER TABLE contacts
+    ALTER COLUMN id DROP DEFAULT;
+  `);
+};
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\013_meta_groups.cjs =====
+
+// 0XX_meta_groups.cjs
+// Adds groups.type (snapshot|meta) and creates meta_group_links(parent_group_id, child_group_id)
+
+exports.up = async function (knex) {
+  // 1) groups.type column
+  const hasType = await knex.schema.hasColumn("groups", "type");
+  if (!hasType) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.text("type").notNullable().defaultTo("snapshot");
+    });
+  }
+
+  // 2) meta_group_links table
+  const hasLinks = await knex.schema.hasTable("meta_group_links");
+  if (!hasLinks) {
+    await knex.schema.createTable("meta_group_links", (t) => {
+      // IMPORTANT: use UUID if groups.id is UUID (most likely in your app)
+      t.uuid("parent_group_id").notNullable();
+      t.uuid("child_group_id").notNullable();
+
+      t.timestamp("created_at").defaultTo(knex.fn.now());
+
+      t.primary(["parent_group_id", "child_group_id"]);
+
+      t.foreign("parent_group_id")
+        .references("id")
+        .inTable("groups")
+        .onDelete("CASCADE");
+
+      t.foreign("child_group_id")
+        .references("id")
+        .inTable("groups")
+        .onDelete("CASCADE");
+    });
+
+    // 3) helpful indexes
+    await knex.schema.alterTable("meta_group_links", (t) => {
+      t.index(["parent_group_id"], "idx_meta_parent");
+      t.index(["child_group_id"], "idx_meta_child");
+    });
+  }
+};
+
+exports.down = async function (knex) {
+  const hasLinks = await knex.schema.hasTable("meta_group_links");
+  if (hasLinks) {
+    await knex.schema.dropTable("meta_group_links");
+  }
+
+  const hasType = await knex.schema.hasColumn("groups", "type");
+  if (hasType) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.dropColumn("type");
+    });
+  }
+};
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\014_fix_meta_group_links_uuid.cjs =====
+
+// comms-app/services/backend/db/migrations/014_fix_meta_group_links_uuid.cjs
+
+exports.up = async function (knex) {
+  // If meta_group_links doesn't exist, do nothing (013 handles creation)
+  const has = await knex.schema.hasTable("meta_group_links");
+  if (!has) return;
+
+  // Try to coerce columns to UUID if the DB is UUID-based.
+  // This is safe if your ids are uuid strings (which they are).
+  // If they're already uuid, this is a no-op.
+  await knex.raw(`
+    DO $$
+    BEGIN
+      -- parent_group_id
+      BEGIN
+        ALTER TABLE meta_group_links
+        ALTER COLUMN parent_group_id TYPE uuid USING parent_group_id::uuid;
+      EXCEPTION WHEN others THEN
+        -- ignore if already uuid or cannot cast
+      END;
+
+      -- child_group_id
+      BEGIN
+        ALTER TABLE meta_group_links
+        ALTER COLUMN child_group_id TYPE uuid USING child_group_id::uuid;
+      EXCEPTION WHEN others THEN
+        -- ignore if already uuid or cannot cast
+      END;
+    END $$;
+  `);
+};
+
+exports.down = async function (knex) {
+  // We don't downgrade types automatically (riskier).
+};
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\015_add_updated_at_to_groups.cjs =====
+
+exports.up = async function (knex) {
+  const has = await knex.schema.hasColumn("groups", "updated_at");
+  if (!has) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.timestamp("updated_at", { useTz: true })
+        .notNullable()
+        .defaultTo(knex.fn.now());
+    });
+  }
+};
+
+exports.down = async function (knex) {
+  const has = await knex.schema.hasColumn("groups", "updated_at");
+  if (has) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.dropColumn("updated_at");
+    });
+  }
+};
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\016_add_avatar_key_to_groups.cjs =====
+
+exports.up = async function (knex) {
+  const has = await knex.schema.hasColumn("groups", "avatar_key");
+  if (!has) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.text("avatar_key").nullable();
+    });
+  }
+};
+
+exports.down = async function (knex) {
+  const has = await knex.schema.hasColumn("groups", "avatar_key");
+  if (has) {
+    await knex.schema.alterTable("groups", (t) => {
+      t.dropColumn("avatar_key");
+    });
+  }
+};
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\20260117_add_billing_and_intl_caps.js =====
+
+export async function up(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  // plan_tier
+  if (!(await knex.schema.hasColumn("users", "plan_tier"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("plan_tier").notNullable().defaultTo("free");
+    });
+  }
+
+  // billing_source
+  if (!(await knex.schema.hasColumn("users", "billing_source"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("billing_source").notNullable().defaultTo("stripe");
+    });
+  }
+
+  // stripe_customer_id
+  if (!(await knex.schema.hasColumn("users", "stripe_customer_id"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("stripe_customer_id").nullable();
+    });
+  }
+
+  // stripe_payment_method_attached
+  if (!(await knex.schema.hasColumn("users", "stripe_payment_method_attached"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.boolean("stripe_payment_method_attached").notNullable().defaultTo(false);
+    });
+  }
+
+  // intl_spend_since_charge_cents
+  if (!(await knex.schema.hasColumn("users", "intl_spend_since_charge_cents"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.integer("intl_spend_since_charge_cents").notNullable().defaultTo(0);
+    });
+  }
+
+  // intl_spend_cycle_cents
+  if (!(await knex.schema.hasColumn("users", "intl_spend_cycle_cents"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.integer("intl_spend_cycle_cents").notNullable().defaultTo(0);
+    });
+  }
+
+  // intl_blocked_reason
+  if (!(await knex.schema.hasColumn("users", "intl_blocked_reason"))) {
+    await knex.schema.alterTable("users", (t) => {
+      t.string("intl_blocked_reason").nullable();
+    });
+  }
+}
+export async function down(knex) {
+  const hasUsers = await knex.schema.hasTable("users");
+  if (!hasUsers) return;
+
+  await knex.schema.alterTable("users", (t) => {
+    t.dropColumn("plan_tier");
+    t.dropColumn("billing_source");
+    t.dropColumn("stripe_customer_id");
+    t.dropColumn("stripe_payment_method_attached");
+    t.dropColumn("intl_spend_since_charge_cents");
+    t.dropColumn("intl_spend_cycle_cents");
+    t.dropColumn("intl_blocked_reason");
+  });
+}
+
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\migrations\20260228_contacts_onconflict_unique.js =====
+
+// services/backend/src/db/migrations/20260228_contacts_onconflict_unique.js
+
+export async function up(knex) {
+  // Create the EXACT unique index needed for:
+  // .onConflict(["user_id", "phone_e164", "email"]).ignore()
+  //
+  // Guarded so it won't explode if schema differs.
+  await knex.raw(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_name = 'contacts'
+      ) THEN
+
+        -- Ensure columns exist before creating index
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='contacts' AND column_name='user_id'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='contacts' AND column_name='phone_e164'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='contacts' AND column_name='email'
+        )
+        THEN
+          -- Postgres unique index: NULLs are allowed (treated as distinct)
+          EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS contacts_user_phonee164_email_uniq
+                   ON contacts (user_id, phone_e164, email)';
+        END IF;
+
+      END IF;
+    END $$;
+  `);
+}
+
+export async function down(knex) {
+  await knex.raw(`DROP INDEX IF EXISTS contacts_user_phonee164_email_uniq;`);
+}
+
+
+===== FILE: C:\sendforge\comms-app\services\backend\src\db\utils\getUserId.js =====
+
+export function getUserId(req) {
+  // Preferred: real auth middleware sets req.user.id
+  if (req.user?.id) return req.user.id;
+
+  // Dev fallback: send from Postman / Flutter while auth isn’t wired
+  const hdr = req.headers["x-user-id"];
+  if (hdr) return String(hdr);
+
+  return null;
+}
+
+
+
+===== FILE: apps/mobile/lib/services/contacts_api.dart =====
+
+import 'api_client.dart';
+
+class ContactsApi {
+  final ApiClient client;
+
+  ContactsApi(this.client);
+
+  Future<void> deleteContact(String contactId) async {
+    await client.deleteJson('/v1/contacts/$contactId');
+  }
+}
+
+
+===== FILE: apps/mobile/lib/models/contact.dart =====
+
+class Contact {
+  final String id;
+  final String name;
+  final String? phone;
+  final String? email;
+  final String? organization;
+
+  String? get phoneE164 => phone;
+
+  bool get hasSms => phoneE164 != null && phoneE164!.isNotEmpty;
+  bool get hasEmail => email != null && email!.isNotEmpty;
+
+  Contact({
+    required this.id,
+    required this.name,
+    this.phone,
+    this.email,
+    this.organization,
+  });
+}
+
+
+===== FILE: apps/mobile/lib/ui/screens/add_contact_screen.dart =====
+
+import 'package:flutter/material.dart';
+
+import '../../core/app_state.dart';
+import '../../models/contact.dart';
+import '../../services/api_client.dart';
+import '../../services/contact_import_service.dart';
+import '../colors.dart';
+import '../theme/sf_theme.dart';
+
+class AddContactScreen extends StatefulWidget {
+  final AppState appState;
+  const AddContactScreen({super.key, required this.appState});
+
+  @override
+  State<AddContactScreen> createState() => _AddContactScreenState();
+}
+
+class _AddContactScreenState extends State<AddContactScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _name = TextEditingController();
+  final _phone = TextEditingController();
+  final _email = TextEditingController();
+
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _phone.dispose();
+    _email.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final name = _name.text.trim();
+    final phone = _phone.text.trim();
+    final email = _email.text.trim();
+
+    final c = Contact(
+      id: 'manual_${DateTime.now().millisecondsSinceEpoch}',
+      name: name,
+      phone: phone.isEmpty ? null : phone,
+      email: email.isEmpty ? null : email,
+    );
+
+    setState(() => _busy = true);
+
+    try {
+      final api = ApiClient(baseUrl: widget.appState.baseUrl);
+      final svc = ContactImportService(api, widget.appState);
+
+
+      await svc.importContacts(
+        method: 'manual',
+        contacts: [c],
+      );
+
+      // local update
+      widget.appState.contacts.add(c);
+      widget.appState.notifyListeners();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Contact saved ✅')),
+      );
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Save failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        elevation: 0,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [SFColors.headerBlueDark, SFColors.headerBlueLight],
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+            ),
+          ),
+        ),
+        title: const Text('Add Contact', style: TextStyle(fontWeight: FontWeight.w700)),
+        foregroundColor: Colors.white,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              TextFormField(
+                controller: _name,
+                decoration: const InputDecoration(labelText: 'Name'),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Name required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _phone,
+                decoration: const InputDecoration(labelText: 'Phone (optional)'),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _email,
+                decoration: const InputDecoration(labelText: 'Email (optional)'),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) return null;
+                  final ok = v.contains('@') && v.contains('.');
+                  return ok ? null : 'Invalid email';
+                },
+              ),
+              const Spacer(),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: _busy ? null : _save,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: SFColors.primaryBlue,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(SFTheme.radiusMd),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: Text(
+                    _busy ? 'Saving…' : 'Save Contact',
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+
+===== FILE: apps/mobile/lib/ui/screens/edit_contacts_screen.dart =====
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../core/app_state.dart';
+import '../../models/contact.dart';
+import '../../services/api_client.dart';
+import '../../services/contacts_api.dart';
+import '../colors.dart';
+
+class EditContactsScreen extends StatefulWidget {
+  final AppState appState;
+  const EditContactsScreen({super.key, required this.appState});
+
+  @override
+  State<EditContactsScreen> createState() => _EditContactsScreenState();
+}
+
+class _EditContactsScreenState extends State<EditContactsScreen> {
+  bool _busy = false;
+  String? _err;
+  String _query = "";
+
+  // Selection
+  final Set<String> _selectedIds = {};
+  int? _lastTappedIndex;
+  bool _shiftDown = false;
+  final FocusNode _keyboardFocus = FocusNode();
+
+  // Mobile drag selection
+  bool _mobileDragMode = false;
+  int? _mobileDragAnchorIndex;
+  int? _mobileDragLastIndex;
+  double _scrollOffset = 0;
+
+  static const double _rowHeight = 64.0;
+
+  // Inline editing
+  String? _editingId;
+  final TextEditingController _nameCtrl = TextEditingController();
+  final TextEditingController _orgCtrl = TextEditingController();
+  final TextEditingController _phoneCtrl = TextEditingController();
+  final TextEditingController _emailCtrl = TextEditingController();
+
+  Future<void> _refresh() async {
+    setState(() {
+      _busy = true;
+      _err = null;
+    });
+
+    try {
+      await widget.appState.loadContacts();
+    } catch (e) {
+      _err = e.toString();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    _keyboardFocus.dispose();
+    _nameCtrl.dispose();
+    _orgCtrl.dispose();
+    _phoneCtrl.dispose();
+    _emailCtrl.dispose();
+    super.dispose();
+  }
+
+  List<Contact> get _filtered {
+    final q = _query.toLowerCase().trim();
+    final list = widget.appState.contacts.toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    if (q.isEmpty) return list;
+
+    return list.where((c) {
+      return c.name.toLowerCase().contains(q) ||
+          (c.organization ?? "").toLowerCase().contains(q) ||
+          (c.phone ?? "").toLowerCase().contains(q) ||
+          (c.email ?? "").toLowerCase().contains(q);
+    }).toList();
+  }
+
+  int _indexFromLocalDy(double dy) {
+    final absolute = dy + _scrollOffset;
+    final i = (absolute / _rowHeight).floor();
+    return i < 0 ? 0 : i;
+  }
+
+  void _toggleSingle(Contact c) {
+    setState(() {
+      if (_selectedIds.contains(c.id)) {
+        _selectedIds.remove(c.id);
+      } else {
+        _selectedIds.add(c.id);
+      }
+    });
+  }
+
+  void _toggleRange(List<Contact> items, int a, int b, bool select) {
+    final start = a < b ? a : b;
+    final end = a < b ? b : a;
+
+    setState(() {
+      for (int i = start; i <= end; i++) {
+        final id = items[i].id;
+        if (select) {
+          _selectedIds.add(id);
+        } else {
+          _selectedIds.remove(id);
+        }
+      }
+    });
+  }
+
+  void _startEdit(Contact c) {
+    setState(() {
+      _editingId = c.id;
+      _nameCtrl.text = c.name;
+      _orgCtrl.text = (c.organization ?? "");
+      _phoneCtrl.text = (c.phone ?? "");
+      _emailCtrl.text = (c.email ?? "");
+    });
+  }
+
+  void _cancelEdit() {
+    setState(() {
+      _editingId = null;
+      _nameCtrl.clear();
+      _orgCtrl.clear();
+      _phoneCtrl.clear();
+      _emailCtrl.clear();
+    });
+  }
+
+  Future<void> _saveEdit(Contact original) async {
+    // NOTE: backend update endpoint is not in this export set.
+    // We do not invent wiring that might not exist.
+    // We update AppState list locally so UI reflects edit, without breaking existing flows.
+    final updated = Contact(
+      id: original.id,
+      name: _nameCtrl.text.trim().isEmpty ? original.name : _nameCtrl.text.trim(),
+      phone: _phoneCtrl.text.trim().isEmpty ? null : _phoneCtrl.text.trim(),
+      email: _emailCtrl.text.trim().isEmpty ? null : _emailCtrl.text.trim(),
+      organization: _orgCtrl.text.trim().isEmpty ? null : _orgCtrl.text.trim(),
+    );
+
+    setState(() {
+      final idx = widget.appState.contacts.indexWhere((c) => c.id == original.id);
+      if (idx >= 0) {
+        widget.appState.contacts[idx] = updated;
+      }
+      _editingId = null;
+    });
+
+    // If/when we add PUT /v1/contacts/:id + client method, we’ll wire it here.
+    // This preserves stability and prevents regressions today.
+  }
+
+  Future<void> _deleteSelected(List<Contact> items) async {
+    if (_selectedIds.isEmpty) return;
+
+    final count = _selectedIds.length;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text("Delete contacts?"),
+        content: Text("This permanently deletes $count contact(s).\n\nThis cannot be undone."),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text("Cancel"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    setState(() {
+      _busy = true;
+      _err = null;
+    });
+
+    try {
+      final client = ApiClient(baseUrl: widget.appState.baseUrl);
+      final api = ContactsApi(client);
+
+      // delete sequential (stable, simple)
+      for (final id in _selectedIds.toList()) {
+        await api.deleteContact(id);
+      }
+
+      _selectedIds.clear();
+      await widget.appState.loadContacts();
+    } catch (e) {
+      _err = e.toString();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _avatar(Contact c) {
+    final initials = c.name.trim().isEmpty ? "?" : c.name.trim().split(RegExp(r"\s+")).take(2).map((p) => p.substring(0, 1).toUpperCase()).join();
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      alignment: Alignment.center,
+      child: Text(initials, style: const TextStyle(fontWeight: FontWeight.w800)),
+    );
+  }
+
+  Widget _chips(Contact c) {
+    final hasSms = (c.phone ?? "").trim().isNotEmpty;
+    final hasEmail = (c.email ?? "").trim().isNotEmpty;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (hasSms) _chip("SMS"),
+        if (hasEmail) _chip("Email"),
+      ],
+    );
+  }
+
+  Widget _chip(String label) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.06),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = _filtered;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Edit Contacts"),
+        backgroundColor: SFColors.primaryBlue,
+        foregroundColor: Colors.white,
+        actions: [
+          if (_selectedIds.isNotEmpty)
+            IconButton(
+              tooltip: "Delete selected",
+              icon: const Icon(Icons.delete_outline),
+              onPressed: _busy ? null : () => _deleteSelected(items),
+            ),
+        ],
+      ),
+      body: RawKeyboardListener(
+        focusNode: _keyboardFocus,
+        autofocus: true,
+        onKey: (evt) {
+          final isShift = evt.logicalKey == LogicalKeyboardKey.shiftLeft ||
+              evt.logicalKey == LogicalKeyboardKey.shiftRight;
+          if (isShift) {
+            setState(() {
+              _shiftDown = evt is RawKeyDownEvent;
+            });
+          }
+        },
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                TextField(
+                  decoration: InputDecoration(
+                    hintText: "Search contacts",
+                    prefixIcon: const Icon(Icons.search),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onChanged: (v) => setState(() => _query = v),
+                ),
+                const SizedBox(height: 10),
+                if (_err != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Text(_err!, style: const TextStyle(color: Colors.red)),
+                  ),
+                if (_mobileDragMode)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.swipe, size: 18),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            "Range select: hold + slide. Release to finish.",
+                            style: TextStyle(fontSize: 12),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => setState(() {
+                            _mobileDragMode = false;
+                            _mobileDragAnchorIndex = null;
+                            _mobileDragLastIndex = null;
+                          }),
+                          child: const Text("Cancel"),
+                        ),
+                      ],
+                    ),
+                  ),
+                Expanded(
+                  child: _busy
+                      ? const Center(child: CircularProgressIndicator())
+                      : NotificationListener<ScrollNotification>(
+                          onNotification: (n) {
+                            if (n.metrics.axis == Axis.vertical) _scrollOffset = n.metrics.pixels;
+                            return false;
+                          },
+                          child: GestureDetector(
+                            onLongPressStart: (d) {
+                              if (kIsWeb) return;
+                              if (items.isEmpty) return;
+                              setState(() {
+                                _mobileDragMode = true;
+                                _mobileDragAnchorIndex = _indexFromLocalDy(d.localPosition.dy).clamp(0, items.length - 1);
+                                _mobileDragLastIndex = _mobileDragAnchorIndex;
+                              });
+                            },
+                            onLongPressMoveUpdate: (d) {
+                              if (!_mobileDragMode) return;
+                              if (items.isEmpty) return;
+                              final idx = _indexFromLocalDy(d.localPosition.dy).clamp(0, items.length - 1);
+                              if (idx == _mobileDragLastIndex) return;
+
+                              final anchor = (_mobileDragAnchorIndex ?? idx).clamp(0, items.length - 1);
+                              _toggleRange(items, anchor, idx, true);
+                              setState(() => _mobileDragLastIndex = idx);
+                            },
+                            onLongPressEnd: (_) {
+                              if (!_mobileDragMode) return;
+                              setState(() {
+                                _mobileDragMode = false;
+                                _mobileDragAnchorIndex = null;
+                                _mobileDragLastIndex = null;
+                              });
+                            },
+                            child: ListView.builder(
+                              itemExtent: _rowHeight,
+                              itemCount: items.length,
+                              itemBuilder: (context, i) {
+                                final c = items[i];
+                                final selected = _selectedIds.contains(c.id);
+                                final isEditing = _editingId == c.id;
+
+                                return InkWell(
+                                  onTap: () {
+                                    // If editing, keep tap behavior minimal
+                                    if (_editingId != null && _editingId != c.id) return;
+
+                                    final canShiftRange =
+                                        (kIsWeb ||
+                                            defaultTargetPlatform == TargetPlatform.windows ||
+                                            defaultTargetPlatform == TargetPlatform.macOS ||
+                                            defaultTargetPlatform == TargetPlatform.linux) &&
+                                        _shiftDown;
+
+                                    if (canShiftRange && _lastTappedIndex != null) {
+                                      final select = !selected;
+                                      _toggleRange(items, _lastTappedIndex!, i, select);
+                                    } else {
+                                      _toggleSingle(c);
+                                    }
+                                    _lastTappedIndex = i;
+                                  },
+                                  onLongPress: () {
+                                    if (kIsWeb) return;
+                                    _toggleSingle(c);
+                                  },
+                                  child: Container(
+                                    height: _rowHeight,
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    color: selected ? Colors.blue.withOpacity(0.08) : null,
+                                    child: Row(
+                                      children: [
+                                        _avatar(c),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: isEditing
+                                              ? Column(
+                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                  children: [
+                                                    Row(
+                                                      children: [
+                                                        Expanded(
+                                                          child: TextField(
+                                                            controller: _nameCtrl,
+                                                            decoration: const InputDecoration(
+                                                              isDense: true,
+                                                              hintText: "Name",
+                                                              border: OutlineInputBorder(),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(width: 8),
+                                                        IconButton(
+                                                          tooltip: "Save",
+                                                          onPressed: () => _saveEdit(c),
+                                                          icon: const Icon(Icons.check_circle_outline),
+                                                        ),
+                                                        IconButton(
+                                                          tooltip: "Cancel",
+                                                          onPressed: _cancelEdit,
+                                                          icon: const Icon(Icons.close),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    const SizedBox(height: 6),
+                                                    Row(
+                                                      children: [
+                                                        Expanded(
+                                                          child: TextField(
+                                                            controller: _orgCtrl,
+                                                            decoration: const InputDecoration(
+                                                              isDense: true,
+                                                              hintText: "Organization",
+                                                              border: OutlineInputBorder(),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(width: 8),
+                                                        Expanded(
+                                                          child: TextField(
+                                                            controller: _phoneCtrl,
+                                                            decoration: const InputDecoration(
+                                                              isDense: true,
+                                                              hintText: "Phone (SMS)",
+                                                              border: OutlineInputBorder(),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(width: 8),
+                                                        Expanded(
+                                                          child: TextField(
+                                                            controller: _emailCtrl,
+                                                            decoration: const InputDecoration(
+                                                              isDense: true,
+                                                              hintText: "Email",
+                                                              border: OutlineInputBorder(),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ],
+                                                )
+                                              : Column(
+                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children: [
+                                                    Row(
+                                                      children: [
+                                                        Expanded(
+                                                          child: Text(
+                                                            c.name,
+                                                            style: const TextStyle(fontWeight: FontWeight.w800),
+                                                            overflow: TextOverflow.ellipsis,
+                                                          ),
+                                                        ),
+                                                        if ((c.organization ?? "").trim().isNotEmpty)
+                                                          Expanded(
+                                                            child: Text(
+                                                              c.organization!.trim(),
+                                                              textAlign: TextAlign.right,
+                                                              style: TextStyle(
+                                                                fontSize: 12,
+                                                                color: Colors.blueGrey.withOpacity(0.9),
+                                                                fontWeight: FontWeight.w600,
+                                                              ),
+                                                              overflow: TextOverflow.ellipsis,
+                                                            ),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                    const SizedBox(height: 4),
+                                                    Row(
+                                                      children: [
+                                                        _chips(c),
+                                                        const Spacer(),
+                                                        TextButton(
+                                                          onPressed: () => _startEdit(c),
+                                                          child: const Text("Edit"),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ],
+                                                ),
+                                        ),
+                                        Checkbox(
+                                          value: selected,
+                                          onChanged: (_) => _toggleSingle(c),
+                                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                          visualDensity: const VisualDensity(horizontal: -3, vertical: -3),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+===== FILE: apps/mobile/lib/core/app_state.dart =====
+
+// comms-app/apps/mobile/lib/core/app_state.dart
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/group.dart';
+import '../models/contact.dart';
+import '../models/message.dart';
+import '../models/blast.dart';
+import '../services/api_client.dart';
+import '../services/groups_api.dart';
+
+class AppState extends ChangeNotifier {
+  // Auth / config
+  String? token;
+  String baseUrl = 'https://comms-app-1wo0.onrender.com';
+
+  // Identity / billing (UI only for now)
+  String userId = 'local-user';
+  String planTier = 'free';
+
+  // Core data
+  final List<Group> groups = [];
+  final List<Contact> contacts = [];
+
+  final List<Message> threads = [];
+  final Map<String, List<Message>> messagesByThread = {};
+
+  BlastDraft? activeBlast;
+
+  // ------------------------
+
+  void setBaseUrl(String v) {
+    baseUrl = v;
+    notifyListeners();
+  }
+
+  Future<void> setToken(String? t) async {
+    token = t;
+
+    final prefs = await SharedPreferences.getInstance();
+    if (t == null) {
+      await prefs.remove('token');
+    } else {
+      await prefs.setString('token', t);
+    }
+
+    notifyListeners();
+  }
+
+  void setPlanTier(String tier) {
+    planTier = tier;
+    notifyListeners();
+  }
+
+  /// 🔹 Load contacts from backend
+  Future<void> loadContacts() async {
+    final api = ApiClient(baseUrl: baseUrl);
+    final response = await api.getJson('/v1/contacts');
+
+    if (response['contacts'] is List) {
+      contacts.clear();
+
+      for (final item in response['contacts']) {
+        contacts.add(
+          Contact(
+            id: item['id'] ?? '',
+            name: item['name'] ?? 'Unknown',
+            phone: item['phone'],
+            email: item['email'],
+            organization: item['organization'],
+          ),
+        );
+      }
+
+      notifyListeners();
+    }
+  }
+
+  /// 🔹 Load groups from backend
+  Future<void> loadGroups() async {
+    final api = GroupsApi(this);
+    final data = await api.list();
+
+    groups
+      ..clear()
+      ..addAll(data);
+
+    notifyListeners();
+  }
+
+  /// Utility used by Create Blast (local UI only)
+  List<Contact> resolveRecipientsForGroups(List<String> groupIds) {
+    final memberIds = groups
+        .where((g) => groupIds.contains(g.id))
+        .expand((g) => g.members.map((m) => m.id))
+        .toSet();
+
+    return contacts.where((c) => memberIds.contains(c.id)).toList();
+  }
+
+  /// Adds mock thread when blast queued
+  void addQueuedBlastAsThread({
+    required String blastId,
+    required String body,
+  }) {
+    final now = DateTime.now();
+
+    final root = Message(
+      id: blastId,
+      sender: 'You',
+      body: body,
+      incoming: false,
+      timestamp: now,
+    );
+
+    threads.insert(0, root);
+
+    messagesByThread.putIfAbsent(blastId, () => []);
+    messagesByThread[blastId]!.insert(
+      0,
+      Message(
+        id: '${blastId}_m1',
+        sender: 'You',
+        body: body,
+        incoming: false,
+        timestamp: now,
+      ),
+    );
+
+    notifyListeners();
+  }
+
+  /// Update a single group in memory (used after member save to fix count drift)
+  void upsertGroup(Group g) {
+    final idx = groups.indexWhere((x) => x.id == g.id);
+    if (idx >= 0) {
+      groups[idx] = g;
+    } else {
+      groups.insert(0, g);
+    }
+    notifyListeners();
+  }
+}
+
+
+===== FILE: apps/mobile/lib/services/api_client.dart =====
+
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+class ApiClient {
+  final String baseUrl;
+
+  static const _storage = FlutterSecureStorage();
+  static const _tokenKey = 'auth_token';
+
+  ApiClient({required this.baseUrl});
+
+  Future<String?> getToken() async {
+    return await _storage.read(key: _tokenKey);
+  }
+
+  Future<Map<String, String>> _headers() async {
+    final token = await getToken();
+
+    final h = <String, String>{
+      'Content-Type': 'application/json',
+    };
+
+    if (token != null && token.isNotEmpty) {
+      h['Authorization'] = 'Bearer $token';
+    }
+
+    return h;
+  }
+
+  Future<Map<String, dynamic>> getJson(String path) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final res = await http.get(uri, headers: await _headers());
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.post(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  // ✅ match backend PUT routes
+  Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.put(
+      uri,
+      headers: await _headers(),
+      body: jsonEncode(body),
+    );
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+
+    return (decoded as Map<String, dynamic>);
+  }
+
+  // ✅ required for HARD delete contacts
+  Future<void> deleteJson(String path) async {
+    final uri = Uri.parse('$baseUrl$path');
+
+    final res = await http.delete(uri, headers: await _headers());
+
+    final decoded = res.body.isEmpty ? {} : jsonDecode(res.body);
+
+    if (res.statusCode >= 400) {
+      throw ApiError(
+        message: decoded is Map && decoded['error'] != null
+            ? decoded['error'].toString()
+            : res.body,
+      );
+    }
+  }
+}
+
+class ApiError implements Exception {
+  final String message;
+  ApiError({required this.message});
+
+  @override
+  String toString() => message;
+}

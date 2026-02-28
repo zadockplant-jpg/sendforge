@@ -32,11 +32,6 @@ function normalizePhoneToE164(raw) {
   // If it has letters, discard (avoid garbage)
   if (/[a-zA-Z]/.test(s)) return null;
 
-  // If it’s all digits, treat as national (US default)
-  // Examples:
-  //  - 10 digits -> US
-  //  - 11 digits starting with 1 -> US
-  //  - anything else -> attempt parse with US then fallback null
   const isDigitsOnly = /^[0-9]+$/.test(s);
 
   try {
@@ -47,6 +42,7 @@ function normalizePhoneToE164(raw) {
     }
 
     if (isDigitsOnly) {
+      // US defaults
       if (s.length === 10) {
         const p = parsePhoneNumberFromString(s, "US");
         if (p && p.isValid()) return p.number;
@@ -128,10 +124,12 @@ function normalize(c) {
   if (!c) return null;
 
   const name = typeof c.name === "string" ? c.name.trim() : "";
-  const organization = typeof c.organization === "string" ? c.organization.trim() : "";
+  const organization =
+    typeof c.organization === "string" ? c.organization.trim() : "";
 
   const rawPhone = typeof c.phone === "string" ? c.phone.trim() : "";
-  const rawEmail = typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
+  const rawEmail =
+    typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
 
   const phoneE164 = rawPhone ? normalizePhoneToE164(rawPhone) : null;
   const email = rawEmail || null;

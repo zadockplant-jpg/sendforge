@@ -5,7 +5,6 @@ import '../../models/contact.dart';
 import '../../services/api_client.dart';
 import '../../services/contact_import_service.dart';
 import '../colors.dart';
-import '../theme/sf_theme.dart';
 
 class AddContactScreen extends StatefulWidget {
   final AppState appState;
@@ -17,33 +16,25 @@ class AddContactScreen extends StatefulWidget {
 
 class _AddContactScreenState extends State<AddContactScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _name = TextEditingController();
-  final _phone = TextEditingController();
-  final _email = TextEditingController();
+
+  final _nameCtrl = TextEditingController();
+  final _orgCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
 
   bool _busy = false;
 
   @override
   void dispose() {
-    _name.dispose();
-    _phone.dispose();
-    _email.dispose();
+    _nameCtrl.dispose();
+    _orgCtrl.dispose();
+    _phoneCtrl.dispose();
+    _emailCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-
-    final name = _name.text.trim();
-    final phone = _phone.text.trim();
-    final email = _email.text.trim();
-
-    final c = Contact(
-      id: 'manual_${DateTime.now().millisecondsSinceEpoch}',
-      name: name,
-      phone: phone.isEmpty ? null : phone,
-      email: email.isEmpty ? null : email,
-    );
 
     setState(() => _busy = true);
 
@@ -51,20 +42,24 @@ class _AddContactScreenState extends State<AddContactScreen> {
       final api = ApiClient(baseUrl: widget.appState.baseUrl);
       final svc = ContactImportService(api, widget.appState);
 
-
-      await svc.importContacts(
-        method: 'manual',
-        contacts: [c],
+      final c = Contact(
+        id: 'manual_${DateTime.now().millisecondsSinceEpoch}', // server ignores; real id comes from DB
+        name: _nameCtrl.text.trim(),
+        organization: _orgCtrl.text.trim().isEmpty ? null : _orgCtrl.text.trim(),
+        phone: _phoneCtrl.text.trim().isEmpty ? null : _phoneCtrl.text.trim(),
+        email: _emailCtrl.text.trim().isEmpty ? null : _emailCtrl.text.trim(),
       );
 
-      // local update
-      widget.appState.contacts.add(c);
-      widget.appState.notifyListeners();
+      await svc.importContacts(method: 'manual', contacts: [c]);
+
+      // ✅ critical fix: do NOT locally insert fake contact; reload from server so IDs + fields are real
+      await widget.appState.loadContacts();
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Contact saved ✅')),
       );
+
       Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
@@ -80,65 +75,60 @@ class _AddContactScreenState extends State<AddContactScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        elevation: 0,
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [SFColors.headerBlueDark, SFColors.headerBlueLight],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            ),
-          ),
-        ),
-        title: const Text('Add Contact', style: TextStyle(fontWeight: FontWeight.w700)),
+        title: const Text('Add Contact'),
+        backgroundColor: SFColors.primaryBlue,
         foregroundColor: Colors.white,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            children: [
-              TextFormField(
-                controller: _name,
-                decoration: const InputDecoration(labelText: 'Name'),
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'Name required' : null,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _phone,
-                decoration: const InputDecoration(labelText: 'Phone (optional)'),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _email,
-                decoration: const InputDecoration(labelText: 'Email (optional)'),
-                validator: (v) {
-                  if (v == null || v.trim().isEmpty) return null;
-                  final ok = v.contains('@') && v.contains('.');
-                  return ok ? null : 'Invalid email';
-                },
-              ),
-              const Spacer(),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: _busy ? null : _save,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: SFColors.primaryBlue,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(SFTheme.radiusMd),
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              children: [
+                TextFormField(
+                  controller: _nameCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Name',
+                    prefixIcon: Icon(Icons.person_outline),
                   ),
-                  child: Text(
-                    _busy ? 'Saving…' : 'Save Contact',
-                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? 'Name required' : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _orgCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Organization (optional)',
+                    prefixIcon: Icon(Icons.apartment_outlined),
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _phoneCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Phone (optional)',
+                    prefixIcon: Icon(Icons.phone_outlined),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _emailCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Email (optional)',
+                    prefixIcon: Icon(Icons.email_outlined),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: _busy ? null : _save,
+                    child: Text(_busy ? 'Saving…' : 'Save Contact'),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
