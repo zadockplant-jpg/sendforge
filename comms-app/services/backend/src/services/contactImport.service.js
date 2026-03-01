@@ -1,7 +1,6 @@
 // comms-app/services/backend/src/services/contactImport.service.js
 import { parsePhoneNumberFromString } from "libphonenumber-js";
 
-import { dedupeContacts } from "./dedupe.service.js";
 import { auditLog } from "./audit.service.js";
 import { db } from "../config/db.js";
 
@@ -109,21 +108,24 @@ export async function importContacts({ userId, method, contacts }) {
 
   const normalized = (contacts || []).map(normalize).filter(Boolean);
 
-  const { unique, duplicates } = dedupeContacts(normalized);
-
   let inserted = 0;
 
-  for (const c of unique) {
+  // NOTE: Deduping is intentionally NOT done here.
+  // Twilio-side blocks / compliance flows should remain authoritative.
+  // We rely on DB unique constraints via ON CONFLICT to avoid hard duplicates.
+  for (const c of normalized) {
     const didInsert = await insertOneContactOptionA({ userId, method, c });
     if (didInsert) inserted++;
   }
+
+  const duplicates = normalized.length - inserted;
 
   // Audit should never block success
   try {
     await auditLog(userId, "contacts_import", {
       method,
       inserted,
-      duplicates: duplicates.length,
+      duplicates,
       invalid: (contacts?.length || 0) - normalized.length,
     });
   } catch (_) {
@@ -132,7 +134,7 @@ export async function importContacts({ userId, method, contacts }) {
 
   return {
     added: inserted,
-    duplicates: duplicates.length,
+    duplicates,
     invalid: (contacts?.length || 0) - normalized.length,
   };
 }

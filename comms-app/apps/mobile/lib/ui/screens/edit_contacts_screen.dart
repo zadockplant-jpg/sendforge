@@ -1,5 +1,10 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_state.dart';
 import '../../models/contact.dart';
@@ -212,9 +217,141 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
 
   Widget _avatar(Contact c) {
     final initial = c.name.trim().isEmpty ? "?" : c.name.trim()[0].toUpperCase();
-    return CircleAvatar(
-      radius: 18,
-      child: Text(initial, style: const TextStyle(fontWeight: FontWeight.bold)),
+
+    return GestureDetector(
+      onTap: () => _openAvatarPicker(c),
+      child: FutureBuilder<Uint8List?>(
+        future: _loadAvatarBytes(c.id),
+        builder: (_, snap) {
+          final bytes = snap.data;
+          if (bytes != null && bytes.isNotEmpty) {
+            return CircleAvatar(
+              radius: 18,
+              backgroundImage: MemoryImage(bytes),
+            );
+          }
+          return CircleAvatar(
+            radius: 18,
+            child:
+                Text(initial, style: const TextStyle(fontWeight: FontWeight.bold)),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<Uint8List?> _loadAvatarBytes(String contactId) async {
+    if (contactId.isEmpty) return null;
+    final prefs = await SharedPreferences.getInstance();
+    final b64 = prefs.getString('contact_avatar_$contactId');
+    if (b64 == null || b64.isEmpty) return null;
+    try {
+      return base64Decode(b64);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _saveAvatarBytes(String contactId, Uint8List bytes) async {
+    if (contactId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('contact_avatar_$contactId', base64Encode(bytes));
+  }
+
+  Future<void> _clearAvatarBytes(String contactId) async {
+    if (contactId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('contact_avatar_$contactId');
+  }
+
+  Future<void> _openAvatarPicker(Contact c) async {
+    if (c.id.isEmpty) return;
+
+    final existing = await _loadAvatarBytes(c.id);
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) {
+        Uint8List? bytes = existing;
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            Future<void> pick() async {
+              final res = await FilePicker.platform.pickFiles(
+                type: FileType.image,
+                withData: true,
+              );
+              final f = res?.files.single;
+              final b = f?.bytes;
+              if (b != null) setLocal(() => bytes = b);
+            }
+
+            return AlertDialog(
+              title: const Text('Contact photo'),
+              content: SizedBox(
+                width: 360,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 180,
+                      height: 180,
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Color(0x11000000),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: bytes == null
+                          ? const Center(child: Text('No photo'))
+                          : Image.memory(bytes!, fit: BoxFit.cover),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: pick,
+                            child: Text(bytes == null ? 'Import' : 'Change'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: bytes == null
+                                ? null
+                                : () async {
+                                    await _clearAvatarBytes(c.id);
+                                    if (mounted) setState(() {});
+                                    if (ctx.mounted) Navigator.pop(ctx);
+                                  },
+                            child: const Text('Clear'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Close'),
+                ),
+                ElevatedButton(
+                  onPressed: bytes == null
+                      ? null
+                      : () async {
+                          await _saveAvatarBytes(c.id, bytes!);
+                          if (mounted) setState(() {});
+                          if (ctx.mounted) Navigator.pop(ctx);
+                        },
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
@@ -299,7 +436,7 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                             },
                             child: Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 10),
+                                  horizontal: 10, vertical: 8),
                               decoration: BoxDecoration(
                                 color:
                                     selected ? Colors.blue.withOpacity(0.08) : null,
@@ -308,12 +445,13 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                                       color: Colors.black.withOpacity(0.06)),
                                 ),
                               ),
-                              child: Column(
-                                children: [
-                                  Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.center,
-                                    children: [
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(maxWidth: 900),
+                                child: Column(
+                                  children: [
+                                    Row(
+                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                      children: [
                                       Checkbox(
                                         value: selected,
                                         onChanged: (_) => _toggleSingle(c),
