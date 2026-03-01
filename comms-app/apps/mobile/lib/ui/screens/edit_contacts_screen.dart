@@ -1,3 +1,5 @@
+// comms-app/apps/mobile/lib/ui/screens/edit_contacts_screen.dart
+
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -25,13 +27,11 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
   String? _err;
   String _query = "";
 
-  // Selection
   final Set<String> _selectedIds = {};
   int? _lastTappedIndex;
   bool _shiftDown = false;
   final FocusNode _keyboardFocus = FocusNode();
 
-  // Editing
   String? _editingId;
   final TextEditingController _nameCtrl = TextEditingController();
   final TextEditingController _orgCtrl = TextEditingController();
@@ -216,7 +216,8 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
   }
 
   Widget _avatar(Contact c) {
-    final initial = c.name.trim().isEmpty ? "?" : c.name.trim()[0].toUpperCase();
+    final initial =
+        c.name.trim().isEmpty ? "?" : c.name.trim()[0].toUpperCase();
 
     return GestureDetector(
       onTap: () => _openAvatarPicker(c),
@@ -232,8 +233,8 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
           }
           return CircleAvatar(
             radius: 18,
-            child:
-                Text(initial, style: const TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(initial,
+                style: const TextStyle(fontWeight: FontWeight.bold)),
           );
         },
       ),
@@ -311,7 +312,8 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                         Expanded(
                           child: OutlinedButton(
                             onPressed: pick,
-                            child: Text(bytes == null ? 'Import' : 'Change'),
+                            child:
+                                Text(bytes == null ? 'Import' : 'Change'),
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -367,7 +369,8 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
         actions: [
           IconButton(
             tooltip: "Delete selected",
-            onPressed: (_busy || _selectedIds.isEmpty) ? null : _deleteSelected,
+            onPressed:
+                (_busy || _selectedIds.isEmpty) ? null : _deleteSelected,
             icon: const Icon(Icons.delete_outline),
           ),
           IconButton(
@@ -390,41 +393,52 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
           child: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                padding:
+                    const EdgeInsets.fromLTRB(12, 12, 12, 8),
                 child: TextField(
                   decoration: const InputDecoration(
                     prefixIcon: Icon(Icons.search),
                     hintText: "Search contacts…",
                     isDense: true,
                   ),
-                  onChanged: (v) => setState(() => _query = v),
+                  onChanged: (v) =>
+                      setState(() => _query = v),
                 ),
               ),
               if (_err != null)
                 Padding(
                   padding: const EdgeInsets.all(12),
-                  child: Text(_err!, style: const TextStyle(color: Colors.red)),
+                  child: Text(_err!,
+                      style: const TextStyle(color: Colors.red)),
                 ),
               Expanded(
-                child: _busy && widget.appState.contacts.isEmpty
-                    ? const Center(child: CircularProgressIndicator())
+                child: _busy &&
+                        widget.appState.contacts.isEmpty
+                    ? const Center(
+                        child:
+                            CircularProgressIndicator())
                     : ListView.builder(
                         itemCount: items.length,
                         itemBuilder: (_, i) {
                           final c = items[i];
-                          final selected = _selectedIds.contains(c.id);
-                          final isEditing = _editingId == c.id;
+                          final selected =
+                              _selectedIds.contains(c.id);
+                          final isEditing =
+                              _editingId == c.id;
 
                           return InkWell(
                             onTap: () {
-                              // Shift-click selection range (desktop/web)
                               if (kIsWeb &&
                                   _shiftDown &&
-                                  _lastTappedIndex != null) {
-                                final anchor = _lastTappedIndex!;
+                                  _lastTappedIndex !=
+                                      null) {
+                                final anchor =
+                                    _lastTappedIndex!;
                                 final wantSelect =
-                                    !_selectedIds.contains(c.id);
-                                _toggleRange(items, anchor, i, wantSelect);
+                                    !_selectedIds
+                                        .contains(c.id);
+                                _toggleRange(items,
+                                    anchor, i, wantSelect);
                               } else {
                                 _startEditing(c);
                               }
@@ -435,182 +449,276 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                               _lastTappedIndex = i;
                             },
                             child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 8),
+                              padding:
+                                  const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8),
                               decoration: BoxDecoration(
-                                color:
-                                    selected ? Colors.blue.withOpacity(0.08) : null,
+                                color: selected
+                                    ? Colors.blue
+                                        .withOpacity(0.08)
+                                    : null,
                                 border: Border(
                                   bottom: BorderSide(
-                                      color: Colors.black.withOpacity(0.06)),
+                                      color: Colors.black
+                                          .withOpacity(
+                                              0.06)),
                                 ),
                               ),
                               child: ConstrainedBox(
-                                constraints: const BoxConstraints(maxWidth: 900),
+                                constraints:
+                                    const BoxConstraints(
+                                        maxWidth: 900),
                                 child: Column(
                                   children: [
                                     Row(
-                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment
+                                              .center,
                                       children: [
-                                      Checkbox(
-                                        value: selected,
-                                        onChanged: (_) => _toggleSingle(c),
-                                      ),
-                                      _avatar(c),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              c.name,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                  fontWeight: FontWeight.w700),
-                                            ),
-                                            const SizedBox(height: 2),
-                                            Row(
-                                              children: [
-                                                if ((c.organization ?? "")
-                                                    .isNotEmpty)
-                                                  Flexible(
-                                                    child: Text(
-                                                      c.organization!,
-                                                      maxLines: 1,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      style: const TextStyle(
-                                                        fontSize: 12,
-                                                        color: Colors.blueGrey,
+                                        Checkbox(
+                                          value: selected,
+                                          onChanged: (_) =>
+                                              _toggleSingle(c),
+                                        ),
+                                        _avatar(c),
+                                        const SizedBox(
+                                            width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment
+                                                    .start,
+                                            children: [
+                                              Text(
+                                                c.name,
+                                                maxLines: 1,
+                                                overflow:
+                                                    TextOverflow
+                                                        .ellipsis,
+                                                style: const TextStyle(
+                                                    fontWeight:
+                                                        FontWeight
+                                                            .w700),
+                                              ),
+                                              const SizedBox(
+                                                  height: 2),
+                                              Row(
+                                                children: [
+                                                  if ((c.organization ??
+                                                          "")
+                                                      .isNotEmpty)
+                                                    Flexible(
+                                                      child:
+                                                          Text(
+                                                        c.organization!,
+                                                        maxLines:
+                                                            1,
+                                                        overflow:
+                                                            TextOverflow.ellipsis,
+                                                        style:
+                                                            const TextStyle(
+                                                          fontSize:
+                                                              12,
+                                                          color:
+                                                              Colors.blueGrey,
+                                                        ),
                                                       ),
                                                     ),
-                                                  ),
-                                                if ((c.organization ?? "")
-                                                    .isNotEmpty)
-                                                  const SizedBox(width: 8),
-                                                if (c.hasSms)
-                                                  Container(
-                                                    padding:
-                                                        const EdgeInsets.symmetric(
-                                                            horizontal: 8,
-                                                            vertical: 3),
-                                                    decoration: BoxDecoration(
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                              999),
-                                                      border: Border.all(
-                                                          color: Colors.black
+                                                  if ((c.organization ??
+                                                          "")
+                                                      .isNotEmpty)
+                                                    const SizedBox(
+                                                        width:
+                                                            8),
+                                                  if (c.hasSms)
+                                                    Container(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                              horizontal:
+                                                                  8,
+                                                              vertical:
+                                                                  3),
+                                                      decoration:
+                                                          BoxDecoration(
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                                999),
+                                                        border:
+                                                            Border.all(
+                                                          color: Colors
+                                                              .black
                                                               .withOpacity(
-                                                                  0.15)),
+                                                                  0.15),
+                                                        ),
+                                                      ),
+                                                      child:
+                                                          const Text(
+                                                        "SMS",
+                                                        style:
+                                                            TextStyle(
+                                                          fontSize:
+                                                              11,
+                                                        ),
+                                                      ),
                                                     ),
-                                                    child: const Text("SMS",
-                                                        style: TextStyle(
-                                                            fontSize: 11)),
-                                                  ),
-                                                if (c.hasSms && c.hasEmail)
-                                                  const SizedBox(width: 6),
-                                                if (c.hasEmail)
-                                                  Container(
-                                                    padding:
-                                                        const EdgeInsets.symmetric(
-                                                            horizontal: 8,
-                                                            vertical: 3),
-                                                    decoration: BoxDecoration(
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                              999),
-                                                      border: Border.all(
-                                                          color: Colors.black
+                                                  if (c.hasSms &&
+                                                      c.hasEmail)
+                                                    const SizedBox(
+                                                        width:
+                                                            6),
+                                                  if (c.hasEmail)
+                                                    Container(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                              horizontal:
+                                                                  8,
+                                                              vertical:
+                                                                  3),
+                                                      decoration:
+                                                          BoxDecoration(
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                                999),
+                                                        border:
+                                                            Border.all(
+                                                          color: Colors
+                                                              .black
                                                               .withOpacity(
-                                                                  0.15)),
+                                                                  0.15),
+                                                        ),
+                                                      ),
+                                                      child:
+                                                          const Text(
+                                                        "Email",
+                                                        style:
+                                                            TextStyle(
+                                                          fontSize:
+                                                              11,
+                                                        ),
+                                                      ),
                                                     ),
-                                                    child: const Text("Email",
-                                                        style: TextStyle(
-                                                            fontSize: 11)),
-                                                  ),
-                                              ],
-                                            ),
-                                          ],
+                                                ],
+                                              ),
+                                            ],
+                                          ),
                                         ),
+                                        IconButton(
+                                          tooltip:
+                                              isEditing
+                                                  ? "Close"
+                                                  : "Edit",
+                                          onPressed: () =>
+                                              isEditing
+                                                  ? _stopEditing()
+                                                  : _startEditing(
+                                                      c),
+                                          icon: Icon(isEditing
+                                              ? Icons.close
+                                              : Icons
+                                                  .edit_outlined),
+                                        ),
+                                      ],
+                                    ),
+                                    if (isEditing) ...[
+                                      const SizedBox(
+                                          height: 10),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child:
+                                                TextField(
+                                              controller:
+                                                  _nameCtrl,
+                                              decoration:
+                                                  const InputDecoration(
+                                                labelText:
+                                                    "Name",
+                                                isDense:
+                                                    true,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(
+                                              width: 10),
+                                          Expanded(
+                                            child:
+                                                TextField(
+                                              controller:
+                                                  _orgCtrl,
+                                              decoration:
+                                                  const InputDecoration(
+                                                labelText:
+                                                    "Org",
+                                                isDense:
+                                                    true,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
-                                      IconButton(
-                                        tooltip:
-                                            isEditing ? "Close" : "Edit",
-                                        onPressed: () =>
-                                            isEditing ? _stopEditing() : _startEditing(c),
-                                        icon: Icon(isEditing
-                                            ? Icons.close
-                                            : Icons.edit_outlined),
+                                      const SizedBox(
+                                          height: 10),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child:
+                                                TextField(
+                                              controller:
+                                                  _phoneCtrl,
+                                              decoration:
+                                                  const InputDecoration(
+                                                labelText:
+                                                    "Phone",
+                                                isDense:
+                                                    true,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(
+                                              width: 10),
+                                          Expanded(
+                                            child:
+                                                TextField(
+                                              controller:
+                                                  _emailCtrl,
+                                              decoration:
+                                                  const InputDecoration(
+                                                labelText:
+                                                    "Email",
+                                                isDense:
+                                                    true,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(
+                                          height: 10),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child:
+                                                FilledButton
+                                                    .icon(
+                                              onPressed: _busy
+                                                  ? null
+                                                  : () =>
+                                                      _saveEditing(
+                                                          c),
+                                              icon: const Icon(
+                                                  Icons
+                                                      .save_outlined),
+                                              label:
+                                                  const Text(
+                                                      "Save"),
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ],
-                                  ),
-                                  if (isEditing) ...[
-                                    const SizedBox(height: 10),
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: TextField(
-                                            controller: _nameCtrl,
-                                            decoration: const InputDecoration(
-                                              labelText: "Name",
-                                              isDense: true,
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Expanded(
-                                          child: TextField(
-                                            controller: _orgCtrl,
-                                            decoration: const InputDecoration(
-                                              labelText: "Org",
-                                              isDense: true,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: TextField(
-                                            controller: _phoneCtrl,
-                                            decoration: const InputDecoration(
-                                              labelText: "Phone",
-                                              isDense: true,
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Expanded(
-                                          child: TextField(
-                                            controller: _emailCtrl,
-                                            decoration: const InputDecoration(
-                                              labelText: "Email",
-                                              isDense: true,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: FilledButton.icon(
-                                            onPressed: _busy
-                                                ? null
-                                                : () => _saveEditing(c),
-                                            icon: const Icon(Icons.save_outlined),
-                                            label: const Text("Save"),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
                                   ],
-                                ],
+                                ),
                               ),
                             ),
                           );
