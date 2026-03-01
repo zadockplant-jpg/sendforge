@@ -11,7 +11,7 @@ import { billingRouter } from "./routes/billing.routes.js";
 import { webhooksRouter } from "./routes/webhooks.routes.js";
 import { threadsRouter } from "./routes/threads.routes.js";
 import { usageRouter } from "./routes/usage.routes.js";
-import contactsImportRoutes from "./routes/contacts.import.routes.js";
+import contactsRoutes from "./routes/contacts.routes.js";
 import { blastsQuoteRouter } from "./routes/blasts.quote.routes.js";
 import { blastsSendRouter } from "./routes/blasts.send.routes.js";
 import { stripeWebhooksRouter } from "./routes/stripe.webhooks.routes.js";
@@ -41,7 +41,7 @@ app.use(
 app.use("/health", healthRouter);
 app.use("/v1/auth", authRouter);
 app.use("/v1/auth", verificationRouter); // ✅ NEW: /v1/auth/verify
-app.use("/v1/contacts", contactsImportRoutes);
+app.use("/v1/contacts", contactsRoutes);
 app.use("/v1/groups", groupsRouter);
 app.use("/v1/templates", templatesRouter);
 app.use("/v1/blasts", blastsRouter);
