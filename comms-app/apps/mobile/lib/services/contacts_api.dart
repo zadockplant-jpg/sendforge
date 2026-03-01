@@ -24,8 +24,7 @@ class ContactsApi {
       'phone': phone,
       'email': email,
     };
-    final resp = await client.putJson('/v1/contacts/$contactId', body);
-    return resp;
+    return await client.putJson('/v1/contacts/$contactId', body);
   }
 
   Future<void> deleteContact(String contactId) async {

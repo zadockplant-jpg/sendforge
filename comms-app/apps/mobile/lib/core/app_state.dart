@@ -53,29 +53,32 @@ class AppState extends ChangeNotifier {
   }
 
   /// 🔹 Load contacts from backend
-  Future<void> loadContacts() async {
-    final api = ApiClient(baseUrl: baseUrl);
-    final response = await api.getJson('/v1/contacts');
+ Future<void> loadContacts() async {
+  final api = ApiClient(baseUrl: baseUrl);
 
-    if (response['contacts'] is List) {
-      contacts.clear();
+  final response = await api.getJson('/v1/contacts');
 
-      for (final item in response['contacts']) {
-        contacts.add(
-          Contact(
-            id: item['id'] ?? '',
-            name: item['name'] ?? 'Unknown',
-            phone: item['phone'],
-            email: item['email'],
-            organization: item['organization'],
-          ),
-        );
-      }
+  if (response['contacts'] is List) {
+    contacts.clear();
 
-      notifyListeners();
+    for (final item in response['contacts']) {
+      // ✅ prefer canonical E.164 if present
+      final phone = item['phone_e164'] ?? item['phone'];
+
+      contacts.add(
+        Contact(
+          id: item['id'] ?? '',
+          name: item['name'] ?? 'Unknown',
+          phone: phone,
+          email: item['email'],
+          organization: item['organization'],
+        ),
+      );
     }
-  }
 
+    notifyListeners();
+  }
+}
   /// 🔹 Load groups from backend
   Future<void> loadGroups() async {
     final api = GroupsApi(this);

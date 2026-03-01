@@ -15,7 +15,7 @@ import { db } from "../config/db.js";
  *
  * Storage:
  * - contacts.phone_e164 receives normalized E.164
- * - we keep normalized object field "phone" as E.164 to remain compatible with dedupeContacts()
+ * - normalized object field "phone" remains E.164 to stay compatible with dedupeContacts()
  */
 function normalizePhoneToE164(raw) {
   if (typeof raw !== "string") return null;
@@ -23,13 +23,13 @@ function normalizePhoneToE164(raw) {
   let s = raw.trim();
   if (!s) return null;
 
-  // Remove common separators but keep leading +
+  // Remove separators (keep leading +)
   s = s.replace(/[()\-\.\s]/g, "");
 
   // Convert 00 prefix to +
   if (s.startsWith("00")) s = "+" + s.slice(2);
 
-  // If it has letters, discard (avoid garbage)
+  // discard obvious garbage
   if (/[a-zA-Z]/.test(s)) return null;
 
   const isDigitsOnly = /^[0-9]+$/.test(s);
@@ -37,12 +37,12 @@ function normalizePhoneToE164(raw) {
   try {
     if (s.startsWith("+")) {
       const p = parsePhoneNumberFromString(s);
-      if (p && p.isValid()) return p.number; // E.164
+      if (p && p.isValid()) return p.number;
       return null;
     }
 
+    // Default US if no country code
     if (isDigitsOnly) {
-      // US defaults
       if (s.length === 10) {
         const p = parsePhoneNumberFromString(s, "US");
         if (p && p.isValid()) return p.number;
@@ -54,19 +54,54 @@ function normalizePhoneToE164(raw) {
         return null;
       }
 
-      // last-ditch: try parsing as US
       const p = parsePhoneNumberFromString(s, "US");
       if (p && p.isValid()) return p.number;
       return null;
     }
 
-    // Non-digit national format: still try US (best-effort)
     const p = parsePhoneNumberFromString(s, "US");
     if (p && p.isValid()) return p.number;
     return null;
   } catch {
     return null;
   }
+}
+
+async function insertOneContactOptionA({ userId, method, c }) {
+  // Option A:
+  // - if phone_e164 exists: conflict on (user_id, phone_e164)
+  // - else conflict on (user_id, email)
+  // This matches your Render DB indexes exactly and avoids composite NULL weirdness.
+  const baseRow = {
+    user_id: userId,
+    name: c.name,
+    phone_e164: c.phone || null, // E.164
+    email: c.email || null,
+    organization: c.organization || null,
+    source: method,
+    created_at: new Date(),
+  };
+
+  if (baseRow.phone_e164) {
+    const rows = await db("contacts")
+      .insert(baseRow)
+      .onConflict(["user_id", "phone_e164"])
+      .ignore()
+      .returning(["id"]);
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
+  if (baseRow.email) {
+    const rows = await db("contacts")
+      .insert(baseRow)
+      .onConflict(["user_id", "email"])
+      .ignore()
+      .returning(["id"]);
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
+  // should not happen (normalize filters these out)
+  return false;
 }
 
 export async function importContacts({ userId, method, contacts }) {
@@ -78,27 +113,12 @@ export async function importContacts({ userId, method, contacts }) {
 
   let inserted = 0;
 
-  // Insert best-effort; count actual inserts (not just attempts)
   for (const c of unique) {
-    const rows = await db("contacts")
-      .insert({
-        user_id: userId,
-        name: c.name,
-        // ✅ store E.164
-        phone_e164: c.phone, // "phone" is E.164 in normalized object
-        email: c.email,
-        organization: c.organization || null,
-        source: method,
-        created_at: new Date(),
-      })
-      .onConflict(["user_id", "phone_e164", "email"])
-      .ignore()
-      .returning(["id"]);
-
-    if (Array.isArray(rows) && rows.length > 0) inserted++;
+    const didInsert = await insertOneContactOptionA({ userId, method, c });
+    if (didInsert) inserted++;
   }
 
-  // Audit should never block import success
+  // Audit should never block success
   try {
     await auditLog(userId, "contacts_import", {
       method,
@@ -114,9 +134,6 @@ export async function importContacts({ userId, method, contacts }) {
     added: inserted,
     duplicates: duplicates.length,
     invalid: (contacts?.length || 0) - normalized.length,
-    // keep these if you want them for debugging/UI (safe-ish)
-    unique,
-    duplicatesList: duplicates,
   };
 }
 
@@ -134,13 +151,13 @@ function normalize(c) {
   const phoneE164 = rawPhone ? normalizePhoneToE164(rawPhone) : null;
   const email = rawEmail || null;
 
-  // If both missing after normalization, skip
+  // Require at least one channel
   if (!phoneE164 && !email) return null;
 
   return {
-    name,
+    name: name || "Unknown",
     organization: organization || null,
-    // ✅ keep property name "phone" for dedupe compatibility, but value is E.164
+    // Keep field name "phone" (dedupe expects it), but value is E.164
     phone: phoneE164,
     email,
   };

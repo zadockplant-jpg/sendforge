@@ -97,6 +97,7 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
     setState(() {
       for (int i = start; i <= end && i < items.length; i++) {
         final id = items[i].id;
+        if (id.isEmpty) continue;
         if (select) {
           _selectedIds.add(id);
         } else {
@@ -122,7 +123,9 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
     });
   }
 
-  Future<void> _saveEditing(Contact c) async {
+  Future<void> _saveEditing(Contact original) async {
+    if (original.id.isEmpty) return;
+
     final api = ApiClient(baseUrl: widget.appState.baseUrl);
     final contactsApi = ContactsApi(api);
 
@@ -130,7 +133,7 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
 
     try {
       await contactsApi.updateContact(
-        c.id,
+        original.id,
         name: _nameCtrl.text.trim(),
         organization: _orgCtrl.text.trim().isEmpty ? null : _orgCtrl.text.trim(),
         phone: _phoneCtrl.text.trim().isEmpty ? null : _phoneCtrl.text.trim(),
@@ -187,6 +190,7 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
 
     try {
       for (final id in _selectedIds.toList()) {
+        if (id.isEmpty) continue;
         await contactsApi.deleteContact(id);
       }
 
@@ -242,8 +246,6 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
         autofocus: true,
         onKey: (evt) {
           if (!kIsWeb) return;
-          final down = evt is RawKeyDownEvent;
-          if (!down) return;
           setState(() {
             _shiftDown = evt.isShiftPressed;
           });
@@ -280,33 +282,38 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                           return InkWell(
                             onTap: () {
                               // Shift-click selection range (desktop/web)
-                              if (kIsWeb && _shiftDown && _lastTappedIndex != null) {
+                              if (kIsWeb &&
+                                  _shiftDown &&
+                                  _lastTappedIndex != null) {
                                 final anchor = _lastTappedIndex!;
-                                final wantSelect = !_selectedIds.contains(c.id);
+                                final wantSelect =
+                                    !_selectedIds.contains(c.id);
                                 _toggleRange(items, anchor, i, wantSelect);
                               } else {
-                                // Tap opens inline editor (requested behavior)
                                 _startEditing(c);
                               }
                               _lastTappedIndex = i;
                             },
                             onLongPress: () {
-                              // Long press toggles selection (mobile)
                               _toggleSingle(c);
                               _lastTappedIndex = i;
                             },
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 10),
                               decoration: BoxDecoration(
-                                color: selected ? Colors.blue.withOpacity(0.08) : null,
+                                color:
+                                    selected ? Colors.blue.withOpacity(0.08) : null,
                                 border: Border(
-                                  bottom: BorderSide(color: Colors.black.withOpacity(0.06)),
+                                  bottom: BorderSide(
+                                      color: Colors.black.withOpacity(0.06)),
                                 ),
                               ),
                               child: Column(
                                 children: [
                                   Row(
-                                    crossAxisAlignment: CrossAxisAlignment.center,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
                                     children: [
                                       Checkbox(
                                         value: selected,
@@ -316,48 +323,75 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                                       const SizedBox(width: 10),
                                       Expanded(
                                         child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
                                           children: [
                                             Text(
                                               c.name,
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(fontWeight: FontWeight.w700),
+                                              style: const TextStyle(
+                                                  fontWeight: FontWeight.w700),
                                             ),
                                             const SizedBox(height: 2),
                                             Row(
                                               children: [
-                                                if ((c.organization ?? "").isNotEmpty)
+                                                if ((c.organization ?? "")
+                                                    .isNotEmpty)
                                                   Flexible(
                                                     child: Text(
                                                       c.organization!,
                                                       maxLines: 1,
-                                                      overflow: TextOverflow.ellipsis,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
                                                       style: const TextStyle(
                                                         fontSize: 12,
                                                         color: Colors.blueGrey,
                                                       ),
                                                     ),
                                                   ),
-                                                if ((c.organization ?? "").isNotEmpty) const SizedBox(width: 8),
+                                                if ((c.organization ?? "")
+                                                    .isNotEmpty)
+                                                  const SizedBox(width: 8),
                                                 if (c.hasSms)
                                                   Container(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                            horizontal: 8,
+                                                            vertical: 3),
                                                     decoration: BoxDecoration(
-                                                      borderRadius: BorderRadius.circular(999),
-                                                      border: Border.all(color: Colors.black.withOpacity(0.15)),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              999),
+                                                      border: Border.all(
+                                                          color: Colors.black
+                                                              .withOpacity(
+                                                                  0.15)),
                                                     ),
-                                                    child: const Text("SMS", style: TextStyle(fontSize: 11)),
+                                                    child: const Text("SMS",
+                                                        style: TextStyle(
+                                                            fontSize: 11)),
                                                   ),
-                                                if (c.hasSms && c.hasEmail) const SizedBox(width: 6),
+                                                if (c.hasSms && c.hasEmail)
+                                                  const SizedBox(width: 6),
                                                 if (c.hasEmail)
                                                   Container(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                            horizontal: 8,
+                                                            vertical: 3),
                                                     decoration: BoxDecoration(
-                                                      borderRadius: BorderRadius.circular(999),
-                                                      border: Border.all(color: Colors.black.withOpacity(0.15)),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              999),
+                                                      border: Border.all(
+                                                          color: Colors.black
+                                                              .withOpacity(
+                                                                  0.15)),
                                                     ),
-                                                    child: const Text("Email", style: TextStyle(fontSize: 11)),
+                                                    child: const Text("Email",
+                                                        style: TextStyle(
+                                                            fontSize: 11)),
                                                   ),
                                               ],
                                             ),
@@ -365,13 +399,16 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                                         ),
                                       ),
                                       IconButton(
-                                        tooltip: isEditing ? "Close" : "Edit",
-                                        onPressed: () => isEditing ? _stopEditing() : _startEditing(c),
-                                        icon: Icon(isEditing ? Icons.close : Icons.edit_outlined),
+                                        tooltip:
+                                            isEditing ? "Close" : "Edit",
+                                        onPressed: () =>
+                                            isEditing ? _stopEditing() : _startEditing(c),
+                                        icon: Icon(isEditing
+                                            ? Icons.close
+                                            : Icons.edit_outlined),
                                       ),
                                     ],
                                   ),
-
                                   if (isEditing) ...[
                                     const SizedBox(height: 10),
                                     Row(
@@ -426,7 +463,9 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
                                       children: [
                                         Expanded(
                                           child: FilledButton.icon(
-                                            onPressed: _busy ? null : () => _saveEditing(c),
+                                            onPressed: _busy
+                                                ? null
+                                                : () => _saveEditing(c),
                                             icon: const Icon(Icons.save_outlined),
                                             label: const Text("Save"),
                                           ),
