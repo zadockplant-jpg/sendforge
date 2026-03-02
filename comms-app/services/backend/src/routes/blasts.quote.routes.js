@@ -1,3 +1,22 @@
+// comms-app/services/backend/src/routes/blasts.quote.routes.js
+import { Router } from "express";
+import { db } from "../config/db.js";
+import { requireAuth } from "../middleware/auth.js";
+import {
+  PLAN,
+  INTL_CAPS_CENTS,
+  INTL_MULTIPLIERS,
+  isDomesticUSCA,
+} from "../config/pricingpolicy.js";
+import { parseE164CountryCode } from "../services/phone_country.service.js";
+import { getIntlTier } from "../services/intlTier.service.js";
+import { getTwilioSmsUnitPriceUSD } from "../services/twilio_pricing.service.js";
+
+export const blastsQuoteRouter = Router();
+
+/**
+ * POST /v1/blasts/quote
+ */
 blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
   try {
     const userId = req.user?.sub;
@@ -33,13 +52,6 @@ blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
       return res.json({
         blocked: true,
         blockedReason: user.intl_blocked_reason,
-      });
-    }
-
-    if (!user.stripe_payment_method_attached && plan !== PLAN.FREE) {
-      return res.json({
-        blocked: true,
-        blockedReason: "no_payment_method_for_intl",
       });
     }
 
@@ -92,7 +104,6 @@ blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
     const countryCounts = new Map();
 
     for (let raw of recipients) {
-      // Harden normalization
       const e164 = raw.startsWith("+") ? raw : `+${raw}`;
 
       const cc = parseE164CountryCode(e164);
@@ -136,7 +147,14 @@ blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
       });
     }
 
-    // Intl pricing logic
+    // Require payment method for paid plans
+    if (!user.stripe_payment_method_attached) {
+      return res.json({
+        blocked: true,
+        blockedReason: "no_payment_method_for_intl",
+      });
+    }
+
     let estimatedIntlCents = 0;
 
     for (const [cc, count] of countryCounts.entries()) {
