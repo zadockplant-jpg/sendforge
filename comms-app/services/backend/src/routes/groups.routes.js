@@ -181,8 +181,7 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
   id: crypto.randomUUID(),
   user_id: userId,
   group_id: groupId,
-  avatar_key: avatarKey,
-  contact_id: contactId,
+    contact_id: contactId,
   created_at: db.fn.now(),
 }));
 
@@ -196,7 +195,6 @@ groupsRouter.put("/:id/members", requireAuth, async (req, res) => {
         id: g.id,
         name: g.name,
         type,
-        avatarKey,
         memberCount: resolved?.contacts?.length || 0,
         members: resolved?.contacts || [],
       },

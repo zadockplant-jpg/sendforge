@@ -1,7 +1,6 @@
 // comms-app/apps/mobile/lib/ui/screens/edit_contacts_screen.dart
 
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -166,18 +165,18 @@ class _EditContactsScreenState extends State<EditContactsScreen> {
 
     final ok = await showDialog<bool>(
           context: context,
-          builder: (_) => AlertDialog(
+          builder: (dialogCtx) => AlertDialog(
             title: const Text("Delete contacts?"),
             content: Text(
               "This will HARD delete ${_selectedIds.length} contact(s).",
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.pop(context, false),
+                onPressed: () => Navigator.pop(dialogCtx, false),
                 child: const Text("Cancel"),
               ),
               ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
+                onPressed: () => Navigator.pop(dialogCtx, true),
                 child: const Text("Delete"),
               ),
             ],
