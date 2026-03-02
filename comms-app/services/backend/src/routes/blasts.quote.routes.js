@@ -130,7 +130,7 @@ blastsQuoteRouter.post("/", requireAuth, async (req, res) => {
     // 🔥 FREE PLAN BLOCK ONLY IF INTL EXISTS
     if (plan === PLAN.FREE && intlCount > 0) {
       return res.json({
-        blocked: true,
+        blocked: false,
         blockedReason: "free_plan_intl_blocked",
       });
     }
