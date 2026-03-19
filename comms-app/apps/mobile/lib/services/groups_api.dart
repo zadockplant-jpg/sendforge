@@ -151,4 +151,7 @@ Future<Group> create({
       );
     }).toList();
   }
+    Future<void> deleteGroup(String groupId) async {
+    await _client().deleteJson('/v1/groups/$groupId');
+  }
 }
