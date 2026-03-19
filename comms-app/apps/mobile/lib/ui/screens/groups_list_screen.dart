@@ -1,18 +1,15 @@
-// comms-app/apps/mobile/lib/ui/screens/groups_list_screen.dart
+// apps/mobile/lib/ui/screens/groups_list_screen.dart
 import 'package:flutter/material.dart';
 import '../../core/app_state.dart';
 import '../../models/group.dart';
 import '../../services/groups_api.dart';
-import '../components/sf_card.dart';
+import '../colors.dart';
+import '../groups/group_avatar_atlas.dart';
 import 'group_detail_screen.dart';
 
 class GroupsListScreen extends StatefulWidget {
   final AppState appState;
-
-  /// If true, this screen renders just the list (no scaffold),
-  /// so GroupsScreen can embed it under the buttons.
   final bool embedMode;
-
   final Future<void> Function()? onRefresh;
 
   const GroupsListScreen({
@@ -47,7 +44,6 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
       final api = GroupsApi(widget.appState);
       final data = await api.list();
 
-      // keep AppState in sync
       widget.appState.groups
         ..clear()
         ..addAll(data);
@@ -66,9 +62,32 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
     }
   }
 
+  Widget _buildLeading(Group g) {
+    if (g.avatarKey != null && g.avatarKey!.isNotEmpty) {
+      return GroupAvatarAtlas(
+        avatarKey: g.avatarKey!,
+        size: 44,
+      );
+    }
+
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: const Icon(Icons.group_outlined),
+    );
+  }
+
   Widget _content() {
     if (busy) return const Center(child: CircularProgressIndicator());
-    if (error != null) return Center(child: Text(error!, style: const TextStyle(color: Colors.red)));
+    if (error != null) {
+      return Center(
+        child: Text(error!, style: const TextStyle(color: Colors.red)),
+      );
+    }
     if (groups.isEmpty) return const Center(child: Text("No groups yet."));
 
     return RefreshIndicator(
@@ -78,35 +97,69 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
       },
       child: ListView.separated(
         itemCount: groups.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
         itemBuilder: (context, i) {
-  final g = groups[i];
-  final subtitle = g.type == "meta"
-      ? '${g.memberCount} members (dynamic)'
-      : '${g.memberCount} members';
+          final g = groups[i];
+          final subtitle = g.type == "meta"
+              ? '${g.memberCount} members (dynamic)'
+              : '${g.memberCount} members';
 
-  return InkWell(
-    borderRadius: BorderRadius.circular(12),
-    onTap: () async {
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => GroupDetailScreen(
-            appState: widget.appState,
-            group: g,
-          ),
-        ),
-      );
+          return InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => GroupDetailScreen(
+                    appState: widget.appState,
+                    group: g,
+                  ),
+                ),
+              );
 
-      _load();
-    },
-    child: SFCard(
-      title: g.name,
-      subtitle: subtitle,
-      child: const SizedBox.shrink(),
-    ),
-  );
-},
+              await _load();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: SFColors.cardBorder),
+              ),
+              child: Row(
+                children: [
+                  _buildLeading(g),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          g.name,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          subtitle,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: SFColors.textMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.chevron_right),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }

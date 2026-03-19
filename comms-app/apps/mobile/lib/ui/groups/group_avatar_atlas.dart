@@ -1,3 +1,4 @@
+// apps/mobile/lib/ui/groups/group_avatar_atlas.dart
 import 'package:flutter/material.dart';
 
 class GroupAvatarAtlas extends StatelessWidget {
@@ -11,6 +12,13 @@ class GroupAvatarAtlas extends StatelessWidget {
   });
 
   static const int columns = 6;
+  static const int rows = 8;
+
+  static const double atlasWidth = 1024;
+  static const double atlasHeight = 1536;
+
+  static const double tileWidth = atlasWidth / columns; // 170.666...
+  static const double tileHeight = atlasHeight / rows;  // 192
 
   int _indexFromKey(String key) {
     final n = int.tryParse(key.replaceAll("av_", ""));
@@ -19,7 +27,7 @@ class GroupAvatarAtlas extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final index = _indexFromKey(avatarKey);
+    final index = _indexFromKey(avatarKey).clamp(0, (columns * rows) - 1);
     final row = index ~/ columns;
     final col = index % columns;
 
@@ -30,15 +38,23 @@ class GroupAvatarAtlas extends StatelessWidget {
         height: size,
         child: FittedBox(
           fit: BoxFit.cover,
+          alignment: Alignment.topLeft,
           child: SizedBox(
-            width: 600,
-            height: 600,
-            child: Transform.translate(
-              offset: Offset(-col * 100, -row * 100),
-              child: Image.asset(
-                "assets/avatars/group_avatars.png",
-                fit: BoxFit.cover,
-              ),
+            width: tileWidth,
+            height: tileHeight,
+            child: Stack(
+              children: [
+                Transform.translate(
+                  offset: Offset(-col * tileWidth, -row * tileHeight),
+                  child: Image.asset(
+                    "assets/avatars/group_avatars.png",
+                    width: atlasWidth,
+                    height: atlasHeight,
+                    fit: BoxFit.fill,
+                    alignment: Alignment.topLeft,
+                  ),
+                ),
+              ],
             ),
           ),
         ),

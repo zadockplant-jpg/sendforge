@@ -1,4 +1,4 @@
-// comms-app/apps/mobile/lib/ui/screens/group_detail_screen.dart
+// apps/mobile/lib/ui/screens/group_detail_screen.dart
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -26,22 +26,17 @@ class GroupDetailScreen extends StatefulWidget {
 }
 
 class _GroupDetailScreenState extends State<GroupDetailScreen> {
-  // SNAPSHOT selection state
   late Set<String> _selectedMemberIds;
-
-  // META linking state
   Set<String> _selectedChildGroupIds = {};
   bool _metaLoaded = false;
 
   final TextEditingController _search = TextEditingController();
   bool _saving = false;
 
-  // Desktop shift select
   int? _lastTappedIndex;
   bool _shiftDown = false;
   final FocusNode _keyboardFocus = FocusNode();
 
-  // Mobile long-hold + slide select
   bool _mobileDragMode = false;
   int? _mobileDragAnchorIndex;
   int? _mobileDragLastIndex;
@@ -113,6 +108,50 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Save failed: $e")),
+      );
+    }
+  }
+
+  Future<void> _deleteGroup() async {
+    final ok = await showDialog<bool>(
+          context: context,
+          builder: (dialogCtx) => AlertDialog(
+            title: const Text("Delete group?"),
+            content: Text(
+              _isMeta
+                  ? "This will permanently delete this meta group."
+                  : "This will permanently delete this group and remove its memberships.",
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogCtx).pop(false),
+                child: const Text("Cancel"),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogCtx).pop(true),
+                child: const Text("Delete"),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+
+    if (!ok) return;
+
+    setState(() => _saving = true);
+
+    try {
+      final api = GroupsApi(widget.appState);
+      await api.deleteGroup(widget.group.id);
+      await widget.appState.loadGroups();
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Delete failed: $e")),
       );
     }
   }
@@ -241,6 +280,11 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       backgroundColor: SFColors.primaryBlue,
       foregroundColor: Colors.white,
       actions: [
+        IconButton(
+          tooltip: "Delete group",
+          onPressed: _saving ? null : _deleteGroup,
+          icon: const Icon(Icons.delete_outline),
+        ),
         IconButton(
           tooltip: "Save",
           onPressed: _saving ? null : _save,

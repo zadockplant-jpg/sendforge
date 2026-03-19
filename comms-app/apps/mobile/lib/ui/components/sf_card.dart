@@ -1,3 +1,4 @@
+// apps/mobile/lib/ui/components/sf_card.dart
 import 'package:flutter/material.dart';
 import '../colors.dart';
 
@@ -13,10 +14,12 @@ class SFCard extends StatelessWidget {
     required this.child,
   });
 
+  bool get _hasRealChild => child is! SizedBox;
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
@@ -25,13 +28,21 @@ class SFCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+          ),
           if (subtitle != null) ...[
-            const SizedBox(height: 6),
-            Text(subtitle!, style: const TextStyle(fontSize: 13, color: SFColors.textMuted)),
+            const SizedBox(height: 4),
+            Text(
+              subtitle!,
+              style: const TextStyle(fontSize: 13, color: SFColors.textMuted),
+            ),
           ],
-          const SizedBox(height: 12),
-          child,
+          if (_hasRealChild) ...[
+            const SizedBox(height: 10),
+            child,
+          ],
         ],
       ),
     );
