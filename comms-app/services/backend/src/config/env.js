@@ -1,33 +1,41 @@
-// src/config/env.js
-
 const nodeEnv = process.env.NODE_ENV || "development";
 const port = Number(process.env.PORT || 3000);
 
-// PUBLIC_BASE_URL rules:
-// - REQUIRED in production
-// - Optional in development (falls back to localhost)
+// API base URL
 let publicBaseUrl = process.env.PUBLIC_BASE_URL;
+
+// Website base URL
+let publicSiteUrl = process.env.PUBLIC_SITE_URL;
 
 if (nodeEnv === "production") {
   if (!publicBaseUrl) {
     throw new Error(
-      "PUBLIC_BASE_URL must be set in production (e.g. https://comms-app-1w0o.onrender.com)"
+      "PUBLIC_BASE_URL must be set in production (for example https://api.sendforge.app)"
     );
   }
+
+  if (!publicSiteUrl) {
+    publicSiteUrl = publicBaseUrl;
+  }
 } else {
-  // development fallback only
-  publicBaseUrl =
-    publicBaseUrl || `http://localhost:${process.env.PORT || 3000}`;
+  publicBaseUrl = publicBaseUrl || `http://localhost:${process.env.PORT || 3000}`;
+  publicSiteUrl = publicSiteUrl || "http://localhost:8080";
 }
 
 export const env = {
   nodeEnv,
   port,
+
   publicBaseUrl,
+  publicSiteUrl,
 
   jwtSecret: process.env.JWT_SECRET || "",
   databaseUrl: process.env.DATABASE_URL || "",
   redisUrl: process.env.REDIS_URL || "",
+
+  stripeSecretKey: process.env.STRIPE_SECRET_KEY || "",
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "",
+  stripePriceTabforge: process.env.STRIPE_PRICE_TABFORGE || "",
 
   // Google Contacts OAuth (backend only)
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",

@@ -3,7 +3,8 @@ import cors from "cors";
 import { env } from "./config/env.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
-import { verificationRouter } from "./routes/verification.routes.js"; // ✅ NEW
+import { verificationRouter } from "./routes/verification.routes.js";
+import { accountRouter } from "./routes/account.routes.js";
 import { groupsRouter } from "./routes/groups.routes.js";
 import { templatesRouter } from "./routes/templates.routes.js";
 import { blastsRouter } from "./routes/blasts.routes.js";
@@ -40,7 +41,8 @@ app.use(
 // ----- CORE ROUTES -----
 app.use("/health", healthRouter);
 app.use("/v1/auth", authRouter);
-app.use("/v1/auth", verificationRouter); // ✅ NEW: /v1/auth/verify
+app.use("/v1/auth", verificationRouter);
+app.use("/v1/account", accountRouter);
 app.use("/v1/contacts", contactsRoutes);
 app.use("/v1/groups", groupsRouter);
 app.use("/v1/templates", templatesRouter);
@@ -57,10 +59,10 @@ app.use("/v1/blasts/send", blastsSendRouter);
 app.use("/v1/webhooks", webhooksRouter);
 app.use("/v1/webhooks/stripe", stripeWebhooksRouter);
 
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.json({
     status: "ok",
     service: "SendForge API",
-    env: process.env.NODE_ENV,
+    env: env.nodeEnv,
   });
 });
