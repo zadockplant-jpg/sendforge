@@ -5,7 +5,7 @@ import { z } from "zod";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
-import { getActivePlan, grantProductEntitlement } from "../services/entitlement.service.js";
+import { getActivePlan } from "../services/entitlement.service.js";
 
 export const billingRouter = Router();
 
@@ -15,16 +15,85 @@ const PRODUCT_CATALOG = {
     displayName: "TabForge",
     mode: "payment",
     stripePriceId: env.stripePriceTabforge,
-    defaultSuccessPath: "/store/tabforge/index.html",
-    defaultCancelPath: "/store/tabforge/index.html",
+    unitAmountCents: 500,
+    defaultSuccessPath: "/products/tabforge/index.html",
+    defaultCancelPath: "/products/tabforge/index.html",
+  },
+  "tabforge-page": {
+    slug: "tabforge-page",
+    displayName: "TabForge Extra Pages",
+    mode: "payment",
+    unitAmountCents: 500,
+    entitlementSlug: "tabforge-pages",
+    quantityMin: 1,
+    quantityMax: 10,
+    requiresEntitlement: "tabforge",
+    defaultSuccessPath: "/products/tabforge/index.html",
+    defaultCancelPath: "/products/tabforge/index.html",
   },
 };
 
-const CatalogCheckoutSchema = z.object({
-  productSlug: z.string().min(1),
-  successPath: z.string().optional(),
-  cancelPath: z.string().optional(),
-});
+const TABFORGE_PACK_CATALOG = {
+  builder: {
+    slug: "builder",
+    displayName: "Builder Pack",
+    entitlementSlug: "tabforge-pack-builder",
+    unitAmountCents: 500,
+  },
+  money: {
+    slug: "money",
+    displayName: "Money Pack",
+    entitlementSlug: "tabforge-pack-money",
+    unitAmountCents: 500,
+  },
+  dev: {
+    slug: "dev",
+    displayName: "Web / Dev Pack",
+    entitlementSlug: "tabforge-pack-dev",
+    unitAmountCents: 500,
+  },
+  media: {
+    slug: "media",
+    displayName: "Media Pack",
+    entitlementSlug: "tabforge-pack-media",
+    unitAmountCents: 500,
+  },
+  research: {
+    slug: "research",
+    displayName: "Research Pack",
+    entitlementSlug: "tabforge-pack-research",
+    unitAmountCents: 500,
+  },
+};
+
+const CatalogCheckoutSchema = z
+  .object({
+    productSlug: z.string().min(1).optional(),
+    packSlugs: z.array(z.string().min(1)).max(100).optional(),
+    quantity: z.number().int().min(1).max(10).optional(),
+    successPath: z.string().optional(),
+    cancelPath: z.string().optional(),
+  })
+  .superRefine((value, ctx) => {
+    const hasProduct = Boolean(value.productSlug);
+    const hasPacks = Array.isArray(value.packSlugs) && value.packSlugs.length > 0;
+
+    if (!hasProduct && !hasPacks) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["productSlug"],
+        message: "Either productSlug or packSlugs is required",
+      });
+    }
+
+    if (hasProduct && hasPacks) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["packSlugs"],
+        message: "Use either productSlug or packSlugs in a single checkout request",
+      });
+    }
+  });
 
 const PortalSessionSchema = z.object({
   returnPath: z.string().optional(),
@@ -35,15 +104,18 @@ function getStripe() {
   return new Stripe(env.stripeSecretKey);
 }
 
-function normalizeProductSlug(slug) {
+function normalizeSlug(slug) {
   return String(slug || "")
     .trim()
     .toLowerCase();
 }
 
 function getProductDefinition(productSlug) {
-  const slug = normalizeProductSlug(productSlug);
-  return PRODUCT_CATALOG[slug] || null;
+  return PRODUCT_CATALOG[normalizeSlug(productSlug)] || null;
+}
+
+function getPackDefinition(packSlug) {
+  return TABFORGE_PACK_CATALOG[normalizeSlug(packSlug)] || null;
 }
 
 function sanitizeRelativePath(path, fallback) {
@@ -61,6 +133,24 @@ function buildSiteUrl(path, extraQuery = {}) {
     }
   }
   return url.toString();
+}
+
+function uniqStrings(values = []) {
+  const out = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    const normalized = normalizeSlug(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+
+  return out;
+}
+
+function serializeCheckoutItems(items = []) {
+  return JSON.stringify(items);
 }
 
 async function getUserOrFail(userId) {
@@ -107,6 +197,100 @@ async function getOrCreateStripeCustomerForUser(userId) {
     user,
     customerId: customer.id,
   };
+}
+
+async function userHasEntitlement(userId, productSlug) {
+  const row = await db("product_entitlements")
+    .where({
+      user_id: userId,
+      product_slug: normalizeSlug(productSlug),
+      status: "active",
+    })
+    .first();
+
+  return Boolean(row);
+}
+
+function buildLineItems({ product, packs, quantity }) {
+  const lineItems = [];
+
+  if (product) {
+    const itemQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
+
+    if (product.stripePriceId && itemQuantity === 1) {
+      lineItems.push({
+        price: product.stripePriceId,
+        quantity: 1,
+      });
+    } else {
+      lineItems.push({
+        quantity: itemQuantity,
+        price_data: {
+          currency: "usd",
+          unit_amount: product.unitAmountCents,
+          product_data: {
+            name: product.displayName,
+            metadata: {
+              kind: product.slug === "tabforge-page" ? "page_quantity" : "product",
+              slug: product.slug,
+              entitlement_slug: product.entitlementSlug || product.slug,
+            },
+          },
+        },
+      });
+    }
+  }
+
+  for (const pack of packs) {
+    lineItems.push({
+      quantity: 1,
+      price_data: {
+        currency: "usd",
+        unit_amount: pack.unitAmountCents,
+        product_data: {
+          name: `TabForge - ${pack.displayName}`,
+          metadata: {
+            kind: "pack",
+            slug: pack.slug,
+            entitlement_slug: pack.entitlementSlug,
+          },
+        },
+      },
+    });
+  }
+
+  return lineItems;
+}
+
+function buildCheckoutSummary({ product, packs, quantity }) {
+  const items = [];
+
+  if (product) {
+    const itemQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
+    const kind = product.slug === "tabforge-page" ? "page_quantity" : "product";
+
+    items.push({
+      kind,
+      slug: product.slug,
+      displayName: product.displayName,
+      entitlementSlug: product.entitlementSlug || product.slug,
+      unitAmountCents: product.unitAmountCents ?? null,
+      quantity: itemQuantity,
+    });
+  }
+
+  for (const pack of packs) {
+    items.push({
+      kind: "pack",
+      slug: pack.slug,
+      displayName: pack.displayName,
+      entitlementSlug: pack.entitlementSlug,
+      unitAmountCents: pack.unitAmountCents,
+      quantity: 1,
+    });
+  }
+
+  return items;
 }
 
 async function upsertStripeSubscriptionFromWebhook(sub) {
@@ -215,29 +399,11 @@ async function handleStripeCheckoutSessionCompleted(session) {
       });
   }
 
-  const fulfillmentType = String(session.metadata?.fulfillment_type || "");
-  const productSlug = String(session.metadata?.product_slug || "")
-    .trim()
-    .toLowerCase();
-
-  if (fulfillmentType === "product_entitlement" && productSlug) {
-    await grantProductEntitlement({
-      userId,
-      productSlug,
-      source: "stripe",
-      sourceRef: String(session.payment_intent || session.id || ""),
-      metadata: {
-        checkout_session_id: session.id,
-        customer_id: session.customer || null,
-        payment_intent: session.payment_intent || null,
-      },
-    });
-  }
+  return;
 }
 
 /**
  * GET /v1/billing/me
- * Returns current plan + limits + whether subscription exists.
  */
 billingRouter.get("/me", requireAuth, async (req, res) => {
   try {
@@ -253,7 +419,6 @@ billingRouter.get("/me", requireAuth, async (req, res) => {
 
 /**
  * POST /v1/billing/activate
- * Dev / admin helper while building.
  */
 billingRouter.post("/activate", requireAuth, async (req, res) => {
   const plan = String(req.body.plan || "starter");
@@ -291,7 +456,10 @@ billingRouter.post("/activate", requireAuth, async (req, res) => {
 
 /**
  * POST /v1/billing/catalog/checkout-session
- * Creates a Stripe Checkout session for owned catalog products.
+ * Supports:
+ * - single product checkout
+ * - tabforge extra-page quantity checkout
+ * - multi-pack checkout
  */
 billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) => {
   const parsed = CatalogCheckoutSchema.safeParse(req.body);
@@ -299,16 +467,53 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     return res.status(400).json({ error: "invalid_input" });
   }
 
-  const product = getProductDefinition(parsed.data.productSlug);
-  if (!product) {
+  const requestedProductSlug = parsed.data.productSlug
+    ? normalizeSlug(parsed.data.productSlug)
+    : "";
+
+  const product = requestedProductSlug
+    ? getProductDefinition(requestedProductSlug)
+    : null;
+
+  if (requestedProductSlug && !product) {
     return res.status(404).json({ error: "unknown_product" });
   }
 
-  if (!product.stripePriceId) {
-    return res.status(500).json({
-      error: "product_not_configured",
-      productSlug: product.slug,
+  const requestedPackSlugs = uniqStrings(parsed.data.packSlugs || []);
+  const unknownPackSlugs = requestedPackSlugs.filter((slug) => !getPackDefinition(slug));
+  if (unknownPackSlugs.length) {
+    return res.status(404).json({
+      error: "unknown_pack",
+      packSlugs: unknownPackSlugs,
     });
+  }
+
+  const packs = requestedPackSlugs.map((slug) => getPackDefinition(slug)).filter(Boolean);
+  const quantity = Number.isInteger(parsed.data.quantity) ? parsed.data.quantity : 1;
+
+  if (!product && packs.length === 0) {
+    return res.status(400).json({ error: "empty_checkout" });
+  }
+
+  if (product?.slug === "tabforge-page") {
+    const min = product.quantityMin || 1;
+    const max = product.quantityMax || 10;
+
+    if (!Number.isInteger(quantity) || quantity < min || quantity > max) {
+      return res.status(400).json({
+        error: "invalid_quantity",
+        min,
+        max,
+      });
+    }
+
+    const hasPro = await userHasEntitlement(req.user.sub, product.requiresEntitlement);
+    if (!hasPro) {
+      return res.status(403).json({
+        error: "pro_required",
+        message: "TabForge Pro is required before purchasing extra pages.",
+      });
+    }
   }
 
   const stripe = getStripe();
@@ -321,23 +526,36 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
 
     const successPath = sanitizeRelativePath(
       parsed.data.successPath,
-      product.defaultSuccessPath
+      product?.defaultSuccessPath || "/products/tabforge/index.html"
     );
     const cancelPath = sanitizeRelativePath(
       parsed.data.cancelPath,
-      product.defaultCancelPath
+      product?.defaultCancelPath || "/products/tabforge/index.html"
     );
 
+    const checkoutItems = buildCheckoutSummary({ product, packs, quantity });
+    const lineItems = buildLineItems({ product, packs, quantity });
+
+    const metadata =
+      checkoutItems.length === 1 &&
+      checkoutItems[0].kind === "product" &&
+      checkoutItems[0].slug === "tabforge"
+        ? {
+            user_id: user.id,
+            product_slug: "tabforge",
+            fulfillment_type: "product_entitlement",
+          }
+        : {
+            user_id: user.id,
+            fulfillment_type: "multi_entitlement_cart",
+            checkout_items: serializeCheckoutItems(checkoutItems),
+          };
+
     const session = await stripe.checkout.sessions.create({
-      mode: product.mode,
+      mode: "payment",
       customer: customerId,
       client_reference_id: user.id,
-      line_items: [
-        {
-          price: product.stripePriceId,
-          quantity: 1,
-        },
-      ],
+      line_items: lineItems,
       allow_promotion_codes: true,
       success_url: buildSiteUrl(successPath, {
         checkout: "success",
@@ -346,34 +564,30 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
       cancel_url: buildSiteUrl(cancelPath, {
         checkout: "cancelled",
       }),
-      metadata: {
-        user_id: user.id,
-        product_slug: product.slug,
-        fulfillment_type: "product_entitlement",
-      },
+      metadata,
     });
 
     return res.json({
       ok: true,
       url: session.url,
       sessionId: session.id,
-      product: {
-        slug: product.slug,
-        displayName: product.displayName,
+      checkout: {
+        items: checkoutItems,
       },
     });
   } catch (err) {
     const statusCode = err?.statusCode || 500;
+    const message = String(err?.message || err);
+
     return res.status(statusCode).json({
       error: statusCode === 404 ? "user_not_found" : "server_error",
-      message: String(err?.message || err),
+      message,
     });
   }
 });
 
 /**
  * POST /v1/billing/stripe/portal-session
- * For recurring billing management later. Safe to expose now.
  */
 billingRouter.post("/stripe/portal-session", requireAuth, async (req, res) => {
   const parsed = PortalSessionSchema.safeParse(req.body || {});
@@ -395,7 +609,7 @@ billingRouter.post("/stripe/portal-session", requireAuth, async (req, res) => {
 
     const returnPath = sanitizeRelativePath(
       parsed.data.returnPath,
-      "/store/tabforge/index.html"
+      "/products/tabforge/index.html"
     );
 
     const session = await stripe.billingPortal.sessions.create({
@@ -418,7 +632,6 @@ billingRouter.post("/stripe/portal-session", requireAuth, async (req, res) => {
 
 /**
  * POST /v1/billing/apple/ingest
- * StoreKit2 placeholder ingest.
  */
 billingRouter.post("/apple/ingest", requireAuth, async (req, res) => {
   const raw = req.body || {};
@@ -456,7 +669,6 @@ billingRouter.post("/apple/ingest", requireAuth, async (req, res) => {
 
 /**
  * POST /v1/billing/google/ingest
- * Play Billing placeholder ingest.
  */
 billingRouter.post("/google/ingest", requireAuth, async (req, res) => {
   const raw = req.body || {};
@@ -492,8 +704,6 @@ billingRouter.post("/google/ingest", requireAuth, async (req, res) => {
 
 /**
  * STRIPE WEBHOOK (BACKWARD-COMPATIBLE)
- * Preserves existing /v1/billing/stripe/webhook behavior while also handling
- * checkout-session product entitlement fulfillment.
  */
 billingRouter.post("/stripe/webhook", async (req, res) => {
   const secret = env.stripeWebhookSecret;

@@ -12,6 +12,23 @@ function getStripe() {
   return new Stripe(env.stripeSecretKey);
 }
 
+function normalizeSlug(slug) {
+  return String(slug || "")
+    .trim()
+    .toLowerCase();
+}
+
+function parseCheckoutItems(raw) {
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(String(raw));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 async function findUserIdFromStripeCustomer(customerId) {
   if (!customerId) return null;
 
@@ -104,6 +121,76 @@ async function markStripeSubscriptionCanceled(sub) {
     });
 }
 
+async function getExistingEntitlement(userId, productSlug) {
+  return db("product_entitlements")
+    .where({
+      user_id: userId,
+      product_slug: normalizeSlug(productSlug),
+    })
+    .first();
+}
+
+async function grantCheckoutEntitlements({
+  userId,
+  sourceRef,
+  checkoutSessionId,
+  customerId,
+  paymentIntent,
+  items,
+}) {
+  for (const item of items) {
+    const kind = String(item?.kind || "");
+    const slug = normalizeSlug(item?.slug || "");
+    const entitlementSlug = normalizeSlug(item?.entitlementSlug || slug);
+
+    if (!entitlementSlug) continue;
+
+    if (kind === "page_quantity") {
+      const quantityPurchased = Math.max(1, Number(item?.quantity || 1));
+      const existing = await getExistingEntitlement(userId, entitlementSlug);
+      const existingMeta = existing?.metadata && typeof existing.metadata === "object"
+        ? existing.metadata
+        : {};
+      const previousTotal = Number(existingMeta.purchased_quantity_total || 0);
+
+      await grantProductEntitlement({
+        userId,
+        productSlug: entitlementSlug,
+        source: "stripe",
+        sourceRef,
+        metadata: {
+          ...existingMeta,
+          checkout_session_id: checkoutSessionId,
+          customer_id: customerId || null,
+          payment_intent: paymentIntent || null,
+          checkout_item_kind: kind,
+          checkout_item_slug: slug || entitlementSlug,
+          checkout_item_display_name: item?.displayName || null,
+          last_quantity_purchased: quantityPurchased,
+          purchased_quantity_total: previousTotal + quantityPurchased,
+        },
+      });
+
+      continue;
+    }
+
+    await grantProductEntitlement({
+      userId,
+      productSlug: entitlementSlug,
+      source: "stripe",
+      sourceRef,
+      metadata: {
+        checkout_session_id: checkoutSessionId,
+        customer_id: customerId || null,
+        payment_intent: paymentIntent || null,
+        checkout_item_kind: kind || null,
+        checkout_item_slug: slug || entitlementSlug,
+        checkout_item_display_name: item?.displayName || null,
+      },
+    });
+  }
+}
+
 async function handleCheckoutSessionCompleted(session) {
   const userId =
     session.metadata?.user_id ||
@@ -118,22 +205,39 @@ async function handleCheckoutSessionCompleted(session) {
     await attachStripeCustomerToUser(userId, session.customer);
   }
 
+  const sourceRef = String(session.payment_intent || session.id || "");
   const fulfillmentType = String(session.metadata?.fulfillment_type || "");
-  const productSlug = String(session.metadata?.product_slug || "")
-    .trim()
-    .toLowerCase();
+  const checkoutItems = parseCheckoutItems(session.metadata?.checkout_items);
 
-  if (fulfillmentType === "product_entitlement" && productSlug) {
-    await grantProductEntitlement({
+  if (fulfillmentType === "multi_entitlement_cart" && checkoutItems.length) {
+    await grantCheckoutEntitlements({
       userId,
-      productSlug,
-      source: "stripe",
-      sourceRef: String(session.payment_intent || session.id || ""),
-      metadata: {
-        checkout_session_id: session.id,
-        customer_id: session.customer || null,
-        payment_intent: session.payment_intent || null,
-      },
+      sourceRef,
+      checkoutSessionId: session.id,
+      customerId: session.customer || null,
+      paymentIntent: session.payment_intent || null,
+      items: checkoutItems,
+    });
+    return;
+  }
+
+  const productSlug = normalizeSlug(session.metadata?.product_slug || "");
+  if (fulfillmentType === "product_entitlement" && productSlug) {
+    await grantCheckoutEntitlements({
+      userId,
+      sourceRef,
+      checkoutSessionId: session.id,
+      customerId: session.customer || null,
+      paymentIntent: session.payment_intent || null,
+      items: [
+        {
+          kind: "product",
+          slug: productSlug,
+          entitlementSlug: productSlug,
+          displayName: productSlug,
+          quantity: 1,
+        },
+      ],
     });
   }
 }
@@ -241,10 +345,5 @@ async function handleStripeWebhook(req, res) {
   }
 }
 
-/**
- * Backward-compatible routes:
- * - mounted at /v1/webhooks/stripe with POST /
- * - also supports the original POST /stripe subpath, resulting in /v1/webhooks/stripe/stripe
- */
 stripeWebhooksRouter.post("/", handleStripeWebhook);
 stripeWebhooksRouter.post("/stripe", handleStripeWebhook);
