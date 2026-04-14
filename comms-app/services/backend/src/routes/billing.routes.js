@@ -217,28 +217,21 @@ function buildLineItems({ product, packs, quantity }) {
   if (product) {
     const itemQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
 
-    if (product.stripePriceId && itemQuantity === 1) {
-      lineItems.push({
-        price: product.stripePriceId,
-        quantity: 1,
-      });
-    } else {
-      lineItems.push({
-        quantity: itemQuantity,
-        price_data: {
-          currency: "usd",
-          unit_amount: product.unitAmountCents,
-          product_data: {
-            name: product.displayName,
-            metadata: {
-              kind: product.slug === "tabforge-page" ? "page_quantity" : "product",
-              slug: product.slug,
-              entitlement_slug: product.entitlementSlug || product.slug,
-            },
+    lineItems.push({
+      quantity: itemQuantity,
+      price_data: {
+        currency: "usd",
+        unit_amount: product.unitAmountCents,
+        product_data: {
+          name: product.displayName,
+          metadata: {
+            kind: product.slug === "tabforge-page" ? "page_quantity" : "product",
+            slug: product.slug,
+            entitlement_slug: product.entitlementSlug || product.slug,
           },
         },
-      });
-    }
+      },
+    });
   }
 
   for (const pack of packs) {
@@ -512,6 +505,16 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
       return res.status(403).json({
         error: "pro_required",
         message: "TabForge Pro is required before purchasing extra pages.",
+      });
+    }
+  }
+
+  if (packs.length > 0) {
+    const hasPro = await userHasEntitlement(req.user.sub, "tabforge");
+    if (!hasPro) {
+      return res.status(403).json({
+        error: "pro_required",
+        message: "TabForge Pro is required before purchasing packs.",
       });
     }
   }
