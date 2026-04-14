@@ -495,17 +495,6 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     return res.status(400).json({ error: "empty_checkout" });
   }
 
-  if (product?.slug === "tabforge") {
-    const alreadyOwnsPro = await userHasEntitlement(req.user.sub, "tabforge");
-    if (alreadyOwnsPro) {
-      return res.status(409).json({
-        error: "already_owned",
-        message: "You already own TabForge Pro.",
-        productSlug: "tabforge",
-      });
-    }
-  }
-
   if (product?.slug === "tabforge-page") {
     const min = product.quantityMin || 1;
     const max = product.quantityMax || 10;
@@ -524,27 +513,6 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
         error: "pro_required",
         message: "TabForge Pro is required before purchasing extra pages.",
       });
-    }
-  }
-
-  if (packs.length > 0) {
-    const hasPro = await userHasEntitlement(req.user.sub, "tabforge");
-    if (!hasPro) {
-      return res.status(403).json({
-        error: "pro_required",
-        message: "TabForge Pro is required before purchasing packs.",
-      });
-    }
-
-    for (const pack of packs) {
-      const alreadyOwnsPack = await userHasEntitlement(req.user.sub, pack.entitlementSlug);
-      if (alreadyOwnsPack) {
-        return res.status(409).json({
-          error: "already_owned",
-          message: `You already own ${pack.displayName}.`,
-          productSlug: pack.entitlementSlug,
-        });
-      }
     }
   }
 
