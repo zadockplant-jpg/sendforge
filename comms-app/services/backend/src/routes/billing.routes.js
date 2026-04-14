@@ -495,6 +495,16 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     return res.status(400).json({ error: "empty_checkout" });
   }
 
+  if (packs.length > 0) {
+    const hasPro = await userHasEntitlement(req.user.sub, "tabforge");
+    if (!hasPro) {
+      return res.status(403).json({
+        error: "pro_required",
+        message: "TabForge Pro is required before purchasing packs.",
+      });
+    }
+  }
+
   if (product?.slug === "tabforge-page") {
     const min = product.quantityMin || 1;
     const max = product.quantityMax || 10;
