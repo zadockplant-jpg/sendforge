@@ -519,6 +519,32 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
+  if (product?.slug === "tabforge") {
+    const alreadyOwnsPro = await userHasEntitlement(req.user.sub, "tabforge");
+    if (alreadyOwnsPro) {
+      return res.status(409).json({
+        error: "already_owned",
+        message: "You already own TabForge Pro.",
+      });
+    }
+  }
+
+  if (packs.length > 0) {
+    const ownedPackSlugs = [];
+    for (const pack of packs) {
+      const alreadyOwnsPack = await userHasEntitlement(req.user.sub, pack.entitlementSlug);
+      if (alreadyOwnsPack) ownedPackSlugs.push(pack.entitlementSlug);
+    }
+
+    if (ownedPackSlugs.length > 0) {
+      return res.status(409).json({
+        error: "already_owned",
+        message: "You already own one or more selected packs.",
+        productSlugs: ownedPackSlugs,
+      });
+    }
+  }
+
   const stripe = getStripe();
   if (!stripe) {
     return res.status(500).json({ error: "stripe_not_configured" });
