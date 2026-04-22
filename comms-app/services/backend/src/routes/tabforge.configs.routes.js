@@ -105,19 +105,26 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
       return res.status(409).json({ error: "config_name_exists" });
     }
 
-    const row = {
-      id: crypto.randomUUID(),
+    const id = crypto.randomUUID();
+
+    await db("tabforge_saved_configs").insert({
+      id,
       user_id: req.user.sub,
       name,
       payload: parsed.payload,
       created_at: db.fn.now(),
       updated_at: db.fn.now(),
-    };
+    });
 
-    await db("tabforge_saved_configs").insert(row);
+    const inserted = await db("tabforge_saved_configs")
+      .where({
+        id,
+        user_id: req.user.sub,
+      })
+      .first();
 
     return res.status(201).json({
-      item: mapRow(row),
+      item: mapRow(inserted),
     });
   } catch (err) {
     if (err instanceof z.ZodError) {
@@ -164,17 +171,18 @@ tabforgeConfigsRouter.put("/:id", async (req, res) => {
       updates.payload = parsed.payload;
     }
 
-    const rows = await db("tabforge_saved_configs")
+    await db("tabforge_saved_configs")
       .where({ id: current.id, user_id: req.user.sub })
-      .update(updates)
-      .returning(["id", "name", "created_at", "updated_at", "payload"]);
+      .update(updates);
 
-    const row = rows[0] || { ...current, ...updates };
+    const updated = await db("tabforge_saved_configs")
+      .where({ id: current.id, user_id: req.user.sub })
+      .first();
 
     return res.json({
       item: {
-        ...mapRow(row),
-        payload: row.payload,
+        ...mapRow(updated),
+        payload: updated.payload,
       },
     });
   } catch (err) {
