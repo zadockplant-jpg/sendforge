@@ -14,12 +14,22 @@ function supportEmail() {
   return process.env.SUPPORT_EMAIL || "support@sendforge.app";
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 async function sendEmailViaSendGrid({
   to,
   subject,
   text,
   html,
   requestId,
+  replyTo = null,
 }) {
   const fromEmail = process.env.VERIFY_FROM_EMAIL;
   const sgKey = process.env.SENDGRID_API_KEY;
@@ -41,6 +51,20 @@ async function sendEmailViaSendGrid({
     return { ok: true, mode: "log" };
   }
 
+  const body = {
+    personalizations: [{ to: [{ email: to }] }],
+    from: { email: fromEmail },
+    subject,
+    content: [
+      { type: "text/plain", value: text },
+      { type: "text/html", value: html },
+    ],
+  };
+
+  if (replyTo) {
+    body.reply_to = { email: replyTo };
+  }
+
   let res;
   try {
     res = await fetch("https://api.sendgrid.com/v3/mail/send", {
@@ -49,15 +73,7 @@ async function sendEmailViaSendGrid({
         Authorization: `Bearer ${sgKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        personalizations: [{ to: [{ email: to }] }],
-        from: { email: fromEmail },
-        subject,
-        content: [
-          { type: "text/plain", value: text },
-          { type: "text/html", value: html },
-        ],
-      }),
+      body: JSON.stringify(body),
     });
   } catch (err) {
     log("error", "sendgrid_network_error", {
@@ -72,14 +88,14 @@ async function sendEmailViaSendGrid({
   }
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const bodyText = await res.text().catch(() => "");
     const code = res.status === 401 ? "sendgrid_401" : "sendgrid_non_2xx";
 
     log("error", "sendgrid_error", {
       requestId,
       to: sanitizeEmail(to),
       status: res.status,
-      body: body?.slice(0, 500),
+      body: bodyText?.slice(0, 500),
       subject,
     });
 
@@ -219,6 +235,55 @@ If you did not request this, ignore this email.
 
   return sendEmailViaSendGrid({
     to,
+    subject,
+    text,
+    html,
+    requestId,
+  });
+}
+
+export async function sendContactFormEmail({
+  to,
+  replyTo,
+  name,
+  email,
+  company = "",
+  topic = "Support",
+  message,
+  requestId,
+}) {
+  const subject = `SendForge contact: ${topic} — ${name}`;
+
+  const text = `New SendForge contact request
+
+Topic: ${topic}
+Name: ${name}
+Email: ${email}
+Company: ${company || "N/A"}
+
+Message:
+${message}
+`;
+
+  const html = `
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.5; color: #111;">
+      <h2>New SendForge contact request</h2>
+
+      <p><strong>Topic:</strong> ${escapeHtml(topic)}</p>
+      <p><strong>Name:</strong> ${escapeHtml(name)}</p>
+      <p><strong>Email:</strong> <a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></p>
+      <p><strong>Company:</strong> ${escapeHtml(company || "N/A")}</p>
+
+      <hr style="border:none;border-top:1px solid #ddd;margin:18px 0"/>
+
+      <h3>Message</h3>
+      <p style="white-space:pre-wrap">${escapeHtml(message)}</p>
+    </div>
+  `;
+
+  return sendEmailViaSendGrid({
+    to,
+    replyTo,
     subject,
     text,
     html,
