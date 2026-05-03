@@ -17,6 +17,7 @@ import { blastsQuoteRouter } from "./routes/blasts.quote.routes.js";
 import { blastsSendRouter } from "./routes/blasts.send.routes.js";
 import { stripeWebhooksRouter } from "./routes/stripe.webhooks.routes.js";
 import { contactRouter } from "./routes/support.contact.js";
+import { tabforgeConfigsRouter } from "./routes/tabforge.configs.routes.js";
 
 export const app = express();
 
@@ -52,6 +53,7 @@ app.use("/v1/threads", threadsRouter);
 app.use("/v1/billing", billingRouter);
 app.use("/v1/usage", usageRouter);
 app.use("/v1/contact", contactRouter);
+app.use("/v1/tabforge/configs", tabforgeConfigsRouter);
 
 // ----- BLAST QUOTE / SEND -----
 app.use("/v1/blasts/quote", blastsQuoteRouter);
