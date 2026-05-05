@@ -3,8 +3,19 @@ import { Router } from "express";
 import { z } from "zod";
 import { db } from "../config/db.js";
 import { requireAuth } from "../middleware/auth.js";
+import { createRateLimiter, rateLimitByUserOrIp } from "../middleware/rateLimit.js";
 
 export const tabforgeConfigsRouter = Router();
+
+const CLOUD_AUTOSAVE_NAME = "TabForge Cloud Autosave";
+
+const tabforgeConfigWriteLimiter = createRateLimiter({
+  name: "tabforge-config-write",
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: rateLimitByUserOrIp,
+  message: "too_many_config_writes",
+});
 
 const SnapshotBodySchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -51,6 +62,12 @@ async function getOwnedConfigOr404(userId, configId) {
 }
 
 tabforgeConfigsRouter.use(requireAuth);
+tabforgeConfigsRouter.use((req, res, next) => {
+  if (["POST", "PUT", "DELETE"].includes(req.method)) {
+    return tabforgeConfigWriteLimiter(req, res, next);
+  }
+  return next();
+});
 
 tabforgeConfigsRouter.get("/", async (req, res) => {
   try {
@@ -102,6 +119,23 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
       .first();
 
     if (existing) {
+      if (name === CLOUD_AUTOSAVE_NAME) {
+        await db("tabforge_saved_configs")
+          .where({ id: existing.id, user_id: req.user.sub })
+          .update({
+            payload: parsed.payload,
+            updated_at: db.fn.now(),
+          });
+
+        const updated = await db("tabforge_saved_configs")
+          .where({ id: existing.id, user_id: req.user.sub })
+          .first();
+
+        return res.json({
+          item: mapRow(updated),
+        });
+      }
+
       return res.status(409).json({ error: "config_name_exists" });
     }
 

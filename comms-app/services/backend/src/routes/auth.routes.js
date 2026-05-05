@@ -13,6 +13,7 @@ import {
   EmailSendError,
 } from "../services/email.service.js";
 import { log, getRequestId, sanitizeEmail } from "../utils/logger.js";
+import { createRateLimiter, rateLimitByIpAndBodyEmail } from "../middleware/rateLimit.js";
 
 export const authRouter = Router();
 
@@ -37,6 +38,14 @@ const RecoverAccount = z.object({
 });
 
 const TOKEN_TTL_HOURS = 24;
+
+const loginRateLimiter = createRateLimiter({
+  name: "auth-login",
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: rateLimitByIpAndBodyEmail,
+  message: "too_many_login_attempts",
+});
 
 // Helpers
 function sha256(input) {
@@ -511,7 +520,7 @@ authRouter.post("/recover-account", async (req, res) => {
  * POST /v1/auth/login
  * - Blocks login if not verified (Option A)
  */
-authRouter.post("/login", async (req, res) => {
+authRouter.post("/login", loginRateLimiter, async (req, res) => {
   const requestId = getRequestId(req);
 
   if (!env.jwtSecret) {
@@ -550,9 +559,7 @@ authRouter.post("/login", async (req, res) => {
       return res.status(403).json({ error: "email_not_verified", expired });
     }
 
-    const token = jwt.sign({ sub: user.id, email }, env.jwtSecret, {
-      expiresIn: "30d",
-    });
+    const token = jwt.sign({ sub: user.id, email }, env.jwtSecret);
 
     return res.json({ token });
   } catch (err) {
