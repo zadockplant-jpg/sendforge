@@ -64,6 +64,12 @@ const TABFORGE_PACK_CATALOG = {
     entitlementSlug: "tabforge-pack-research",
     unitAmountCents: 500,
   },
+  games: {
+    slug: "games",
+    displayName: "Games Pack",
+    entitlementSlug: "tabforge-pack-games",
+    unitAmountCents: 500,
+  },
 };
 
 const CatalogCheckoutSchema = z
