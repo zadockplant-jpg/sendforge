@@ -180,6 +180,22 @@ async function getOrCreateStripeCustomerForUser(userId) {
   const user = await getUserOrFail(userId);
 
   if (user.stripe_customer_id) {
+    try {
+      const customer = await stripe.customers.retrieve(user.stripe_customer_id);
+      if (!customer?.deleted && user.email && customer.email !== user.email) {
+        await stripe.customers.update(user.stripe_customer_id, {
+          email: user.email,
+          metadata: {
+            ...(customer.metadata || {}),
+            user_id: user.id,
+          },
+        });
+      }
+    } catch {
+      // Do not block checkout if Stripe customer email refresh fails.
+      // Checkout still uses the stored customer ID and webhook fulfillment remains authoritative.
+    }
+
     return {
       user,
       customerId: user.stripe_customer_id,

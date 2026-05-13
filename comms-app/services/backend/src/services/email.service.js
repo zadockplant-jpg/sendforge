@@ -30,15 +30,18 @@ async function sendEmailViaSendGrid({
   html,
   requestId,
   replyTo = null,
+  fromEmail = null,
+  fromName = null,
 }) {
-  const fromEmail = process.env.VERIFY_FROM_EMAIL;
+  const senderEmail = fromEmail || process.env.VERIFY_FROM_EMAIL || process.env.SENDGRID_FROM_EMAIL;
+  const senderName = fromName || null;
   const sgKey = process.env.SENDGRID_API_KEY;
 
-  if (!fromEmail || !sgKey) {
+  if (!senderEmail || !sgKey) {
     log("warn", "email_send_skipped_not_configured", {
       requestId,
       to: sanitizeEmail(to),
-      hasFrom: Boolean(fromEmail),
+      hasFrom: Boolean(senderEmail),
       hasKey: Boolean(sgKey),
       subject,
     });
@@ -53,7 +56,7 @@ async function sendEmailViaSendGrid({
 
   const body = {
     personalizations: [{ to: [{ email: to }] }],
-    from: { email: fromEmail },
+    from: senderName ? { email: senderEmail, name: senderName } : { email: senderEmail },
     subject,
     content: [
       { type: "text/plain", value: text },
@@ -252,7 +255,7 @@ export async function sendContactFormEmail({
   message,
   requestId,
 }) {
-  const subject = `SendForge contact: ${topic} — ${name}`;
+  const subject = String(topic || "Support").trim() || "Support";
 
   const text = `New SendForge contact request
 
@@ -288,5 +291,7 @@ ${message}
     text,
     html,
     requestId,
+    fromEmail: process.env.CONTACT_FROM_EMAIL || process.env.SENDGRID_FROM_EMAIL || process.env.VERIFY_FROM_EMAIL,
+    fromName: process.env.CONTACT_FROM_NAME || process.env.SENDGRID_FROM_NAME || "SendForge",
   });
 }
