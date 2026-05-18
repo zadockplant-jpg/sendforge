@@ -37,6 +37,14 @@ export const env = {
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "",
   stripePriceTabforge: process.env.STRIPE_PRICE_TABFORGE || "",
 
+  // Inmate Records merch fulfillment (backend only)
+  printfulApiKey: process.env.PRINTFUL_API_KEY || "",
+  printfulStoreId: process.env.PRINTFUL_STORE_ID || "",
+  inmateRecordsSiteUrl:
+    process.env.INMATE_RECORDS_SITE_URL ||
+    process.env.PUBLIC_INMATE_RECORDS_SITE_URL ||
+    "https://inmaterecordings.com",
+
   // Google Contacts OAuth (backend only)
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || "",

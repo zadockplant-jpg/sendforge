@@ -4,6 +4,12 @@ import Stripe from "stripe";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { grantProductEntitlement } from "../services/entitlement.service.js";
+import {
+  markInmateRecordsOrderPaidFromStripe,
+} from "../services/inmate.records/orders.service.js";
+import {
+  markInmateRecordsOrderReadyForManualFulfillment,
+} from "../services/inmate.records/fulfillment.service.js";
 
 export const stripeWebhooksRouter = Router();
 
@@ -208,6 +214,14 @@ async function handleCheckoutSessionCompleted(session) {
   const sourceRef = String(session.payment_intent || session.id || "");
   const fulfillmentType = String(session.metadata?.fulfillment_type || "");
   const checkoutItems = parseCheckoutItems(session.metadata?.checkout_items);
+
+  if (fulfillmentType === "inmate_records_merch_order") {
+    const order = await markInmateRecordsOrderPaidFromStripe(session);
+    if (order?.id) {
+      await markInmateRecordsOrderReadyForManualFulfillment(order.id);
+    }
+    return;
+  }
 
   if (fulfillmentType === "multi_entitlement_cart" && checkoutItems.length) {
     await grantCheckoutEntitlements({
