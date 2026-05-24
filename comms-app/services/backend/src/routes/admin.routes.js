@@ -33,8 +33,9 @@ const ProductSchema = z.object({
 const ProductUpdateSchema = ProductSchema.omit({ slug: true }).partial();
 const EntitlementSchema = z.object({ email: z.string().email(), productSlug: z.string().min(1), metadata: z.record(z.any()).optional() });
 const ReferralCodeSchema = z.object({ email: z.string().email().optional().nullable(), code: z.string().min(3).max(40).optional(), cashappHandle: z.string().max(100).optional().nullable(), metadata: z.record(z.any()).optional() });
-const ReferralProgramSchema = z.object({ productSlug: z.string().min(1), requiredPurchases: z.number().int().min(1).max(1000), rewardAmountCents: z.number().int().min(0), rewardType: z.string().min(1).max(80).optional(), refundHoldDays: z.number().int().min(0).max(365).optional(), status: z.enum(["active", "inactive", "draft"]).optional(), metadata: z.record(z.any()).optional() });
-const RewardStatusSchema = z.object({ status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), cashappHandle: z.string().max(100).optional().nullable() });
+const ReferralTierSchema = z.object({ requiredPurchases: z.number().int().min(1).max(1000), rewardAmountCents: z.number().int().min(0) });
+const ReferralProgramSchema = z.object({ productSlug: z.string().min(1), requiredPurchases: z.number().int().min(1).max(1000).optional(), rewardAmountCents: z.number().int().min(0).optional(), rewardType: z.string().min(1).max(80).optional(), refundHoldDays: z.number().int().min(0).max(365).optional(), status: z.enum(["active", "inactive", "draft"]).optional(), tiers: z.array(ReferralTierSchema).max(12).optional(), metadata: z.record(z.any()).optional() });
+const RewardStatusSchema = z.object({ status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), note: z.string().max(2000).optional().nullable(), cashappHandle: z.string().max(100).optional().nullable() });
 
 const loginLimiter = createRateLimiter({ name: "admin-login", windowMs: 60 * 1000, max: 5, keyGenerator: rateLimitByIpAndBodyEmail, message: "too_many_admin_login_attempts" });
 const verifyLimiter = createRateLimiter({ name: "admin-mfa", windowMs: 5 * 60 * 1000, max: 8, keyGenerator: rateLimitByIpAndBodyEmail, message: "too_many_admin_mfa_attempts" });
@@ -167,7 +168,7 @@ adminRouter.get("/users/search", async (req, res) => {
   const user = await db("users").where({ email }).first();
   if (!user) return res.status(404).json({ error: "user_not_found" });
   const entitlements = await db("product_entitlements").where({ user_id: user.id }).orderBy("created_at", "desc");
-  res.json({ user: { id: user.id, email: user.email, emailVerified: Boolean(user.email_verified), stripeCustomerId: user.stripe_customer_id || null }, entitlements });
+  res.json({ user: { id: user.id, email: user.email, emailVerified: Boolean(user.email_verified), stripeCustomerId: user.stripe_customer_id || null, cashAppTag: user.cash_app_tag || null, referredByUserId: user.referred_by_user_id || null, referralCodeId: user.referral_code_id || null }, entitlements });
 });
 
 adminRouter.post("/entitlements/grant", writeLimiter, async (req, res) => {
@@ -188,6 +189,16 @@ adminRouter.post("/entitlements/revoke", writeLimiter, async (req, res) => {
   const item = await revokeProductEntitlement(user.id, parsed.data.productSlug, { ...(parsed.data.metadata || {}), revoked_by: req.admin.email });
   await writeAdminAudit(req, { action: "entitlement.revoke", resourceType: "product_entitlement", resourceId: item?.id || parsed.data.productSlug, beforeValue: before || null, afterValue: item });
   res.json({ item });
+});
+
+adminRouter.get("/referrals", async (_req, res) => {
+  const [codes, events, programs, rewards] = await Promise.all([
+    db("referral_codes").orderBy("created_at", "desc").limit(250),
+    db("referral_events").orderBy("created_at", "desc").limit(250),
+    db("referral_programs").orderBy("product_slug", "asc"),
+    db("reward_queue").orderBy("created_at", "desc").limit(250),
+  ]);
+  res.json({ items: events, codes, events, programs, rewards });
 });
 
 adminRouter.get("/referrals/codes", async (_req, res) => {
@@ -215,7 +226,16 @@ adminRouter.post("/referrals/programs", writeLimiter, async (req, res) => {
   const parsed = ReferralProgramSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
   const p = parsed.data;
-  const rows = await db("referral_programs").insert({ id: crypto.randomUUID(), product_slug: normalizeSlug(p.productSlug), required_purchases: p.requiredPurchases, reward_amount_cents: p.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: p.refundHoldDays ?? 14, status: p.status || "active", metadata: p.metadata || {}, updated_at: db.fn.now() }).onConflict("product_slug").merge({ required_purchases: p.requiredPurchases, reward_amount_cents: p.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: p.refundHoldDays ?? 14, status: p.status || "active", metadata: p.metadata || {}, updated_at: db.fn.now() }).returning("*");
+  const tiers = Array.isArray(p.tiers) && p.tiers.length
+    ? p.tiers
+    : [
+        { requiredPurchases: p.requiredPurchases || 5, rewardAmountCents: p.rewardAmountCents ?? 1000 },
+        { requiredPurchases: 15, rewardAmountCents: 4000 },
+        { requiredPurchases: 50, rewardAmountCents: 20000 },
+      ];
+  const primaryTier = tiers[0];
+  const metadata = { ...(p.metadata || {}), tiers };
+  const rows = await db("referral_programs").insert({ id: crypto.randomUUID(), product_slug: normalizeSlug(p.productSlug), required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: p.refundHoldDays ?? 0, status: p.status || "active", metadata, updated_at: db.fn.now() }).onConflict("product_slug").merge({ required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: p.refundHoldDays ?? 0, status: p.status || "active", metadata, updated_at: db.fn.now() }).returning("*");
   await writeAdminAudit(req, { action: "referral_program.upsert", resourceType: "referral_program", resourceId: normalizeSlug(p.productSlug), afterValue: rows[0] });
   res.json({ item: rows[0] });
 });
@@ -225,18 +245,21 @@ adminRouter.get("/rewards", async (_req, res) => {
   res.json({ items: rows });
 });
 
-adminRouter.patch("/rewards/:id", writeLimiter, async (req, res) => {
+async function updateRewardStatus(req, res) {
   const parsed = RewardStatusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
   const existing = await db("reward_queue").where({ id: req.params.id }).first();
   if (!existing) return res.status(404).json({ error: "reward_not_found" });
-  const update = { status: parsed.data.status, admin_note: parsed.data.adminNote ?? existing.admin_note, cashapp_handle: parsed.data.cashappHandle ?? existing.cashapp_handle, updated_at: db.fn.now() };
+  const update = { status: parsed.data.status, admin_note: parsed.data.adminNote ?? parsed.data.note ?? existing.admin_note, cashapp_handle: parsed.data.cashappHandle ?? existing.cashapp_handle, updated_at: db.fn.now() };
   if (parsed.data.status === "approved") { update.approved_by = req.admin.sub; update.approved_at = db.fn.now(); }
   if (parsed.data.status === "paid") { update.paid_by = req.admin.sub; update.paid_at = db.fn.now(); }
   const rows = await db("reward_queue").where({ id: existing.id }).update(update).returning("*");
   await writeAdminAudit(req, { action: `reward.${parsed.data.status}`, resourceType: "reward_queue", resourceId: existing.id, beforeValue: existing, afterValue: rows[0] });
   res.json({ item: rows[0] });
-});
+}
+
+adminRouter.patch("/rewards/:id", writeLimiter, updateRewardStatus);
+adminRouter.put("/rewards/:id", writeLimiter, updateRewardStatus);
 
 adminRouter.get("/attribution/clicks", async (_req, res) => {
   const rows = await db("attribution_clicks").orderBy("created_at", "desc").limit(500);

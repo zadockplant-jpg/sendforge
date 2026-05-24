@@ -4,6 +4,7 @@ import Stripe from "stripe";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { grantProductEntitlement } from "../services/entitlement.service.js";
+import { recordReferralPurchase } from "../services/referrals/referral.service.js";
 import {
   markInmateRecordsOrderPaidFromStripe,
 } from "../services/inmate.records/orders.service.js";
@@ -177,6 +178,17 @@ async function grantCheckoutEntitlements({
         },
       });
 
+      await recordReferralPurchase({
+        referredUserId: userId,
+        productSlug: entitlementSlug,
+        purchaseRef: `${sourceRef}:${entitlementSlug}`,
+        metadata: {
+          checkout_session_id: checkoutSessionId,
+          checkout_item_kind: kind,
+          quantity: quantityPurchased,
+        },
+      });
+
       continue;
     }
 
@@ -192,6 +204,17 @@ async function grantCheckoutEntitlements({
         checkout_item_kind: kind || null,
         checkout_item_slug: slug || entitlementSlug,
         checkout_item_display_name: item?.displayName || null,
+      },
+    });
+
+    await recordReferralPurchase({
+      referredUserId: userId,
+      productSlug: entitlementSlug,
+      purchaseRef: `${sourceRef}:${entitlementSlug}`,
+      metadata: {
+        checkout_session_id: checkoutSessionId,
+        checkout_item_kind: kind || null,
+        checkout_item_slug: slug || entitlementSlug,
       },
     });
   }

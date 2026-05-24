@@ -14,15 +14,23 @@ import {
 } from "../services/email.service.js";
 import { log, getRequestId, sanitizeEmail } from "../utils/logger.js";
 import { createRateLimiter, rateLimitByIpAndBodyEmail } from "../middleware/rateLimit.js";
+import { applySignupReferral } from "../services/referrals/referral.service.js";
 
 export const authRouter = Router();
 
 const Register = z.object({
   email: z.string().email(),
   password: z.string().min(8),
+  referredBy: z.string().max(320).optional().nullable(),
+  referral: z.string().max(320).optional().nullable(),
+  referralCode: z.string().max(80).optional().nullable(),
+  cashAppTag: z.string().max(100).optional().nullable(),
 });
 
-const Login = Register;
+const Login = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+});
 
 const ForgotPassword = z.object({
   email: z.string().email(),
@@ -104,6 +112,8 @@ authRouter.post("/register", async (req, res) => {
 
   const email = parsed.data.email.toLowerCase().trim();
   const password = parsed.data.password;
+  const referralIdentifier = parsed.data.referredBy || parsed.data.referral || parsed.data.referralCode || "";
+  const cashAppTag = parsed.data.cashAppTag || "";
 
   const verifyToken = crypto.randomBytes(32).toString("hex");
   const verifyTokenHash = sha256(verifyToken);
@@ -124,7 +134,9 @@ authRouter.post("/register", async (req, res) => {
           return { kind: "exists_verified", userId: existing.id };
         }
 
-        // Existing but not verified: refresh token + sent_at
+        // Existing but not verified: refresh token + sent_at.
+        // Do not change password here, but allow referral/cash app metadata to be captured
+        // if the user is still completing first-time account setup.
         await trx("users")
           .where({ id: existing.id })
           .update({
@@ -132,6 +144,14 @@ authRouter.post("/register", async (req, res) => {
             verification_sent_at: now,
             // do NOT change password here
           });
+
+        await applySignupReferral({
+          trx,
+          newUserId: existing.id,
+          newUserEmail: email,
+          referralIdentifier,
+          cashAppTag,
+        });
 
         return { kind: "exists_unverified", userId: existing.id };
       }
@@ -148,6 +168,14 @@ authRouter.post("/register", async (req, res) => {
         verification_token_hash: verifyTokenHash,
         verification_sent_at: now,
         verified_at: null,
+      });
+
+      await applySignupReferral({
+        trx,
+        newUserId: id,
+        newUserEmail: email,
+        referralIdentifier,
+        cashAppTag,
       });
 
       return { kind: "created", userId: id };
