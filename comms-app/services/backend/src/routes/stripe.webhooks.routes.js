@@ -207,6 +207,22 @@ async function grantCheckoutEntitlements({
       },
     });
 
+    if (entitlementSlug === "tabforge") {
+      await grantProductEntitlement({
+        userId,
+        productSlug: "tabforge-included-pack-credit",
+        source: "stripe",
+        sourceRef: `${sourceRef}:included-pack-credit`,
+        metadata: {
+          checkout_session_id: checkoutSessionId,
+          customer_id: customerId || null,
+          payment_intent: paymentIntent || null,
+          included_with: "tabforge",
+          redeemable_for: "tabforge-pack-*",
+        },
+      });
+    }
+
     await recordReferralPurchase({
       referredUserId: userId,
       productSlug: entitlementSlug,

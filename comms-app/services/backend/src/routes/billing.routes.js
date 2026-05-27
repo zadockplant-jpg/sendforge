@@ -5,7 +5,7 @@ import { z } from "zod";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
-import { getActivePlan } from "../services/entitlement.service.js";
+import { getActivePlan, grantProductEntitlement } from "../services/entitlement.service.js";
 
 export const billingRouter = Router();
 
@@ -100,6 +100,10 @@ const CatalogCheckoutSchema = z
       });
     }
   });
+
+const IncludedPackRedeemSchema = z.object({
+  packSlug: z.string().min(1),
+});
 
 const PortalSessionSchema = z.object({
   returnPath: z.string().optional(),
@@ -633,6 +637,112 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     return res.status(statusCode).json({
       error: statusCode === 404 ? "user_not_found" : "server_error",
       message,
+    });
+  }
+});
+
+
+/**
+ * POST /v1/billing/catalog/redeem-included-pack
+ * Redeems the one curated-pack credit included with TabForge Pro.
+ */
+billingRouter.post("/catalog/redeem-included-pack", requireAuth, async (req, res) => {
+  const parsed = IncludedPackRedeemSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_input" });
+  }
+
+  const pack = getPackDefinition(parsed.data.packSlug);
+  if (!pack) {
+    return res.status(404).json({ error: "unknown_pack" });
+  }
+
+  try {
+    const hasPro = await userHasEntitlement(req.user.sub, "tabforge");
+    if (!hasPro) {
+      return res.status(403).json({
+        error: "pro_required",
+        message: "TabForge Pro is required before redeeming an included pack.",
+      });
+    }
+
+    const alreadyOwnsPack = await userHasEntitlement(req.user.sub, pack.entitlementSlug);
+    if (alreadyOwnsPack) {
+      return res.status(409).json({
+        error: "already_owned",
+        message: "You already own this pack.",
+        productSlug: pack.entitlementSlug,
+      });
+    }
+
+    const credit = await db("product_entitlements")
+      .where({
+        user_id: req.user.sub,
+        product_slug: "tabforge-included-pack-credit",
+        status: "active",
+      })
+      .andWhere((qb) => {
+        qb.whereNull("expires_at").orWhere("expires_at", ">", db.fn.now());
+      })
+      .first();
+
+    if (!credit) {
+      return res.status(403).json({
+        error: "included_pack_credit_unavailable",
+        message: "No included pack credit is available on this account.",
+      });
+    }
+
+    const sourceRef = `included-pack-credit:${credit.id}:${pack.entitlementSlug}`;
+    const creditMeta = credit.metadata && typeof credit.metadata === "object"
+      ? credit.metadata
+      : {};
+
+    await db.transaction(async (trx) => {
+      await trx("product_entitlements")
+        .where({
+          id: credit.id,
+          user_id: req.user.sub,
+          product_slug: "tabforge-included-pack-credit",
+          status: "active",
+        })
+        .update({
+          status: "redeemed",
+          metadata: {
+            ...creditMeta,
+            redeemed_at: new Date().toISOString(),
+            redeemed_pack_slug: pack.slug,
+            redeemed_product_slug: pack.entitlementSlug,
+          },
+          updated_at: trx.fn.now(),
+        });
+
+      await grantProductEntitlement({
+        userId: req.user.sub,
+        productSlug: pack.entitlementSlug,
+        source: "included_pack_credit",
+        sourceRef,
+        metadata: {
+          included_with: "tabforge",
+          credit_id: credit.id,
+          pack_slug: pack.slug,
+          pack_display_name: pack.displayName,
+        },
+      });
+    });
+
+    return res.json({
+      ok: true,
+      redeemed: {
+        packSlug: pack.slug,
+        productSlug: pack.entitlementSlug,
+        displayName: pack.displayName,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: "server_error",
+      message: String(err?.message || err),
     });
   }
 });
