@@ -322,3 +322,43 @@ If you did not request this, secure your account immediately.`;
     fromName: process.env.ADMIN_FROM_NAME || process.env.SENDGRID_FROM_NAME || "SendForge Admin",
   });
 }
+
+
+export async function sendReferralInviteEmail({ to, fromEmail, referralUrl, productName = "TabForge", requestId }) {
+  const safeProduct = escapeHtml(productName);
+  const safeFrom = escapeHtml(fromEmail || "a friend");
+  const safeUrl = escapeHtml(referralUrl);
+  const subject = `${fromEmail || "A friend"} invited you to try ${productName}`;
+
+  const text = `${fromEmail || "A friend"} invited you to try ${productName}.
+
+${productName} is a SendForge product for a cleaner, faster workspace.
+
+Create your account and buy Pro here:
+${referralUrl}
+
+The referral field will be filled automatically from this link.`;
+
+  const html = `
+    <div style="font-family: system-ui, -apple-system, Segoe UI, sans-serif; line-height:1.5; color:#111;">
+      <h2>${safeFrom} invited you to try ${safeProduct}</h2>
+      <p>${safeProduct} is a SendForge product for a cleaner, faster workspace.</p>
+      <p>
+        <a href="${safeUrl}" style="display:inline-block;padding:12px 16px;border-radius:10px;background:#1E6FE8;color:#fff;text-decoration:none;font-weight:700;">
+          Buy ${safeProduct} Pro
+        </a>
+      </p>
+      <p style="font-size:12px;color:#666;">Or paste this link into your browser:</p>
+      <p style="font-size:12px;word-break:break-all;">${safeUrl}</p>
+    </div>
+  `;
+
+  return sendEmailViaSendGrid({
+    to,
+    subject,
+    text,
+    html,
+    requestId,
+    replyTo: fromEmail || null,
+  });
+}
