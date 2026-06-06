@@ -123,28 +123,47 @@ async function sendEmailViaSendGrid({
  *  - VERIFY_FROM_EMAIL
  */
 export async function sendVerificationEmail({ to, verifyUrl, requestId }) {
-  const subject = "Verify your SendForge account";
+  const subject = "Verify your email — start free with TabForge Basic";
+  const safeUrl = escapeHtml(verifyUrl);
 
-  const text = `Welcome to SendForge!
+  const text = `Welcome to TabForge.
+
+Verify your email to finish creating your free account and start with TabForge Basic.
+
+Basic gives you 18 shortcuts, easy bookmark organization, simple intuitive use, no popups, and no subscription.
+
+After verification, you can upgrade only if you need more. TabForge Pro unlocks 36 shortcuts, and new Pro purchases include one Curated Pack Credit that can add 36 more shortcuts.
 
 Verify your email:
 ${verifyUrl}
 
-If you didn’t sign up, ignore this email.
-`;
+No popups. No subscriptions. Pay for what you need and keep it forever.
+
+If you did not sign up, ignore this email.`;
 
   const html = `
-    <div style="font-family: system-ui;">
-      <h2>Verify your SendForge account</h2>
-      <p>Click below to verify:</p>
-      <p>
-        <a href="${verifyUrl}"
-           style="padding:10px 14px;border-radius:10px;background:#1E6FE8;color:#fff;text-decoration:none;font-weight:700;">
-          Verify Email
-        </a>
-      </p>
-      <p style="font-size:12px;color:#666;">Or paste:</p>
-      <p style="font-size:12px;">${verifyUrl}</p>
+    <div style="margin:0;padding:0;background:#07090f;color:#eef3ff;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.55;">
+      <div style="max-width:660px;margin:0 auto;padding:28px 18px;">
+        <div style="border:1px solid rgba(77,143,255,.28);border-radius:24px;background:linear-gradient(135deg,rgba(77,143,255,.18),rgba(44,224,183,.08));box-shadow:0 24px 70px rgba(0,0,0,.35);overflow:hidden;">
+          <div style="padding:28px 26px 18px;">
+            <div style="display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(44,224,183,.12);border:1px solid rgba(44,224,183,.26);color:#8ff7df;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;">TabForge account</div>
+            <h1 style="margin:16px 0 10px;font-size:30px;line-height:1.08;color:#ffffff;">Verify your email and start free</h1>
+            <p style="margin:0;color:#c7d3ee;font-size:16px;">Create your free account and try TabForge Basic with 18 shortcuts.</p>
+          </div>
+          <div style="padding:0 26px 22px;">
+            <div style="display:grid;gap:10px;">
+              <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ Easy bookmark organization</div>
+              <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ Simple, intuitive use</div>
+              <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ No popups. No subscriptions. Buy what you need and keep it forever.</div>
+            </div>
+          </div>
+          <div style="padding:0 26px 30px;text-align:center;">
+            <a href="${safeUrl}" style="display:inline-block;padding:14px 20px;border-radius:14px;background:#4d8fff;color:#fff;text-decoration:none;font-weight:900;box-shadow:0 14px 30px rgba(77,143,255,.32);">Verify email</a>
+            <p style="margin:14px 0 0;color:#98a7c7;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${safeUrl}</p>
+          </div>
+        </div>
+        <p style="margin:16px 4px 0;color:#7381a1;font-size:12px;">If you did not create this account, you can ignore this email.</p>
+      </div>
     </div>
   `;
 
@@ -154,6 +173,7 @@ If you didn’t sign up, ignore this email.
     text,
     html,
     requestId,
+    fromName: "TabForge",
   });
 }
 
@@ -326,30 +346,78 @@ If you did not request this, secure your account immediately.`;
 
 export async function sendReferralInviteEmail({ to, fromEmail, referralUrl, productName = "TabForge", requestId }) {
   const safeProduct = escapeHtml(productName);
-  const safeFrom = escapeHtml(fromEmail || "a friend");
+  const safeFrom = escapeHtml(fromEmail || "a TabForge user");
   const safeUrl = escapeHtml(referralUrl);
-  const subject = `${fromEmail || "A friend"} invited you to try ${productName}`;
+  const subject = `Earn rewards with ${productName} — start free with Basic`;
 
-  const text = `${fromEmail || "A friend"} invited you to try ${productName}.
+  const text = `Earn rewards with ${productName}
 
-${productName} is a SendForge product for a cleaner, faster workspace.
+${fromEmail || "A TabForge user"} invited you to join ${productName}.
 
-Create your account and buy Pro here:
+Create your free account and try ${productName} Basic. Basic gives you 18 shortcuts, simple bookmark organization, no popups, no ads, and no subscription.
+
+Referral rewards are earned only when referred users purchase ${productName} Pro. Free account registrations do not count toward referral payouts.
+
+How it works:
+1. Create your free account.
+2. Try Basic with 18 shortcuts.
+3. Share your own referral link from your account dashboard.
+4. Qualified ${productName} Pro purchases count toward reward milestones.
+
+${productName} Pro unlocks 36 shortcuts. New Pro purchases also include one bonus Curated Pack Credit, which can add 36 more shortcuts for up to 72 organized shortcuts.
+
+Create your free account:
 ${referralUrl}
 
-The referral field will be filled automatically from this link.`;
+No popups. No subscriptions. Pay for what you need and keep it forever.`;
 
   const html = `
-    <div style="font-family: system-ui, -apple-system, Segoe UI, sans-serif; line-height:1.5; color:#111;">
-      <h2>${safeFrom} invited you to try ${safeProduct}</h2>
-      <p>${safeProduct} is a SendForge product for a cleaner, faster workspace.</p>
-      <p>
-        <a href="${safeUrl}" style="display:inline-block;padding:12px 16px;border-radius:10px;background:#1E6FE8;color:#fff;text-decoration:none;font-weight:700;">
-          Buy ${safeProduct} Pro
-        </a>
-      </p>
-      <p style="font-size:12px;color:#666;">Or paste this link into your browser:</p>
-      <p style="font-size:12px;word-break:break-all;">${safeUrl}</p>
+    <div style="margin:0;padding:0;background:#07090f;color:#eef3ff;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.55;">
+      <div style="max-width:680px;margin:0 auto;padding:28px 18px;">
+        <div style="border:1px solid rgba(77,143,255,.28);border-radius:24px;background:linear-gradient(135deg,rgba(77,143,255,.18),rgba(44,224,183,.08));box-shadow:0 24px 70px rgba(0,0,0,.35);overflow:hidden;">
+          <div style="padding:28px 26px 20px;">
+            <div style="display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(44,224,183,.12);border:1px solid rgba(44,224,183,.26);color:#8ff7df;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;">
+              Referral rewards
+            </div>
+            <h1 style="margin:16px 0 10px;font-size:32px;line-height:1.05;color:#ffffff;">Earn rewards with ${safeProduct}</h1>
+            <p style="margin:0;color:#c7d3ee;font-size:16px;">${safeFrom} invited you to join ${safeProduct}. Start free, try Basic, and share your own link if you want to earn rewards.</p>
+          </div>
+
+          <div style="padding:0 26px 22px;">
+            <div style="border:1px solid rgba(255,255,255,.1);border-radius:18px;background:rgba(255,255,255,.045);padding:18px;">
+              <h2 style="margin:0 0 8px;color:#ffffff;font-size:20px;">How referral rewards work</h2>
+              <p style="margin:0 0 10px;color:#c7d3ee;">Rewards are earned only when referred users purchase <strong style="color:#fff;">${safeProduct} Pro</strong>.</p>
+              <p style="margin:0;color:#98a7c7;font-size:13px;">Free account registrations do not count toward referral payouts. Qualified Pro purchases count toward the 5, 15, and 50 purchase reward milestones.</p>
+            </div>
+          </div>
+
+          <div style="padding:0 26px 22px;">
+            <h2 style="margin:0 0 10px;color:#ffffff;font-size:20px;">Create your free account and try Basic</h2>
+            <div style="display:grid;gap:10px;">
+              <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ Basic includes 18 shortcuts</div>
+              <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ Easy bookmark organization</div>
+              <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ Simple, intuitive use — drag, drop, click</div>
+              <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ No popups. No subscriptions. Pay for what you need and keep it forever.</div>
+            </div>
+          </div>
+
+          <div style="padding:0 26px 24px;">
+            <div style="border-radius:18px;background:rgba(77,143,255,.12);border:1px solid rgba(77,143,255,.28);padding:18px;">
+              <h2 style="margin:0 0 8px;color:#ffffff;font-size:20px;">Upgrade only when you need more</h2>
+              <p style="margin:0;color:#c7d3ee;">${safeProduct} Pro unlocks 36 shortcuts. New Pro purchases include one bonus Curated Pack Credit that can add 36 more shortcuts — up to 72 organized shortcuts from the start.</p>
+            </div>
+          </div>
+
+          <div style="padding:0 26px 30px;text-align:center;">
+            <a href="${safeUrl}" style="display:inline-block;padding:14px 20px;border-radius:14px;background:#4d8fff;color:#fff;text-decoration:none;font-weight:900;box-shadow:0 14px 30px rgba(77,143,255,.32);">
+              Create your free account
+            </a>
+            <p style="margin:14px 0 0;color:#98a7c7;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${safeUrl}</p>
+          </div>
+        </div>
+
+        <p style="margin:16px 4px 0;color:#7381a1;font-size:12px;">You received this because a ${safeProduct} user sent you an invite from their account dashboard. Need help? Contact ${escapeHtml(supportEmail())}.</p>
+      </div>
     </div>
   `;
 
@@ -360,5 +428,6 @@ The referral field will be filled automatically from this link.`;
     html,
     requestId,
     replyTo: fromEmail || null,
+    fromName: "TabForge",
   });
 }

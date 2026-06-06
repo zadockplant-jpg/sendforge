@@ -253,7 +253,7 @@ accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
     const productName = productSlug === "tabforge" ? "TabForge" : productSlug;
     const params = new URLSearchParams();
     params.set("code", code?.code || user.email);
-    params.set("next", "/store/index.html");
+    params.set("next", "/account/index.html");
     params.set("product", productSlug);
     const referralUrl = `${publicSiteBase()}/signup.html?${params.toString()}`;
 
@@ -278,11 +278,7 @@ accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
   }
 });
 
-/**
- * PATCH /v1/account/cashapp
- * Adds or updates the Cash App tag used for manual referral payouts.
- */
-accountRouter.patch("/cashapp", requireAuth, async (req, res) => {
+async function handleCashAppUpdate(req, res) {
   const parsed = CashAppSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
 
@@ -304,4 +300,16 @@ accountRouter.patch("/cashapp", requireAuth, async (req, res) => {
       message: String(err?.message || err),
     });
   }
-});
+}
+
+/**
+ * PATCH /v1/account/cashapp
+ * Adds or updates the Cash App tag used for manual referral payouts.
+ */
+accountRouter.patch("/cashapp", requireAuth, handleCashAppUpdate);
+
+/**
+ * PATCH /v1/account/cash-app
+ * Compatibility alias for Cash App tag updates while frontend/backend deploys catch up.
+ */
+accountRouter.patch("/cash-app", requireAuth, handleCashAppUpdate);
