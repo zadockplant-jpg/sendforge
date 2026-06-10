@@ -162,7 +162,7 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
 
     const code = await ensureReferralCodeForUser(user);
 
-    const [programRows, eventRows, rewardRows] = await Promise.all([
+    const [programRows, eventRows, rewardRows, entitlementRows] = await Promise.all([
       db("referral_programs").where({ status: "active" }).orderBy("product_slug", "asc"),
       db("referral_events")
         .where({ referrer_user_id: user.id, event_type: "purchase" })
@@ -172,7 +172,14 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         .where({ user_id: user.id })
         .orderBy("created_at", "desc")
         .limit(100),
+      listProductEntitlements(user.id).catch(() => []),
     ]);
+
+    const ownedProductSlugs = new Set(
+      (entitlementRows || [])
+        .map((row) => String(row.product_slug || "").toLowerCase())
+        .filter(Boolean)
+    );
 
     const verifiedByProduct = new Map();
     for (const row of eventRows) {
@@ -181,22 +188,29 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
       verifiedByProduct.set(slug, (verifiedByProduct.get(slug) || 0) + 1);
     }
 
-    const programs = programRows.map((program) => {
-      const verifiedPurchases = verifiedByProduct.get(program.product_slug) || 0;
-      const tiers = tiersFromProgram(program).map((tier) => ({
-        requiredPurchases: tier.requiredPurchases,
-        rewardAmountCents: tier.rewardAmountCents,
-        reached: verifiedPurchases >= tier.requiredPurchases,
-        remaining: Math.max(0, tier.requiredPurchases - verifiedPurchases),
-      }));
-      return {
-        productSlug: program.product_slug,
-        status: program.status,
-        rewardType: program.reward_type,
-        verifiedPurchases,
-        tiers,
-      };
-    });
+    const programs = programRows
+      .filter((program) => {
+        const slug = String(program.product_slug || "").toLowerCase();
+        if (!slug || slug === "rentawifey") return false;
+        return ownedProductSlugs.has(slug) || (verifiedByProduct.get(slug) || 0) > 0;
+      })
+      .map((program) => {
+        const slug = String(program.product_slug || "").toLowerCase();
+        const verifiedPurchases = verifiedByProduct.get(slug) || 0;
+        const tiers = tiersFromProgram(program).map((tier) => ({
+          requiredPurchases: tier.requiredPurchases,
+          rewardAmountCents: tier.rewardAmountCents,
+          reached: verifiedPurchases >= tier.requiredPurchases,
+          remaining: Math.max(0, tier.requiredPurchases - verifiedPurchases),
+        }));
+        return {
+          productSlug: slug,
+          status: program.status,
+          rewardType: program.reward_type,
+          verifiedPurchases,
+          tiers,
+        };
+      });
 
     return res.json({
       code: code
