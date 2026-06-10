@@ -267,7 +267,7 @@ accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
     const productName = productSlug === "tabforge" ? "TabForge" : productSlug;
     const params = new URLSearchParams();
     params.set("code", code?.code || user.email);
-    params.set("next", "/account/index.html");
+    params.set("next", "/store/index.html");
     params.set("product", productSlug);
     const referralUrl = `${publicSiteBase()}/signup.html?${params.toString()}`;
 

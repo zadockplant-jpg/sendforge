@@ -428,7 +428,5 @@ No popups. No subscriptions. Pay for what you need and keep it forever.`;
     html,
     requestId,
     replyTo: fromEmail || null,
-    fromEmail: process.env.REFERRAL_FROM_EMAIL || process.env.SENDGRID_FROM_EMAIL || process.env.VERIFY_FROM_EMAIL,
-    fromName: process.env.REFERRAL_FROM_NAME || "TabForge",
   });
 }
