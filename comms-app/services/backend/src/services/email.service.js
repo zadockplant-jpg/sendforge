@@ -348,119 +348,97 @@ export async function sendReferralInviteEmail({ to, fromEmail, referralUrl, prod
   const safeProduct = escapeHtml(productName);
   const safeFrom = escapeHtml(fromEmail || "a TabForge user");
   const safeUrl = escapeHtml(referralUrl);
-  const subject = `Earn real Cash App payouts with ${productName}`;
+  const subject = `Earn $10, $20, or $75 with ${productName}`;
 
-  const text = `Earn real Cash App payouts with ${productName}
+  const text = `Earn Cash App rewards with ${productName}
 
-${fromEmail || "A TabForge user"} invited you to ${productName}.
+${fromEmail || "A TabForge user"} invited you to check out ${productName}.
 
-${productName} is more than a cleaner bookmark page. It is a simple browser workspace you can actually use every day — shortcuts, pages, curated packs, and no annoying popups.
+Create a SendForge account and get your personal referral link.
 
-The hook: ${productName} has real referral rewards.
+Share your link with friends and earn simple Cash App payouts:
+- 5 verified referrals = $10
+- 15 verified referrals = $20
+- 50 verified referrals = $75
 
-Buy ${productName} Pro to activate your rewards path, then share your own referral link from your account dashboard. When referred users buy ${productName} Pro, those qualified Pro purchases count toward your Cash App payout milestones.
+Each milestone creates its own payout. No purchase necessary.
 
-Important: free accounts do not qualify for referral payouts. Rewards are earned only from verified ${productName} Pro purchases.
-
-Reward milestones:
-- 5 qualified Pro purchases
-- 15 qualified Pro purchases
-- 50 qualified Pro purchases
-
-Why ${productName} is worth sharing:
-- Basic includes 18 shortcuts
-- Pro unlocks 36 shortcuts
-- New Pro purchases include one bonus Curated Pack Credit that can add 36 more shortcuts
-- Up to 72 organized shortcuts from the start
+${productName} Pro is a product worth sharing:
+- 36 organized shortcuts
+- One bonus Curated Pack Credit adds 36 more shortcuts
 - Easy bookmark organization
 - Simple, intuitive use
-- No popups, no ads, no subscriptions
-- Pay for what you need and keep it forever
+- No popups
+- No subscriptions
+- Pay once and keep it forever
 
-Activate your ${productName} referral rewards with Pro:
+Create your SendForge account and get your referral link:
 ${referralUrl}
 
+Verified accounts only. Duplicate, fake, or self-referred accounts do not count.
 Need help? Contact ${supportEmail()}.`;
 
   const html = `
     <div style="margin:0;padding:0;background:#05070d;color:#eef3ff;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.55;">
-      <div style="max-width:700px;margin:0 auto;padding:28px 18px;">
-        <div style="border:1px solid rgba(44,224,183,.34);border-radius:28px;background:radial-gradient(circle at top left,rgba(44,224,183,.22),transparent 34%),radial-gradient(circle at top right,rgba(77,143,255,.20),transparent 38%),linear-gradient(135deg,#0b1220,#081019 58%,#07120f);box-shadow:0 30px 90px rgba(0,0,0,.45);overflow:hidden;">
-          <div style="padding:30px 28px 18px;text-align:left;">
-            <div style="display:inline-block;padding:7px 11px;border-radius:999px;background:rgba(44,224,183,.14);border:1px solid rgba(44,224,183,.36);color:#8ff7df;font-size:12px;font-weight:900;letter-spacing:.10em;text-transform:uppercase;">
-              Real referral rewards
+      <div style="max-width:680px;margin:0 auto;padding:28px 18px;">
+        <div style="border:1px solid rgba(44,224,183,.36);border-radius:28px;background:radial-gradient(circle at top left,rgba(44,224,183,.22),transparent 36%),radial-gradient(circle at top right,rgba(77,143,255,.20),transparent 38%),linear-gradient(135deg,#0b1220,#081019 58%,#07120f);box-shadow:0 30px 90px rgba(0,0,0,.45);overflow:hidden;">
+          <div style="padding:32px 28px 20px;text-align:center;">
+            <div style="display:inline-block;padding:8px 13px;border-radius:999px;background:rgba(44,224,183,.14);border:1px solid rgba(44,224,183,.38);color:#8ff7df;font-size:12px;font-weight:900;letter-spacing:.10em;text-transform:uppercase;">
+              Cash App referral rewards
             </div>
-            <h1 style="margin:16px 0 10px;font-size:38px;line-height:1.02;color:#ffffff;letter-spacing:-.03em;">
-              Earn real money with ${safeProduct}
+            <h1 style="margin:18px 0 10px;font-size:40px;line-height:1.02;color:#ffffff;letter-spacing:-.035em;">
+              5 referrals = $10.
             </h1>
-            <p style="margin:0;color:#c7d3ee;font-size:17px;">
-              ${safeFrom} invited you to ${safeProduct}. Buy Pro, activate your rewards path, and share your own link to start earning Cash App payouts from qualified Pro referrals.
+            <p style="margin:0 auto;max-width:560px;color:#c7d3ee;font-size:18px;">
+              Keep sharing: 15 referrals earns $20, and 50 earns $75.
             </p>
           </div>
 
           <div style="padding:0 28px 22px;">
-            <div style="border:1px solid rgba(44,224,183,.28);border-radius:20px;background:linear-gradient(135deg,rgba(44,224,183,.14),rgba(77,143,255,.08));padding:20px;">
-              <h2 style="margin:0 0 10px;color:#ffffff;font-size:22px;">How you earn</h2>
-              <p style="margin:0 0 12px;color:#dce6ff;font-size:15px;">
-                Rewards are paid manually through <strong style="color:#8ff7df;">Cash App</strong> after referred users buy <strong style="color:#ffffff;">${safeProduct} Pro</strong> and you hit a reward milestone.
-              </p>
-              <div style="display:grid;gap:8px;">
-                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:11px 13px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#fff;">1.</strong> Buy ${safeProduct} Pro to activate your rewards path.</div>
-                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:11px 13px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#fff;">2.</strong> Share your referral link from your account dashboard.</div>
-                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:11px 13px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#fff;">3.</strong> Qualified ${safeProduct} Pro purchases count toward Cash App payout milestones.</div>
+            <div style="border:1px solid rgba(44,224,183,.30);border-radius:20px;background:linear-gradient(135deg,rgba(44,224,183,.14),rgba(77,143,255,.08));padding:20px;">
+              <h2 style="margin:0 0 12px;color:#ffffff;font-size:23px;text-align:center;">It really is this simple</h2>
+              <div style="display:grid;gap:9px;">
+                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">1.</strong> Create your SendForge account.</div>
+                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">2.</strong> Copy your personal referral link and share it.</div>
+                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">3.</strong> Friends create and verify accounts — your Cash App rewards unlock automatically.</div>
               </div>
-              <p style="margin:12px 0 0;color:#ffdf8a;font-size:13px;font-weight:800;">
-                Free account registrations do not count. Only verified ${safeProduct} Pro purchases qualify for rewards.
-              </p>
+              <table role="presentation" width="100%" cellspacing="8" cellpadding="0" style="margin-top:14px;border-collapse:separate;">
+                <tr>
+                  <td style="width:33.33%;border:1px solid rgba(44,224,183,.30);border-radius:14px;padding:12px 8px;background:rgba(44,224,183,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">5</strong><span style="font-size:12px;color:#aeeedc;">referrals</span><strong style="display:block;margin-top:4px;font-size:18px;">$10</strong></td>
+                  <td style="width:33.33%;border:1px solid rgba(77,143,255,.30);border-radius:14px;padding:12px 8px;background:rgba(77,143,255,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">15</strong><span style="font-size:12px;color:#b9ccff;">referrals</span><strong style="display:block;margin-top:4px;font-size:18px;">$20</strong></td>
+                  <td style="width:33.33%;border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:12px 8px;background:rgba(255,255,255,.06);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">50</strong><span style="font-size:12px;color:#dce6ff;">referrals</span><strong style="display:block;margin-top:4px;font-size:18px;">$75</strong></td>
+                </tr>
+              </table>
+              <p style="margin:14px 0 0;color:#ffffff;font-size:17px;font-weight:900;text-align:center;">Each milestone is a separate payout. No purchase necessary.</p>
             </div>
           </div>
 
           <div style="padding:0 28px 22px;">
-            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0 10px;">
-              <tr>
-                <td style="border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:14px;background:rgba(255,255,255,.04);color:#eef3ff;text-align:center;">
-                  <div style="font-size:26px;font-weight:900;color:#8ff7df;">5</div>
-                  <div style="font-size:12px;color:#aebcda;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">Pro purchases</div>
-                </td>
-                <td style="width:10px;"></td>
-                <td style="border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:14px;background:rgba(255,255,255,.04);color:#eef3ff;text-align:center;">
-                  <div style="font-size:26px;font-weight:900;color:#8ff7df;">15</div>
-                  <div style="font-size:12px;color:#aebcda;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">Pro purchases</div>
-                </td>
-                <td style="width:10px;"></td>
-                <td style="border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:14px;background:rgba(255,255,255,.04);color:#eef3ff;text-align:center;">
-                  <div style="font-size:26px;font-weight:900;color:#8ff7df;">50</div>
-                  <div style="font-size:12px;color:#aebcda;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">Pro purchases</div>
-                </td>
-              </tr>
-            </table>
-          </div>
-
-          <div style="padding:0 28px 22px;">
             <div style="border-radius:20px;background:rgba(77,143,255,.12);border:1px solid rgba(77,143,255,.30);padding:20px;">
-              <h2 style="margin:0 0 10px;color:#ffffff;font-size:22px;">A product people actually use</h2>
-              <p style="margin:0 0 12px;color:#c7d3ee;">
-                ${safeProduct} turns your new tab page into a clean visual workspace for the sites and tools you use every day.
+              <h2 style="margin:0 0 8px;color:#ffffff;font-size:22px;">${safeProduct} Pro is worth sharing</h2>
+              <p style="margin:0 0 13px;color:#c7d3ee;">
+                A clean, simple new-tab workspace that keeps the sites people use every day organized and one click away.
               </p>
               <div style="display:grid;gap:9px;">
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ Basic gives you 18 shortcuts to try the workspace.</div>
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ Pro unlocks 36 shortcuts.</div>
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ New Pro purchases include a bonus Curated Pack Credit for 36 more shortcuts — up to 72 organized shortcuts from the start.</div>
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ Simple, intuitive use. No popups. No subscriptions. Pay once for what you need and keep it forever.</div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ Pro unlocks 36 organized shortcuts.</div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ A bonus Curated Pack Credit adds 36 more shortcuts — up to 72 from the start.</div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ Easy bookmark organization. Simple, intuitive use.</div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ No popups. No subscriptions. Pay once and keep it forever.</div>
               </div>
             </div>
           </div>
 
           <div style="padding:0 28px 32px;text-align:center;">
+            <p style="margin:0 0 16px;color:#aebcda;font-size:14px;">Invited by ${safeFrom}</p>
             <a href="${safeUrl}" style="display:inline-block;padding:16px 24px;border-radius:16px;background:linear-gradient(135deg,#4d8fff,#2ce0b7);color:#061019;text-decoration:none;font-weight:950;box-shadow:0 16px 36px rgba(44,224,183,.28);">
-              Buy Pro & activate rewards
+              Create My SendForge Account
             </a>
             <p style="margin:14px 0 0;color:#98a7c7;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${safeUrl}</p>
           </div>
         </div>
 
         <p style="margin:16px 4px 0;color:#7381a1;font-size:12px;">
-          You received this because a ${safeProduct} user sent you an invite from their account dashboard. Rewards require verified ${safeProduct} Pro purchases and manual payout approval. Need help? Contact ${escapeHtml(supportEmail())}.
+          Verified accounts only. Duplicate, fake, or self-referred accounts do not count. Need help? Contact ${escapeHtml(supportEmail())}.
         </p>
       </div>
     </div>

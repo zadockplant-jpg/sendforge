@@ -1,10 +1,16 @@
 import crypto from "crypto";
 import { db } from "../../config/db.js";
 
-const DEFAULT_TIERS = [
+const DEFAULT_PURCHASE_TIERS = [
   { requiredPurchases: 5, rewardAmountCents: 1000 },
   { requiredPurchases: 15, rewardAmountCents: 4000 },
   { requiredPurchases: 50, rewardAmountCents: 20000 },
+];
+
+const TABFORGE_SIGNUP_TIERS = [
+  { requiredPurchases: 5, rewardAmountCents: 1000 },
+  { requiredPurchases: 15, rewardAmountCents: 2000 },
+  { requiredPurchases: 50, rewardAmountCents: 7500 },
 ];
 
 export function normalizeReferralValue(value) {
@@ -139,11 +145,16 @@ export async function updateUserCashAppTag({ userId, cashAppTag }) {
 }
 
 function normalizeTier(raw) {
-  const requiredPurchases = Number(raw?.requiredPurchases ?? raw?.required_purchases ?? raw?.count ?? 0);
+  const requiredPurchases = Number(raw?.requiredPurchases ?? raw?.required_purchases ?? raw?.requiredReferrals ?? raw?.count ?? 0);
   const rewardAmountCents = Number(raw?.rewardAmountCents ?? raw?.reward_amount_cents ?? raw?.amountCents ?? 0);
   if (!Number.isInteger(requiredPurchases) || requiredPurchases <= 0) return null;
   if (!Number.isInteger(rewardAmountCents) || rewardAmountCents < 0) return null;
   return { requiredPurchases, rewardAmountCents };
+}
+
+export function referralProgramQualification(program) {
+  const metadata = program?.metadata && typeof program.metadata === "object" ? program.metadata : {};
+  return metadata.qualification === "verified_signup" ? "verified_signup" : "verified_purchase";
 }
 
 export function tiersFromProgram(program) {
@@ -158,7 +169,11 @@ export function tiersFromProgram(program) {
     });
   }
 
-  return (tiers.length ? tiers : DEFAULT_TIERS)
+  const defaults = referralProgramQualification(program) === "verified_signup"
+    ? TABFORGE_SIGNUP_TIERS
+    : DEFAULT_PURCHASE_TIERS;
+
+  return (tiers.length ? tiers : defaults)
     .sort((a, b) => a.requiredPurchases - b.requiredPurchases);
 }
 
@@ -169,6 +184,8 @@ export async function getReferralProgram(productSlug, trx = db) {
     .first();
 
   if (!program) {
+    const isTabForge = slug === "tabforge";
+    const tiers = isTabForge ? TABFORGE_SIGNUP_TIERS : DEFAULT_PURCHASE_TIERS;
     const [created] = await trx("referral_programs")
       .insert({
         id: crypto.randomUUID(),
@@ -179,8 +196,11 @@ export async function getReferralProgram(productSlug, trx = db) {
         refund_hold_days: 0,
         status: "active",
         metadata: {
-          tiers: DEFAULT_TIERS,
-          description: "Default manual Cash App referral tiers",
+          qualification: isTabForge ? "verified_signup" : "verified_purchase",
+          tiers,
+          description: isTabForge
+            ? "Verified SendForge account referrals earn manual Cash App payouts: $10 at 5, $20 at 15, and $75 at 50. No purchase necessary."
+            : "Default manual Cash App purchase referral tiers.",
         },
         updated_at: trx.fn.now(),
       })
@@ -191,6 +211,152 @@ export async function getReferralProgram(productSlug, trx = db) {
   }
 
   return program;
+}
+
+async function queueRewardsForVerifiedCount({
+  trx,
+  referrer,
+  referralCode,
+  program,
+  productSlug,
+  verifiedCount,
+  qualification,
+  qualificationRef,
+}) {
+  const rewards = [];
+  const tiers = tiersFromProgram(program);
+
+  for (const tier of tiers) {
+    if (verifiedCount < tier.requiredPurchases) continue;
+
+    const tierKey = `${qualification}:${tier.requiredPurchases}`;
+    let existingReward = await trx("reward_queue")
+      .where({ user_id: referrer.id, product_slug: productSlug })
+      .whereRaw("metadata->>'tier_key' = ?", [tierKey])
+      .first();
+
+    // Preserve compatibility with rewards generated before tier_key existed.
+    if (!existingReward && qualification === "verified_purchase") {
+      existingReward = await trx("reward_queue")
+        .where({ user_id: referrer.id, product_slug: productSlug })
+        .whereRaw("metadata->>'tier_required_purchases' = ?", [String(tier.requiredPurchases)])
+        .first();
+    }
+
+    if (existingReward) continue;
+
+    const countMetadata = qualification === "verified_signup"
+      ? {
+          tier_required_referrals: tier.requiredPurchases,
+          verified_referral_count: verifiedCount,
+        }
+      : {
+          tier_required_purchases: tier.requiredPurchases,
+          verified_purchase_count: verifiedCount,
+        };
+
+    const [reward] = await trx("reward_queue")
+      .insert({
+        id: crypto.randomUUID(),
+        referral_code_id: referralCode?.id || null,
+        user_id: referrer.id,
+        email: normalizeEmail(referrer.email),
+        product_slug: productSlug,
+        reward_amount_cents: tier.rewardAmountCents,
+        reward_type: program.reward_type || "cashapp_manual",
+        cashapp_handle: normalizeCashAppTag(referrer.cash_app_tag || referralCode?.cashapp_handle),
+        status: "pending",
+        metadata: {
+          tier_key: tierKey,
+          qualification,
+          qualification_ref: qualificationRef,
+          ...countMetadata,
+        },
+        updated_at: trx.fn.now(),
+      })
+      .returning("*");
+    rewards.push(reward);
+  }
+
+  return rewards;
+}
+
+export async function recordVerifiedReferralSignup({ referredUserId, productSlug = "tabforge" }) {
+  const slug = normalizeProductSlug(productSlug) || "tabforge";
+  if (!referredUserId) return { recorded: false, reason: "missing_input" };
+
+  return db.transaction(async (trx) => {
+    const referredUser = await trx("users").where({ id: referredUserId }).first();
+    if (!referredUser?.email_verified) return { recorded: false, reason: "email_not_verified" };
+    if (!referredUser.referred_by_user_id) return { recorded: false, reason: "no_referrer" };
+    if (referredUser.referred_by_user_id === referredUser.id) return { recorded: false, reason: "self_referral" };
+
+    const referrer = await trx("users").where({ id: referredUser.referred_by_user_id }).first();
+    if (!referrer) return { recorded: false, reason: "referrer_missing" };
+
+    const referralCode = referredUser.referral_code_id
+      ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
+      : await ensureReferralCodeForUser(referrer, trx);
+
+    let event = await trx("referral_events")
+      .where({
+        referred_user_id: referredUser.id,
+        product_slug: slug,
+        event_type: "signup",
+      })
+      .first();
+
+    let recorded = false;
+    if (!event) {
+      [event] = await trx("referral_events")
+        .insert({
+          id: crypto.randomUUID(),
+          referral_code_id: referralCode?.id || null,
+          referrer_user_id: referrer.id,
+          referred_user_id: referredUser.id,
+          product_slug: slug,
+          purchase_ref: `verified-signup:${referredUser.id}`,
+          event_type: "signup",
+          status: "verified",
+          metadata: {
+            qualification: "verified_account",
+            referred_email: normalizeEmail(referredUser.email),
+          },
+          updated_at: trx.fn.now(),
+        })
+        .returning("*");
+      recorded = true;
+    } else if (event.status !== "verified") {
+      [event] = await trx("referral_events")
+        .where({ id: event.id })
+        .update({ status: "verified", updated_at: trx.fn.now() })
+        .returning("*");
+      recorded = true;
+    }
+
+    const verifiedCountResult = await trx("referral_events")
+      .where({ referrer_user_id: referrer.id, product_slug: slug, event_type: "signup", status: "verified" })
+      .count({ count: "id" })
+      .first();
+    const verifiedCount = Number(verifiedCountResult?.count || 0);
+
+    const program = await getReferralProgram(slug, trx);
+    const qualification = referralProgramQualification(program);
+    const rewards = qualification === "verified_signup"
+      ? await queueRewardsForVerifiedCount({
+          trx,
+          referrer,
+          referralCode,
+          program,
+          productSlug: slug,
+          verifiedCount,
+          qualification,
+          qualificationRef: event.purchase_ref,
+        })
+      : [];
+
+    return { recorded, event, rewards, verifiedCount };
+  });
 }
 
 export async function recordReferralPurchase({ referredUserId, productSlug, purchaseRef, metadata = {} }) {
@@ -231,45 +397,26 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
       })
       .returning("*");
 
-    const program = await getReferralProgram(slug, trx);
-    const tiers = tiersFromProgram(program);
     const verifiedCountResult = await trx("referral_events")
       .where({ referrer_user_id: referrer.id, product_slug: slug, event_type: "purchase", status: "verified" })
       .count({ count: "id" })
       .first();
     const verifiedCount = Number(verifiedCountResult?.count || 0);
-    const rewards = [];
 
-    for (const tier of tiers) {
-      if (verifiedCount < tier.requiredPurchases) continue;
-
-      const existingReward = await trx("reward_queue")
-        .where({ user_id: referrer.id, product_slug: slug })
-        .whereRaw("metadata->>'tier_required_purchases' = ?", [String(tier.requiredPurchases)])
-        .first();
-      if (existingReward) continue;
-
-      const [reward] = await trx("reward_queue")
-        .insert({
-          id: crypto.randomUUID(),
-          referral_code_id: referralCode?.id || null,
-          user_id: referrer.id,
-          email: normalizeEmail(referrer.email),
-          product_slug: slug,
-          reward_amount_cents: tier.rewardAmountCents,
-          reward_type: program.reward_type || "cashapp_manual",
-          cashapp_handle: normalizeCashAppTag(referrer.cash_app_tag || referralCode?.cashapp_handle),
-          status: "pending",
-          metadata: {
-            tier_required_purchases: tier.requiredPurchases,
-            verified_purchase_count: verifiedCount,
-            purchase_ref: ref,
-          },
-          updated_at: trx.fn.now(),
+    const program = await getReferralProgram(slug, trx);
+    const qualification = referralProgramQualification(program);
+    const rewards = qualification === "verified_purchase"
+      ? await queueRewardsForVerifiedCount({
+          trx,
+          referrer,
+          referralCode,
+          program,
+          productSlug: slug,
+          verifiedCount,
+          qualification,
+          qualificationRef: ref,
         })
-        .returning("*");
-      rewards.push(reward);
-    }
+      : [];
 
     return { recorded: true, event, rewards, verifiedCount };
   });

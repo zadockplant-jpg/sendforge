@@ -162,55 +162,54 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
 
     const code = await ensureReferralCodeForUser(user);
 
-    const [programRows, eventRows, rewardRows, entitlementRows] = await Promise.all([
-      db("referral_programs").where({ status: "active" }).orderBy("product_slug", "asc"),
+    const [programRows, signupRows, purchaseRows, rewardRows] = await Promise.all([
+      db("referral_programs")
+        .where({ product_slug: "tabforge", status: "active" })
+        .orderBy("product_slug", "asc"),
       db("referral_events")
-        .where({ referrer_user_id: user.id, event_type: "purchase" })
+        .where({
+          referrer_user_id: user.id,
+          product_slug: "tabforge",
+          event_type: "signup",
+        })
+        .orderBy("created_at", "desc")
+        .limit(500),
+      db("referral_events")
+        .where({
+          referrer_user_id: user.id,
+          product_slug: "tabforge",
+          event_type: "purchase",
+        })
         .orderBy("created_at", "desc")
         .limit(500),
       db("reward_queue")
-        .where({ user_id: user.id })
+        .where({ user_id: user.id, product_slug: "tabforge" })
         .orderBy("created_at", "desc")
         .limit(100),
-      listProductEntitlements(user.id).catch(() => []),
     ]);
 
-    const ownedProductSlugs = new Set(
-      (entitlementRows || [])
-        .map((row) => String(row.product_slug || "").toLowerCase())
-        .filter(Boolean)
-    );
+    const verifiedReferrals = signupRows.filter((row) => row.status === "verified").length;
+    const verifiedPurchases = purchaseRows.filter((row) => row.status === "verified").length;
 
-    const verifiedByProduct = new Map();
-    for (const row of eventRows) {
-      if (row.status !== "verified") continue;
-      const slug = row.product_slug || "unknown";
-      verifiedByProduct.set(slug, (verifiedByProduct.get(slug) || 0) + 1);
-    }
+    const programs = programRows.map((program) => {
+      const tiers = tiersFromProgram(program).map((tier) => ({
+        requiredReferrals: tier.requiredPurchases,
+        requiredPurchases: tier.requiredPurchases, // legacy API compatibility
+        rewardAmountCents: tier.rewardAmountCents,
+        reached: verifiedReferrals >= tier.requiredPurchases,
+        remaining: Math.max(0, tier.requiredPurchases - verifiedReferrals),
+      }));
 
-    const programs = programRows
-      .filter((program) => {
-        const slug = String(program.product_slug || "").toLowerCase();
-        if (!slug || slug === "rentawifey") return false;
-        return ownedProductSlugs.has(slug) || (verifiedByProduct.get(slug) || 0) > 0;
-      })
-      .map((program) => {
-        const slug = String(program.product_slug || "").toLowerCase();
-        const verifiedPurchases = verifiedByProduct.get(slug) || 0;
-        const tiers = tiersFromProgram(program).map((tier) => ({
-          requiredPurchases: tier.requiredPurchases,
-          rewardAmountCents: tier.rewardAmountCents,
-          reached: verifiedPurchases >= tier.requiredPurchases,
-          remaining: Math.max(0, tier.requiredPurchases - verifiedPurchases),
-        }));
-        return {
-          productSlug: slug,
-          status: program.status,
-          rewardType: program.reward_type,
-          verifiedPurchases,
-          tiers,
-        };
-      });
+      return {
+        productSlug: "tabforge",
+        status: program.status,
+        rewardType: program.reward_type,
+        qualification: "verified_signup",
+        verifiedReferrals,
+        verifiedPurchases,
+        tiers,
+      };
+    });
 
     return res.json({
       code: code
@@ -224,13 +223,26 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         : null,
       cashAppTag: user.cash_app_tag || null,
       referredByUserId: user.referred_by_user_id || null,
+      rule: {
+        productSlug: "tabforge",
+        requiredReferrals: 5,
+        rewardAmountCents: 1000,
+        qualification: "verified_signup",
+        purchaseRequired: false,
+        tiers: programs[0]?.tiers || [
+          { requiredReferrals: 5, requiredPurchases: 5, rewardAmountCents: 1000, reached: verifiedReferrals >= 5, remaining: Math.max(0, 5 - verifiedReferrals) },
+          { requiredReferrals: 15, requiredPurchases: 15, rewardAmountCents: 2000, reached: verifiedReferrals >= 15, remaining: Math.max(0, 15 - verifiedReferrals) },
+          { requiredReferrals: 50, requiredPurchases: 50, rewardAmountCents: 7500, reached: verifiedReferrals >= 50, remaining: Math.max(0, 50 - verifiedReferrals) },
+        ],
+      },
       totals: {
-        verifiedPurchases: eventRows.filter((row) => row.status === "verified").length,
+        verifiedReferrals,
+        verifiedPurchases,
         pendingRewards: rewardRows.filter((row) => row.status === "pending").length,
         paidRewards: rewardRows.filter((row) => row.status === "paid").length,
       },
       programs,
-      events: eventRows.slice(0, 25).map((row) => ({
+      events: signupRows.slice(0, 25).map((row) => ({
         id: row.id,
         productSlug: row.product_slug,
         eventType: row.event_type,
