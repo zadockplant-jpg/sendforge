@@ -3,8 +3,8 @@ import { db } from "../../config/db.js";
 
 const DEFAULT_PURCHASE_TIERS = [
   { requiredPurchases: 5, rewardAmountCents: 1000 },
-  { requiredPurchases: 15, rewardAmountCents: 4000 },
-  { requiredPurchases: 50, rewardAmountCents: 20000 },
+  { requiredPurchases: 15, rewardAmountCents: 2000 },
+  { requiredPurchases: 50, rewardAmountCents: 7500 },
 ];
 
 const TABFORGE_PURCHASE_TIERS = [
@@ -29,6 +29,18 @@ export function normalizeCashAppTag(value) {
   const cleaned = raw.replace(/^\$+/, "").replace(/[^a-zA-Z0-9_.$-]/g, "").slice(0, 80);
   if (!cleaned) return null;
   return cleaned.startsWith("$") ? cleaned : `$${cleaned}`;
+}
+
+export function cashAppTagKey(value) {
+  const normalized = normalizeCashAppTag(value);
+  return normalized ? normalized.replace(/^\$+/, "").toLowerCase() : null;
+}
+
+function referralServiceError(code, statusCode = 409) {
+  const err = new Error(code);
+  err.code = code;
+  err.statusCode = statusCode;
+  return err;
 }
 
 export function normalizeProductSlug(value) {
@@ -242,7 +254,6 @@ export async function claimReferralInviteToken({ token, recipientEmail, referred
 export async function applySignupReferral({ trx = db, newUserId, newUserEmail, referralIdentifier, cashAppTag }) {
   const updates = {};
   const normalizedCashApp = normalizeCashAppTag(cashAppTag);
-  if (normalizedCashApp) updates.cash_app_tag = normalizedCashApp;
 
   const newEmail = normalizeEmail(newUserEmail);
   const resolved = await resolveReferralIdentifier(referralIdentifier, trx);
@@ -261,26 +272,124 @@ export async function applySignupReferral({ trx = db, newUserId, newUserEmail, r
     await trx("users").where({ id: newUserId }).update(updates);
   }
 
+  if (normalizedCashApp) {
+    await persistUserCashAppTag({
+      trx,
+      userId: newUserId,
+      cashAppTag: normalizedCashApp,
+      enforceApprovedLock: false,
+    });
+  }
+
   const user = await trx("users").where({ id: newUserId }).first();
   await ensureReferralCodeForUser(user, trx);
 
   return { user, referralApplied: Boolean(updates.referred_by_user_id), cashAppTag: normalizedCashApp };
 }
 
-export async function updateUserCashAppTag({ userId, cashAppTag }) {
+async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedLock = true }) {
   const normalized = normalizeCashAppTag(cashAppTag);
-  const [user] = await db("users")
-    .where({ id: userId })
-    .update({ cash_app_tag: normalized, updated_at: db.fn.now() })
-    .returning("*");
+  const normalizedKey = cashAppTagKey(normalized);
 
-  if (user) {
-    await db("referral_codes")
+    const user = await trx("users")
+      .where({ id: userId })
+      .forUpdate()
+      .first();
+    if (!user) return null;
+
+    const currentKey = cashAppTagKey(user.cash_app_tag);
+    const approvedReward = enforceApprovedLock
+      ? await trx("reward_queue")
+          .where({ user_id: user.id, status: "approved" })
+          .first()
+      : null;
+
+    if (approvedReward && currentKey && currentKey !== normalizedKey) {
+      throw referralServiceError("cash_app_tag_locked_for_approved_payout");
+    }
+
+    const activeClaim = await trx("cash_app_tag_claims")
+      .where({ user_id: user.id, status: "active" })
+      .forUpdate()
+      .first();
+
+    if (normalizedKey) {
+      const claimed = await trx("cash_app_tag_claims")
+        .where({ normalized_tag: normalizedKey })
+        .forUpdate()
+        .first();
+
+      if (claimed && claimed.user_id !== user.id) {
+        throw referralServiceError("cash_app_tag_in_use");
+      }
+
+      if (activeClaim && activeClaim.normalized_tag !== normalizedKey) {
+        await trx("cash_app_tag_claims")
+          .where({ id: activeClaim.id })
+          .update({ status: "retired", retired_at: trx.fn.now(), updated_at: trx.fn.now() });
+      }
+
+      if (claimed) {
+        await trx("cash_app_tag_claims")
+          .where({ id: claimed.id })
+          .update({
+            display_tag: normalized,
+            status: "active",
+            retired_at: null,
+            updated_at: trx.fn.now(),
+          });
+      } else {
+        const inserted = await trx("cash_app_tag_claims")
+          .insert({
+            id: crypto.randomUUID(),
+            user_id: user.id,
+            normalized_tag: normalizedKey,
+            display_tag: normalized,
+            status: "active",
+            claimed_at: trx.fn.now(),
+            created_at: trx.fn.now(),
+            updated_at: trx.fn.now(),
+          })
+          .onConflict("normalized_tag")
+          .ignore()
+          .returning("*");
+
+        if (!inserted[0]) {
+          const concurrentClaim = await trx("cash_app_tag_claims")
+            .where({ normalized_tag: normalizedKey })
+            .first();
+          if (concurrentClaim?.user_id !== user.id) {
+            throw referralServiceError("cash_app_tag_in_use");
+          }
+        }
+      }
+    } else if (activeClaim) {
+      await trx("cash_app_tag_claims")
+        .where({ id: activeClaim.id })
+        .update({ status: "retired", retired_at: trx.fn.now(), updated_at: trx.fn.now() });
+    }
+
+    // users does not have an updated_at column in the original schema.
+    const [updatedUser] = await trx("users")
+      .where({ id: user.id })
+      .update({ cash_app_tag: normalized })
+      .returning("*");
+
+    await trx("referral_codes")
       .where({ user_id: user.id })
-      .update({ cashapp_handle: normalized, updated_at: db.fn.now() });
-  }
+      .update({ cashapp_handle: normalized, updated_at: trx.fn.now() });
 
-  return user;
+    // Keep queued payouts synchronized until they are paid or rejected.
+    await trx("reward_queue")
+      .where({ user_id: user.id })
+      .whereIn("status", ["pending", "approved"])
+      .update({ cashapp_handle: normalized, updated_at: trx.fn.now() });
+
+    return updatedUser;
+}
+
+export async function updateUserCashAppTag({ userId, cashAppTag }) {
+  return db.transaction((trx) => persistUserCashAppTag({ trx, userId, cashAppTag }));
 }
 
 function normalizeTier(raw) {
@@ -386,13 +495,14 @@ async function queueRewardsForVerifiedCount({
 
     if (existingReward) continue;
 
-    const [reward] = await trx("reward_queue")
+    const inserted = await trx("reward_queue")
       .insert({
         id: crypto.randomUUID(),
         referral_code_id: referralCode?.id || null,
         user_id: referrer.id,
         email: normalizeEmail(referrer.email),
         product_slug: productSlug,
+        reward_key: tierKey,
         reward_amount_cents: tier.rewardAmountCents,
         reward_type: program.reward_type || "cashapp_manual",
         cashapp_handle: normalizeCashAppTag(referrer.cash_app_tag || referralCode?.cashapp_handle),
@@ -406,8 +516,11 @@ async function queueRewardsForVerifiedCount({
         },
         updated_at: trx.fn.now(),
       })
+      .onConflict(["user_id", "product_slug", "reward_key"])
+      .ignore()
       .returning("*");
-    rewards.push(reward);
+
+    if (inserted[0]) rewards.push(inserted[0]);
   }
 
   return rewards;

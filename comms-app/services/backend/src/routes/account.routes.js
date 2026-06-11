@@ -388,6 +388,14 @@ async function handleCashAppUpdate(req, res) {
       cashAppTag: user.cash_app_tag || null,
     });
   } catch (err) {
+    const knownErrors = new Set([
+      "cash_app_tag_in_use",
+      "cash_app_tag_locked_for_approved_payout",
+    ]);
+    const code = String(err?.code || err?.message || "");
+    if (knownErrors.has(code)) {
+      return res.status(err?.statusCode || 409).json({ error: code });
+    }
     return res.status(500).json({
       error: "server_error",
       message: String(err?.message || err),

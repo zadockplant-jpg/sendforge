@@ -290,6 +290,9 @@ authRouter.post("/register", async (req, res) => {
     if (err?.code === "SELF_REFERRAL") {
       return res.status(400).json({ ok: false, error: "self_referral_not_allowed" });
     }
+    if (err?.code === "cash_app_tag_in_use") {
+      return res.status(409).json({ ok: false, error: "cash_app_tag_in_use" });
+    }
 
     // If schema mismatch, tell us explicitly (no masking)
     if (isUndefinedTable(err) || isMissingColumn(err)) {
