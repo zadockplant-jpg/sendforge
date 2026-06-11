@@ -396,6 +396,12 @@ async function handleCashAppUpdate(req, res) {
     if (knownErrors.has(code)) {
       return res.status(err?.statusCode || 409).json({ error: code });
     }
+    if (code === "23505") {
+      return res.status(409).json({ error: "cash_app_tag_in_use" });
+    }
+    if (code === "42P01") {
+      return res.status(503).json({ error: "cash_app_storage_unavailable" });
+    }
     return res.status(500).json({
       error: "server_error",
       message: String(err?.message || err),

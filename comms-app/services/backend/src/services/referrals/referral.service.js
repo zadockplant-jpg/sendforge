@@ -287,27 +287,60 @@ export async function applySignupReferral({ trx = db, newUserId, newUserEmail, r
   return { user, referralApplied: Boolean(updates.referred_by_user_id), cashAppTag: normalizedCashApp };
 }
 
+async function hasTableSafe(knex, tableName) {
+  try {
+    return await knex.schema.hasTable(tableName);
+  } catch {
+    return false;
+  }
+}
+
+async function findCurrentCashAppOwner(knex, normalizedKey, excludeUserId) {
+  if (!normalizedKey) return null;
+
+  return knex("users")
+    .select("id", "email", "cash_app_tag")
+    .whereNot({ id: excludeUserId })
+    .whereNotNull("cash_app_tag")
+    .whereRaw("lower(regexp_replace(cash_app_tag, '^\\$+', '')) = ?", [normalizedKey])
+    .first();
+}
+
 async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedLock = true }) {
   const normalized = normalizeCashAppTag(cashAppTag);
   const normalizedKey = cashAppTagKey(normalized);
 
-    const user = await trx("users")
-      .where({ id: userId })
-      .forUpdate()
-      .first();
-    if (!user) return null;
+  const user = await trx("users")
+    .where({ id: userId })
+    .forUpdate()
+    .first();
+  if (!user) return null;
 
-    const currentKey = cashAppTagKey(user.cash_app_tag);
-    const approvedReward = enforceApprovedLock
-      ? await trx("reward_queue")
-          .where({ user_id: user.id, status: "approved" })
-          .first()
-      : null;
+  const currentKey = cashAppTagKey(user.cash_app_tag);
+  const rewardQueueExists = await hasTableSafe(trx, "reward_queue");
+  const referralCodesExists = await hasTableSafe(trx, "referral_codes");
+  const claimsTableExists = await hasTableSafe(trx, "cash_app_tag_claims");
 
-    if (approvedReward && currentKey && currentKey !== normalizedKey) {
-      throw referralServiceError("cash_app_tag_locked_for_approved_payout");
+  const approvedReward = enforceApprovedLock && rewardQueueExists
+    ? await trx("reward_queue")
+        .where({ user_id: user.id, status: "approved" })
+        .first()
+    : null;
+
+  if (approvedReward && currentKey && currentKey !== normalizedKey) {
+    throw referralServiceError("cash_app_tag_locked_for_approved_payout");
+  }
+
+  // Always enforce current-account uniqueness, even if the claims migration has not
+  // finished yet. The claims table adds permanent historical reservation after deploy.
+  if (normalizedKey) {
+    const currentOwner = await findCurrentCashAppOwner(trx, normalizedKey, user.id);
+    if (currentOwner) {
+      throw referralServiceError("cash_app_tag_in_use");
     }
+  }
 
+  if (claimsTableExists) {
     const activeClaim = await trx("cash_app_tag_claims")
       .where({ user_id: user.id, status: "active" })
       .forUpdate()
@@ -326,7 +359,11 @@ async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedL
       if (activeClaim && activeClaim.normalized_tag !== normalizedKey) {
         await trx("cash_app_tag_claims")
           .where({ id: activeClaim.id })
-          .update({ status: "retired", retired_at: trx.fn.now(), updated_at: trx.fn.now() });
+          .update({
+            status: "retired",
+            retired_at: trx.fn.now(),
+            updated_at: trx.fn.now(),
+          });
       }
 
       if (claimed) {
@@ -339,8 +376,8 @@ async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedL
             updated_at: trx.fn.now(),
           });
       } else {
-        const inserted = await trx("cash_app_tag_claims")
-          .insert({
+        try {
+          await trx("cash_app_tag_claims").insert({
             id: crypto.randomUUID(),
             user_id: user.id,
             normalized_tag: normalizedKey,
@@ -349,43 +386,45 @@ async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedL
             claimed_at: trx.fn.now(),
             created_at: trx.fn.now(),
             updated_at: trx.fn.now(),
-          })
-          .onConflict("normalized_tag")
-          .ignore()
-          .returning("*");
-
-        if (!inserted[0]) {
-          const concurrentClaim = await trx("cash_app_tag_claims")
-            .where({ normalized_tag: normalizedKey })
-            .first();
-          if (concurrentClaim?.user_id !== user.id) {
+          });
+        } catch (err) {
+          if (String(err?.code || "") === "23505") {
             throw referralServiceError("cash_app_tag_in_use");
           }
+          throw err;
         }
       }
     } else if (activeClaim) {
       await trx("cash_app_tag_claims")
         .where({ id: activeClaim.id })
-        .update({ status: "retired", retired_at: trx.fn.now(), updated_at: trx.fn.now() });
+        .update({
+          status: "retired",
+          retired_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        });
     }
+  }
 
-    // users does not have an updated_at column in the original schema.
-    const [updatedUser] = await trx("users")
-      .where({ id: user.id })
-      .update({ cash_app_tag: normalized })
-      .returning("*");
+  // The original users table does not have updated_at.
+  const [updatedUser] = await trx("users")
+    .where({ id: user.id })
+    .update({ cash_app_tag: normalized })
+    .returning("*");
 
+  if (referralCodesExists) {
     await trx("referral_codes")
       .where({ user_id: user.id })
       .update({ cashapp_handle: normalized, updated_at: trx.fn.now() });
+  }
 
-    // Keep queued payouts synchronized until they are paid or rejected.
+  if (rewardQueueExists) {
     await trx("reward_queue")
       .where({ user_id: user.id })
       .whereIn("status", ["pending", "approved"])
       .update({ cashapp_handle: normalized, updated_at: trx.fn.now() });
+  }
 
-    return updatedUser;
+  return updatedUser;
 }
 
 export async function updateUserCashAppTag({ userId, cashAppTag }) {
