@@ -223,7 +223,18 @@ authRouter.post("/register", async (req, res) => {
       return { kind: "created", userId: id };
     });
 
-    // After DB commit: send email (external side effect)
+    // A verified account already exists. Stop before any external email side effect.
+    // Duplicate registration attempts must never trigger a verification email.
+    if (result.kind === "exists_verified") {
+      log("info", "register_account_exists", {
+        requestId,
+        email: sanitizeEmail(email),
+      });
+      return res.status(409).json({ ok: false, error: "account_exists" });
+    }
+
+    // After DB commit: send email only for a newly created account or an
+    // existing account that is still unverified and explicitly needs a resend.
     try {
       await sendVerificationEmail({
         to: email,
@@ -253,11 +264,6 @@ authRouter.post("/register", async (req, res) => {
     }
 
     // Email sent OK
-    if (result.kind === "exists_verified") {
-      // Someone attempted to register an already-verified account
-      return res.status(409).json({ ok: false, error: "account_exists" });
-    }
-
     return res.status(200).json({
       ok: true,
       status: result.kind, // created | exists_unverified
