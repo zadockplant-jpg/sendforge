@@ -6,7 +6,13 @@ import {
   getActivePlan,
   listProductEntitlements,
 } from "../services/entitlement.service.js";
-import { ensureReferralCodeForUser, updateUserCashAppTag, tiersFromProgram } from "../services/referrals/referral.service.js";
+import {
+  createReferralInvite,
+  ensureReferralCodeForUser,
+  resolveReferralInviteToken,
+  tiersFromProgram,
+  updateUserCashAppTag,
+} from "../services/referrals/referral.service.js";
 import { sendReferralInviteEmail } from "../services/email.service.js";
 import { env } from "../config/env.js";
 import { getRequestId } from "../utils/logger.js";
@@ -162,10 +168,18 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
 
     const code = await ensureReferralCodeForUser(user);
 
-    const [programRows, signupRows, purchaseRows, rewardRows] = await Promise.all([
+    const [programRows, inviteRows, signupRows, purchaseRows, rewardRows] = await Promise.all([
       db("referral_programs")
         .where({ product_slug: "tabforge", status: "active" })
         .orderBy("product_slug", "asc"),
+      db("referral_events")
+        .where({
+          referrer_user_id: user.id,
+          product_slug: "tabforge",
+          event_type: "invite",
+        })
+        .orderBy("created_at", "desc")
+        .limit(500),
       db("referral_events")
         .where({
           referrer_user_id: user.id,
@@ -189,27 +203,38 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
     ]);
 
     const verifiedReferrals = signupRows.filter((row) => row.status === "verified").length;
-    const verifiedPurchases = purchaseRows.filter((row) => row.status === "verified").length;
+    const verifiedPurchases = new Set(
+      purchaseRows
+        .filter((row) => row.status === "verified")
+        .map((row) => row.referred_user_id || row.id)
+    ).size;
 
     const programs = programRows.map((program) => {
       const tiers = tiersFromProgram(program).map((tier) => ({
-        requiredReferrals: tier.requiredPurchases,
-        requiredPurchases: tier.requiredPurchases, // legacy API compatibility
+        requiredPurchases: tier.requiredPurchases,
         rewardAmountCents: tier.rewardAmountCents,
-        reached: verifiedReferrals >= tier.requiredPurchases,
-        remaining: Math.max(0, tier.requiredPurchases - verifiedReferrals),
+        reached: verifiedPurchases >= tier.requiredPurchases,
+        remaining: Math.max(0, tier.requiredPurchases - verifiedPurchases),
       }));
 
       return {
         productSlug: "tabforge",
         status: program.status,
         rewardType: program.reward_type,
-        qualification: "verified_signup",
+        qualification: "verified_purchase",
+        referrerPurchaseRequired: false,
+        referredPurchaseRequired: true,
         verifiedReferrals,
         verifiedPurchases,
         tiers,
       };
     });
+
+    const fallbackTiers = [
+      { requiredPurchases: 5, rewardAmountCents: 1000, reached: verifiedPurchases >= 5, remaining: Math.max(0, 5 - verifiedPurchases) },
+      { requiredPurchases: 15, rewardAmountCents: 2000, reached: verifiedPurchases >= 15, remaining: Math.max(0, 15 - verifiedPurchases) },
+      { requiredPurchases: 50, rewardAmountCents: 7500, reached: verifiedPurchases >= 50, remaining: Math.max(0, 50 - verifiedPurchases) },
+    ];
 
     return res.json({
       code: code
@@ -225,30 +250,31 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
       referredByUserId: user.referred_by_user_id || null,
       rule: {
         productSlug: "tabforge",
-        requiredReferrals: 5,
+        requiredPurchases: 5,
         rewardAmountCents: 1000,
-        qualification: "verified_signup",
-        purchaseRequired: false,
-        tiers: programs[0]?.tiers || [
-          { requiredReferrals: 5, requiredPurchases: 5, rewardAmountCents: 1000, reached: verifiedReferrals >= 5, remaining: Math.max(0, 5 - verifiedReferrals) },
-          { requiredReferrals: 15, requiredPurchases: 15, rewardAmountCents: 2000, reached: verifiedReferrals >= 15, remaining: Math.max(0, 15 - verifiedReferrals) },
-          { requiredReferrals: 50, requiredPurchases: 50, rewardAmountCents: 7500, reached: verifiedReferrals >= 50, remaining: Math.max(0, 50 - verifiedReferrals) },
-        ],
+        qualification: "verified_purchase",
+        referrerPurchaseRequired: false,
+        referredPurchaseRequired: true,
+        tiers: programs[0]?.tiers || fallbackTiers,
       },
       totals: {
+        invitesSent: inviteRows.length,
         verifiedReferrals,
         verifiedPurchases,
         pendingRewards: rewardRows.filter((row) => row.status === "pending").length,
         paidRewards: rewardRows.filter((row) => row.status === "paid").length,
       },
       programs,
-      events: signupRows.slice(0, 25).map((row) => ({
-        id: row.id,
-        productSlug: row.product_slug,
-        eventType: row.event_type,
-        status: row.status,
-        createdAt: row.created_at,
-      })),
+      events: [...inviteRows, ...signupRows, ...purchaseRows]
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        .slice(0, 25)
+        .map((row) => ({
+          id: row.id,
+          productSlug: row.product_slug,
+          eventType: row.event_type,
+          status: row.status,
+          createdAt: row.created_at,
+        })),
       rewards: rewardRows.map(toCamelReward),
     });
   } catch (err) {
@@ -260,8 +286,33 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
 });
 
 /**
+ * GET /v1/account/referrals/invite/:token
+ * Public invite resolver used by the signup page. Returns only the invited
+ * recipient email and product context; the referrer stays server-side.
+ */
+accountRouter.get("/referrals/invite/:token", async (req, res) => {
+  try {
+    const invite = await resolveReferralInviteToken(req.params.token);
+    if (!invite) return res.status(404).json({ error: "invalid_or_expired_invite" });
+
+    return res.json({
+      ok: true,
+      recipientEmail: invite.recipientEmail,
+      productSlug: invite.productSlug,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: "server_error",
+      message: String(err?.message || err),
+    });
+  }
+});
+
+/**
  * POST /v1/account/referrals/invite
- * Sends a TabForge/product referral invite with this user's referral code.
+ * Sends a tracked TabForge invite. The recipient email is bound to a private
+ * invite token and is prefilled on signup; the referrer's identity is not put
+ * into the signup email field.
  */
 accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
   const parsed = ReferralInviteSchema.safeParse(req.body || {});
@@ -274,17 +325,29 @@ accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
       .first();
     if (!user) return res.status(404).json({ error: "user_not_found" });
 
+    const recipientEmail = parsed.data.toEmail.toLowerCase().trim();
+    if (recipientEmail === String(user.email || "").toLowerCase().trim()) {
+      return res.status(400).json({ error: "self_referral_not_allowed" });
+    }
+
     const code = await ensureReferralCodeForUser(user);
     const productSlug = normalizeProductSlug(parsed.data.productSlug);
     const productName = productSlug === "tabforge" ? "TabForge" : productSlug;
+    const invite = await createReferralInvite({
+      referrerUser: user,
+      referralCode: code,
+      recipientEmail,
+      productSlug,
+    });
+
     const params = new URLSearchParams();
-    params.set("code", code?.code || user.email);
+    params.set("invite", invite.token);
     params.set("next", "/store/index.html");
     params.set("product", productSlug);
     const referralUrl = `${publicSiteBase()}/signup.html?${params.toString()}`;
 
     const sendResult = await sendReferralInviteEmail({
-      to: parsed.data.toEmail.toLowerCase().trim(),
+      to: recipientEmail,
       fromEmail: user.email,
       referralUrl,
       productName,
@@ -294,9 +357,13 @@ accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
     return res.json({
       ok: true,
       referralUrl,
+      recipientEmail,
       emailMode: sendResult?.mode || "sendgrid",
     });
   } catch (err) {
+    if (err?.code === "SELF_REFERRAL") {
+      return res.status(400).json({ error: "self_referral_not_allowed" });
+    }
     return res.status(500).json({
       error: "server_error",
       message: String(err?.message || err),

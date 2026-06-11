@@ -4,6 +4,7 @@ import crypto from "crypto";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { log, getRequestId } from "../utils/logger.js";
+import { recordVerifiedReferralSignup } from "../services/referrals/referral.service.js";
 
 export const verificationRouter = Router();
 
@@ -49,6 +50,31 @@ verificationRouter.get("/verify", async (req, res) => {
       });
 
     log("info", "verify_success", { requestId, userId: user.id });
+
+    // Verification does not qualify a payout by itself. It only records the
+    // verified account and promotes any already-completed TabForge Pro purchase
+    // from pending to qualified. Referral processing must never block verification.
+    try {
+      const referralResult = await recordVerifiedReferralSignup({
+        referredUserId: user.id,
+        productSlug: "tabforge",
+      });
+      log("info", "verified_referral_state_processed", {
+        requestId,
+        userId: user.id,
+        signupRecorded: Boolean(referralResult?.recorded),
+        qualifiedPurchaseCount: Number(referralResult?.verifiedCount || 0),
+        promotedPurchases: Number(referralResult?.promotedPurchases || 0),
+        rewardsQueued: Array.isArray(referralResult?.rewards) ? referralResult.rewards.length : 0,
+        reason: referralResult?.reason || null,
+      });
+    } catch (referralError) {
+      log("error", "verified_referral_state_failed", {
+        requestId,
+        userId: user.id,
+        error: String(referralError?.message || referralError),
+      });
+    }
 
     // Keep it simple for now: JSON response. (You can later redirect to app deep link.)
     return res.json({ ok: true });

@@ -14,7 +14,11 @@ import {
 } from "../services/email.service.js";
 import { log, getRequestId, sanitizeEmail } from "../utils/logger.js";
 import { createRateLimiter, rateLimitByIpAndBodyEmail } from "../middleware/rateLimit.js";
-import { applySignupReferral } from "../services/referrals/referral.service.js";
+import {
+  applySignupReferral,
+  claimReferralInviteToken,
+  resolveReferralInviteToken,
+} from "../services/referrals/referral.service.js";
 
 export const authRouter = Router();
 
@@ -25,6 +29,7 @@ const Register = z.object({
   referral: z.string().max(320).optional().nullable(),
   referralCode: z.string().max(80).optional().nullable(),
   cashAppTag: z.string().max(100).optional().nullable(),
+  inviteToken: z.string().max(256).optional().nullable(),
 });
 
 const Login = z.object({
@@ -114,6 +119,7 @@ authRouter.post("/register", async (req, res) => {
   const password = parsed.data.password;
   const referralIdentifier = parsed.data.referredBy || parsed.data.referral || parsed.data.referralCode || "";
   const cashAppTag = parsed.data.cashAppTag || "";
+  const inviteToken = String(parsed.data.inviteToken || "").trim();
 
   const verifyToken = crypto.randomBytes(32).toString("hex");
   const verifyTokenHash = sha256(verifyToken);
@@ -127,6 +133,24 @@ authRouter.post("/register", async (req, res) => {
   try {
     // One transaction for DB writes
     const result = await db.transaction(async (trx) => {
+      let invite = null;
+      let effectiveReferralIdentifier = referralIdentifier;
+
+      if (inviteToken) {
+        invite = await resolveReferralInviteToken(inviteToken, trx);
+        if (!invite) {
+          const inviteError = new Error("invalid_or_expired_invite");
+          inviteError.code = "INVALID_INVITE";
+          throw inviteError;
+        }
+        if (invite.recipientEmail !== email) {
+          const inviteError = new Error("invite_email_mismatch");
+          inviteError.code = "INVITE_EMAIL_MISMATCH";
+          throw inviteError;
+        }
+        effectiveReferralIdentifier = invite.referralCode.code;
+      }
+
       const existing = await trx("users").where({ email }).first();
 
       if (existing) {
@@ -149,9 +173,18 @@ authRouter.post("/register", async (req, res) => {
           trx,
           newUserId: existing.id,
           newUserEmail: email,
-          referralIdentifier,
+          referralIdentifier: effectiveReferralIdentifier,
           cashAppTag,
         });
+
+        if (inviteToken) {
+          await claimReferralInviteToken({
+            token: inviteToken,
+            recipientEmail: email,
+            referredUserId: existing.id,
+            trx,
+          });
+        }
 
         return { kind: "exists_unverified", userId: existing.id };
       }
@@ -174,9 +207,18 @@ authRouter.post("/register", async (req, res) => {
         trx,
         newUserId: id,
         newUserEmail: email,
-        referralIdentifier,
+        referralIdentifier: effectiveReferralIdentifier,
         cashAppTag,
       });
+
+      if (inviteToken) {
+        await claimReferralInviteToken({
+          token: inviteToken,
+          recipientEmail: email,
+          referredUserId: id,
+          trx,
+        });
+      }
 
       return { kind: "created", userId: id };
     });
@@ -229,6 +271,19 @@ authRouter.post("/register", async (req, res) => {
       code: err?.code,
       message: String(err?.message || err),
     });
+
+    if (err?.code === "INVALID_INVITE") {
+      return res.status(400).json({ ok: false, error: "invalid_or_expired_invite" });
+    }
+    if (err?.code === "INVITE_EMAIL_MISMATCH") {
+      return res.status(400).json({ ok: false, error: "invite_email_mismatch" });
+    }
+    if (err?.code === "INVITE_ALREADY_CLAIMED") {
+      return res.status(409).json({ ok: false, error: "invite_already_claimed" });
+    }
+    if (err?.code === "SELF_REFERRAL") {
+      return res.status(400).json({ ok: false, error: "self_referral_not_allowed" });
+    }
 
     // If schema mismatch, tell us explicitly (no masking)
     if (isUndefinedTable(err) || isMissingColumn(err)) {

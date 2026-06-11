@@ -7,11 +7,13 @@ const DEFAULT_PURCHASE_TIERS = [
   { requiredPurchases: 50, rewardAmountCents: 20000 },
 ];
 
-const TABFORGE_SIGNUP_TIERS = [
+const TABFORGE_PURCHASE_TIERS = [
   { requiredPurchases: 5, rewardAmountCents: 1000 },
   { requiredPurchases: 15, rewardAmountCents: 2000 },
   { requiredPurchases: 50, rewardAmountCents: 7500 },
 ];
+
+const INVITE_TTL_DAYS = 30;
 
 export function normalizeReferralValue(value) {
   return String(value || "").trim();
@@ -31,6 +33,14 @@ export function normalizeCashAppTag(value) {
 
 export function normalizeProductSlug(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function hashInviteToken(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+function invitePurchaseRef(token) {
+  return `invite:${hashInviteToken(token)}`;
 }
 
 export function makeReferralCode(email = "") {
@@ -104,6 +114,131 @@ export async function resolveReferralIdentifier(identifier, trx = db) {
   return { referrerUser: user, referralCode: code, inputType: "code" };
 }
 
+export async function createReferralInvite({
+  referrerUser,
+  referralCode,
+  recipientEmail,
+  productSlug = "tabforge",
+  trx = db,
+}) {
+  const recipient = normalizeEmail(recipientEmail);
+  const slug = normalizeProductSlug(productSlug) || "tabforge";
+  if (!referrerUser?.id || !recipient || !referralCode?.id) {
+    throw new Error("invalid_referral_invite_input");
+  }
+  if (normalizeEmail(referrerUser.email) === recipient) {
+    const err = new Error("self_referral_not_allowed");
+    err.code = "SELF_REFERRAL";
+    throw err;
+  }
+
+  const token = crypto.randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000);
+  const [event] = await trx("referral_events")
+    .insert({
+      id: crypto.randomUUID(),
+      referral_code_id: referralCode.id,
+      referrer_user_id: referrerUser.id,
+      referred_user_id: null,
+      product_slug: slug,
+      purchase_ref: invitePurchaseRef(token),
+      event_type: "invite",
+      status: "sent",
+      metadata: {
+        recipient_email: recipient,
+        expires_at: expiresAt.toISOString(),
+      },
+      updated_at: trx.fn.now(),
+    })
+    .returning("*");
+
+  return { token, event, recipientEmail: recipient, expiresAt };
+}
+
+export async function resolveReferralInviteToken(token, trx = db) {
+  const raw = normalizeReferralValue(token);
+  if (!raw) return null;
+
+  const event = await trx("referral_events")
+    .where({
+      purchase_ref: invitePurchaseRef(raw),
+      event_type: "invite",
+    })
+    .first();
+
+  if (!event || ["cancelled", "expired"].includes(event.status)) return null;
+
+  const metadata = event.metadata && typeof event.metadata === "object" ? event.metadata : {};
+  const expiresAt = metadata.expires_at ? new Date(metadata.expires_at) : null;
+  if (expiresAt && Number.isFinite(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
+    await trx("referral_events")
+      .where({ id: event.id })
+      .update({ status: "expired", updated_at: trx.fn.now() });
+    return null;
+  }
+
+  const referralCode = event.referral_code_id
+    ? await trx("referral_codes").where({ id: event.referral_code_id, status: "active" }).first()
+    : null;
+  const referrerUser = event.referrer_user_id
+    ? await trx("users").where({ id: event.referrer_user_id }).first()
+    : null;
+
+  if (!referralCode || !referrerUser) return null;
+
+  return {
+    event,
+    referralCode,
+    referrerUser,
+    recipientEmail: normalizeEmail(metadata.recipient_email),
+    productSlug: normalizeProductSlug(event.product_slug) || "tabforge",
+  };
+}
+
+export async function claimReferralInviteToken({ token, recipientEmail, referredUserId, trx = db }) {
+  const resolved = await resolveReferralInviteToken(token, trx);
+  if (!resolved) {
+    const err = new Error("invalid_or_expired_invite");
+    err.code = "INVALID_INVITE";
+    throw err;
+  }
+
+  const normalizedRecipient = normalizeEmail(recipientEmail);
+  if (!normalizedRecipient || normalizedRecipient !== resolved.recipientEmail) {
+    const err = new Error("invite_email_mismatch");
+    err.code = "INVITE_EMAIL_MISMATCH";
+    throw err;
+  }
+  if (normalizeEmail(resolved.referrerUser.email) === normalizedRecipient) {
+    const err = new Error("self_referral_not_allowed");
+    err.code = "SELF_REFERRAL";
+    throw err;
+  }
+  if (resolved.event.referred_user_id && resolved.event.referred_user_id !== referredUserId) {
+    const err = new Error("invite_already_claimed");
+    err.code = "INVITE_ALREADY_CLAIMED";
+    throw err;
+  }
+
+  const metadata = resolved.event.metadata && typeof resolved.event.metadata === "object"
+    ? resolved.event.metadata
+    : {};
+  await trx("referral_events")
+    .where({ id: resolved.event.id })
+    .update({
+      referred_user_id: referredUserId,
+      status: "claimed",
+      metadata: {
+        ...metadata,
+        claimed_at: new Date().toISOString(),
+        claimed_user_id: referredUserId,
+      },
+      updated_at: trx.fn.now(),
+    });
+
+  return resolved;
+}
+
 export async function applySignupReferral({ trx = db, newUserId, newUserEmail, referralIdentifier, cashAppTag }) {
   const updates = {};
   const normalizedCashApp = normalizeCashAppTag(cashAppTag);
@@ -112,7 +247,11 @@ export async function applySignupReferral({ trx = db, newUserId, newUserEmail, r
   const newEmail = normalizeEmail(newUserEmail);
   const resolved = await resolveReferralIdentifier(referralIdentifier, trx);
 
-  if (resolved?.referrerUser?.id && resolved.referrerUser.id !== newUserId && normalizeEmail(resolved.referrerUser.email) !== newEmail) {
+  if (
+    resolved?.referrerUser?.id &&
+    resolved.referrerUser.id !== newUserId &&
+    normalizeEmail(resolved.referrerUser.email) !== newEmail
+  ) {
     updates.referred_by_user_id = resolved.referrerUser.id;
     updates.referral_code_id = resolved.referralCode?.id || null;
     updates.referred_by_input = normalizeReferralValue(referralIdentifier);
@@ -145,8 +284,12 @@ export async function updateUserCashAppTag({ userId, cashAppTag }) {
 }
 
 function normalizeTier(raw) {
-  const requiredPurchases = Number(raw?.requiredPurchases ?? raw?.required_purchases ?? raw?.requiredReferrals ?? raw?.count ?? 0);
-  const rewardAmountCents = Number(raw?.rewardAmountCents ?? raw?.reward_amount_cents ?? raw?.amountCents ?? 0);
+  const requiredPurchases = Number(
+    raw?.requiredPurchases ?? raw?.required_purchases ?? raw?.requiredReferrals ?? raw?.count ?? 0
+  );
+  const rewardAmountCents = Number(
+    raw?.rewardAmountCents ?? raw?.reward_amount_cents ?? raw?.amountCents ?? 0
+  );
   if (!Number.isInteger(requiredPurchases) || requiredPurchases <= 0) return null;
   if (!Number.isInteger(rewardAmountCents) || rewardAmountCents < 0) return null;
   return { requiredPurchases, rewardAmountCents };
@@ -169,9 +312,8 @@ export function tiersFromProgram(program) {
     });
   }
 
-  const defaults = referralProgramQualification(program) === "verified_signup"
-    ? TABFORGE_SIGNUP_TIERS
-    : DEFAULT_PURCHASE_TIERS;
+  const slug = normalizeProductSlug(program?.product_slug);
+  const defaults = slug === "tabforge" ? TABFORGE_PURCHASE_TIERS : DEFAULT_PURCHASE_TIERS;
 
   return (tiers.length ? tiers : defaults)
     .sort((a, b) => a.requiredPurchases - b.requiredPurchases);
@@ -185,7 +327,7 @@ export async function getReferralProgram(productSlug, trx = db) {
 
   if (!program) {
     const isTabForge = slug === "tabforge";
-    const tiers = isTabForge ? TABFORGE_SIGNUP_TIERS : DEFAULT_PURCHASE_TIERS;
+    const tiers = isTabForge ? TABFORGE_PURCHASE_TIERS : DEFAULT_PURCHASE_TIERS;
     const [created] = await trx("referral_programs")
       .insert({
         id: crypto.randomUUID(),
@@ -196,10 +338,10 @@ export async function getReferralProgram(productSlug, trx = db) {
         refund_hold_days: 0,
         status: "active",
         metadata: {
-          qualification: isTabForge ? "verified_signup" : "verified_purchase",
+          qualification: "verified_purchase",
           tiers,
           description: isTabForge
-            ? "Verified SendForge account referrals earn manual Cash App payouts: $10 at 5, $20 at 15, and $75 at 50. No purchase necessary."
+            ? "The referrer may participate without purchasing. Only completed TabForge Pro purchases made through the referral link count: $10 at 5, $20 at 15, and $75 at 50."
             : "Default manual Cash App purchase referral tiers.",
         },
         updated_at: trx.fn.now(),
@@ -235,7 +377,6 @@ async function queueRewardsForVerifiedCount({
       .whereRaw("metadata->>'tier_key' = ?", [tierKey])
       .first();
 
-    // Preserve compatibility with rewards generated before tier_key existed.
     if (!existingReward && qualification === "verified_purchase") {
       existingReward = await trx("reward_queue")
         .where({ user_id: referrer.id, product_slug: productSlug })
@@ -244,16 +385,6 @@ async function queueRewardsForVerifiedCount({
     }
 
     if (existingReward) continue;
-
-    const countMetadata = qualification === "verified_signup"
-      ? {
-          tier_required_referrals: tier.requiredPurchases,
-          verified_referral_count: verifiedCount,
-        }
-      : {
-          tier_required_purchases: tier.requiredPurchases,
-          verified_purchase_count: verifiedCount,
-        };
 
     const [reward] = await trx("reward_queue")
       .insert({
@@ -270,7 +401,8 @@ async function queueRewardsForVerifiedCount({
           tier_key: tierKey,
           qualification,
           qualification_ref: qualificationRef,
-          ...countMetadata,
+          tier_required_purchases: tier.requiredPurchases,
+          verified_purchase_count: verifiedCount,
         },
         updated_at: trx.fn.now(),
       })
@@ -281,6 +413,36 @@ async function queueRewardsForVerifiedCount({
   return rewards;
 }
 
+async function queuePurchaseRewardsForReferrer({ trx, referrer, referralCode, productSlug, qualificationRef }) {
+  const verifiedCountResult = await trx("referral_events")
+    .where({
+      referrer_user_id: referrer.id,
+      product_slug: productSlug,
+      event_type: "purchase",
+      status: "verified",
+    })
+    .countDistinct({ count: "referred_user_id" })
+    .first();
+  const verifiedCount = Number(verifiedCountResult?.count || 0);
+
+  const program = await getReferralProgram(productSlug, trx);
+  const qualification = referralProgramQualification(program);
+  const rewards = qualification === "verified_purchase"
+    ? await queueRewardsForVerifiedCount({
+        trx,
+        referrer,
+        referralCode,
+        program,
+        productSlug,
+        verifiedCount,
+        qualification,
+        qualificationRef,
+      })
+    : [];
+
+  return { verifiedCount, rewards };
+}
+
 export async function recordVerifiedReferralSignup({ referredUserId, productSlug = "tabforge" }) {
   const slug = normalizeProductSlug(productSlug) || "tabforge";
   if (!referredUserId) return { recorded: false, reason: "missing_input" };
@@ -289,7 +451,9 @@ export async function recordVerifiedReferralSignup({ referredUserId, productSlug
     const referredUser = await trx("users").where({ id: referredUserId }).first();
     if (!referredUser?.email_verified) return { recorded: false, reason: "email_not_verified" };
     if (!referredUser.referred_by_user_id) return { recorded: false, reason: "no_referrer" };
-    if (referredUser.referred_by_user_id === referredUser.id) return { recorded: false, reason: "self_referral" };
+    if (referredUser.referred_by_user_id === referredUser.id) {
+      return { recorded: false, reason: "self_referral" };
+    }
 
     const referrer = await trx("users").where({ id: referredUser.referred_by_user_id }).first();
     if (!referrer) return { recorded: false, reason: "referrer_missing" };
@@ -298,7 +462,7 @@ export async function recordVerifiedReferralSignup({ referredUserId, productSlug
       ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
       : await ensureReferralCodeForUser(referrer, trx);
 
-    let event = await trx("referral_events")
+    let signupEvent = await trx("referral_events")
       .where({
         referred_user_id: referredUser.id,
         product_slug: slug,
@@ -307,8 +471,8 @@ export async function recordVerifiedReferralSignup({ referredUserId, productSlug
       .first();
 
     let recorded = false;
-    if (!event) {
-      [event] = await trx("referral_events")
+    if (!signupEvent) {
+      [signupEvent] = await trx("referral_events")
         .insert({
           id: crypto.randomUUID(),
           referral_code_id: referralCode?.id || null,
@@ -319,43 +483,59 @@ export async function recordVerifiedReferralSignup({ referredUserId, productSlug
           event_type: "signup",
           status: "verified",
           metadata: {
-            qualification: "verified_account",
+            qualification: "verified_account_only",
+            counts_toward_payout: false,
             referred_email: normalizeEmail(referredUser.email),
           },
           updated_at: trx.fn.now(),
         })
         .returning("*");
       recorded = true;
-    } else if (event.status !== "verified") {
-      [event] = await trx("referral_events")
-        .where({ id: event.id })
-        .update({ status: "verified", updated_at: trx.fn.now() })
+    } else if (signupEvent.status !== "verified") {
+      [signupEvent] = await trx("referral_events")
+        .where({ id: signupEvent.id })
+        .update({
+          status: "verified",
+          metadata: {
+            ...(signupEvent.metadata || {}),
+            counts_toward_payout: false,
+          },
+          updated_at: trx.fn.now(),
+        })
         .returning("*");
       recorded = true;
     }
 
-    const verifiedCountResult = await trx("referral_events")
-      .where({ referrer_user_id: referrer.id, product_slug: slug, event_type: "signup", status: "verified" })
-      .count({ count: "id" })
-      .first();
-    const verifiedCount = Number(verifiedCountResult?.count || 0);
+    const pendingPurchases = await trx("referral_events")
+      .where({
+        referred_user_id: referredUser.id,
+        product_slug: slug,
+        event_type: "purchase",
+        status: "pending",
+      });
 
-    const program = await getReferralProgram(slug, trx);
-    const qualification = referralProgramQualification(program);
-    const rewards = qualification === "verified_signup"
-      ? await queueRewardsForVerifiedCount({
-          trx,
-          referrer,
-          referralCode,
-          program,
-          productSlug: slug,
-          verifiedCount,
-          qualification,
-          qualificationRef: event.purchase_ref,
-        })
-      : [];
+    if (pendingPurchases.length) {
+      await trx("referral_events")
+        .whereIn("id", pendingPurchases.map((row) => row.id))
+        .update({ status: "verified", updated_at: trx.fn.now() });
+    }
 
-    return { recorded, event, rewards, verifiedCount };
+    const qualificationRef = pendingPurchases[pendingPurchases.length - 1]?.purchase_ref || signupEvent.purchase_ref;
+    const { verifiedCount, rewards } = await queuePurchaseRewardsForReferrer({
+      trx,
+      referrer,
+      referralCode,
+      productSlug: slug,
+      qualificationRef,
+    });
+
+    return {
+      recorded,
+      event: signupEvent,
+      rewards,
+      verifiedCount,
+      promotedPurchases: pendingPurchases.length,
+    };
   });
 }
 
@@ -367,7 +547,9 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
   return db.transaction(async (trx) => {
     const referredUser = await trx("users").where({ id: referredUserId }).first();
     if (!referredUser?.referred_by_user_id) return { recorded: false, reason: "no_referrer" };
-    if (referredUser.referred_by_user_id === referredUser.id) return { recorded: false, reason: "self_referral" };
+    if (referredUser.referred_by_user_id === referredUser.id) {
+      return { recorded: false, reason: "self_referral" };
+    }
 
     const referrer = await trx("users").where({ id: referredUser.referred_by_user_id }).first();
     if (!referrer) return { recorded: false, reason: "referrer_missing" };
@@ -376,12 +558,24 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
       ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
       : await ensureReferralCodeForUser(referrer, trx);
 
-    const existing = await trx("referral_events")
-      .where({ referred_user_id: referredUser.id, product_slug: slug, purchase_ref: ref })
-      .first();
+    const existingQuery = trx("referral_events")
+      .where({
+        referred_user_id: referredUser.id,
+        product_slug: slug,
+        event_type: "purchase",
+      });
+    if (slug !== "tabforge") existingQuery.andWhere({ purchase_ref: ref });
+    const existing = await existingQuery.first();
 
-    if (existing) return { recorded: false, reason: "duplicate_purchase", event: existing };
+    if (existing) {
+      return {
+        recorded: false,
+        reason: slug === "tabforge" ? "duplicate_referred_customer" : "duplicate_purchase",
+        event: existing,
+      };
+    }
 
+    const purchaseStatus = referredUser.email_verified ? "verified" : "pending";
     const [event] = await trx("referral_events")
       .insert({
         id: crypto.randomUUID(),
@@ -391,32 +585,33 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
         product_slug: slug,
         purchase_ref: ref,
         event_type: "purchase",
-        status: "verified",
-        metadata,
+        status: purchaseStatus,
+        metadata: {
+          ...metadata,
+          qualification: "verified_purchase",
+          purchaser_email_verified: Boolean(referredUser.email_verified),
+        },
         updated_at: trx.fn.now(),
       })
       .returning("*");
 
-    const verifiedCountResult = await trx("referral_events")
-      .where({ referrer_user_id: referrer.id, product_slug: slug, event_type: "purchase", status: "verified" })
-      .count({ count: "id" })
-      .first();
-    const verifiedCount = Number(verifiedCountResult?.count || 0);
+    if (purchaseStatus !== "verified") {
+      return {
+        recorded: true,
+        event,
+        rewards: [],
+        verifiedCount: 0,
+        reason: "awaiting_email_verification",
+      };
+    }
 
-    const program = await getReferralProgram(slug, trx);
-    const qualification = referralProgramQualification(program);
-    const rewards = qualification === "verified_purchase"
-      ? await queueRewardsForVerifiedCount({
-          trx,
-          referrer,
-          referralCode,
-          program,
-          productSlug: slug,
-          verifiedCount,
-          qualification,
-          qualificationRef: ref,
-        })
-      : [];
+    const { verifiedCount, rewards } = await queuePurchaseRewardsForReferrer({
+      trx,
+      referrer,
+      referralCode,
+      productSlug: slug,
+      qualificationRef: ref,
+    });
 
     return { recorded: true, event, rewards, verifiedCount };
   });
