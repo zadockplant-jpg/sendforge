@@ -352,14 +352,21 @@ If you did not request this, secure your account immediately.`;
 
 
 export async function sendReferralInviteEmail({ to, fromEmail, referralUrl, productName = "TabForge", requestId }) {
+  const referrerEmail = fromEmail || null;
+  const referralFromEmail =
+    process.env.REFERRAL_FROM_EMAIL ||
+    process.env.SENDGRID_FROM_EMAIL ||
+    process.env.VERIFY_FROM_EMAIL;
+  const referralFromName = process.env.REFERRAL_FROM_NAME || "SendForge Rewards";
+
   const safeProduct = escapeHtml(productName);
-  const safeFrom = escapeHtml(fromEmail || "a TabForge user");
+  const safeFrom = escapeHtml(referrerEmail || "a TabForge user");
   const safeUrl = escapeHtml(referralUrl);
   const subject = `Earn $10 when 5 friends buy ${productName} Pro`;
 
   const text = `Get paid to share ${productName} Pro
 
-${fromEmail || "A TabForge user"} invited you to check out ${productName} Pro.
+${referrerEmail || "A TabForge user"} invited you to check out ${productName} Pro.
 
 Create your SendForge account and you will get your own personal referral link. You do not have to purchase ${productName} to participate in the referral program.
 
@@ -382,7 +389,7 @@ Why ${productName} Pro is easy to recommend:
 Use this invitation to create your SendForge account and continue to ${productName} Pro:
 ${referralUrl}
 
-This message was sent through SendForge on behalf of ${fromEmail || "a TabForge user"}. Replies go to the person who invited you.
+This message was sent through SendForge Rewards on behalf of ${referrerEmail || "a TabForge user"}. Replies go to the person who invited you.
 Need help? Contact ${supportEmail()}.`;
 
   const html = `
@@ -455,7 +462,8 @@ Need help? Contact ${supportEmail()}.`;
     text,
     html,
     requestId,
-    replyTo: fromEmail || null,
-    fromName: `${productName} via SendForge`,
+    replyTo: referrerEmail,
+    fromEmail: referralFromEmail,
+    fromName: referralFromName,
   });
 }
