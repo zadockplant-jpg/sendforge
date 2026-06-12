@@ -108,12 +108,16 @@ async function sendEmailViaSendGrid({
     });
   }
 
+  const messageId = res.headers.get("x-message-id") || null;
   log("info", "sendgrid_sent", {
     requestId,
     to: sanitizeEmail(to),
     subject,
+    messageId,
+    fromEmail: senderEmail,
+    fromName: senderName,
   });
-  return { ok: true, mode: "sendgrid" };
+  return { ok: true, mode: "sendgrid", messageId };
 }
 
 /**

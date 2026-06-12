@@ -15,7 +15,7 @@ import {
 } from "../services/referrals/referral.service.js";
 import { sendReferralInviteEmail } from "../services/email.service.js";
 import { env } from "../config/env.js";
-import { getRequestId } from "../utils/logger.js";
+import { getRequestId, log } from "../utils/logger.js";
 
 export const accountRouter = Router();
 
@@ -359,6 +359,7 @@ accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
       referralUrl,
       recipientEmail,
       emailMode: sendResult?.mode || "sendgrid",
+      providerMessageId: sendResult?.messageId || null,
     });
   } catch (err) {
     if (err?.code === "SELF_REFERRAL") {
@@ -391,15 +392,30 @@ async function handleCashAppUpdate(req, res) {
     const knownErrors = new Set([
       "cash_app_tag_in_use",
       "cash_app_tag_locked_for_approved_payout",
+      "cash_app_storage_unavailable",
     ]);
     const code = String(err?.code || err?.message || "");
+
+    log("error", "cashapp_tag_update_failed", {
+      requestId: getRequestId(req),
+      userId: req.user?.sub || null,
+      code,
+      message: String(err?.message || err),
+      databaseCode: err?.code || null,
+      detail: err?.detail || null,
+      constraint: err?.constraint || null,
+    });
+
     if (knownErrors.has(code)) {
-      return res.status(err?.statusCode || 409).json({ error: code });
+      const status = code === "cash_app_storage_unavailable"
+        ? 503
+        : (err?.statusCode || 409);
+      return res.status(status).json({ error: code });
     }
     if (code === "23505") {
       return res.status(409).json({ error: "cash_app_tag_in_use" });
     }
-    if (code === "42P01") {
+    if (["42P01", "42703"].includes(code)) {
       return res.status(503).json({ error: "cash_app_storage_unavailable" });
     }
     return res.status(500).json({
