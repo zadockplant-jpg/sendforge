@@ -10,7 +10,7 @@ import { requireAdminAuth, requireAdminWritesEnabled } from "../middleware/admin
 import { sendAdminMfaCodeEmail } from "../services/email.service.js";
 import { writeAdminAudit } from "../services/adminAudit.service.js";
 import { grantProductEntitlement, revokeProductEntitlement } from "../services/entitlement.service.js";
-import { cashAppTagKey, normalizeCashAppTag } from "../services/referrals/referral.service.js";
+import { cashAppTagKey, normalizeCashAppTag, makeReferralCode, ensureReferralCodeForUser, applySignupReferral, recordReferralPurchase, recordVerifiedReferralSignup } from "../services/referrals/referral.service.js";
 import { getRequestId, log, sanitizeEmail } from "../utils/logger.js";
 
 export const adminRouter = Router();
@@ -216,6 +216,51 @@ adminRouter.post("/referrals/codes", writeLimiter, async (req, res) => {
   const rows = await db("referral_codes").insert({ id: crypto.randomUUID(), user_id: user?.id || null, email, code, cashapp_handle: parsed.data.cashappHandle || null, metadata: parsed.data.metadata || {}, updated_at: db.fn.now() }).onConflict("code").merge({ user_id: user?.id || null, email, cashapp_handle: parsed.data.cashappHandle || null, metadata: parsed.data.metadata || {}, status: "active", updated_at: db.fn.now() }).returning("*");
   await writeAdminAudit(req, { action: "referral_code.upsert", resourceType: "referral_code", resourceId: code, afterValue: rows[0] });
   res.json({ item: rows[0] });
+});
+
+adminRouter.post("/referrals/test-lab", writeLimiter, async (req, res) => {
+  const { action, email, referralIdentifier, productSlug = "tabforge", purchaseRef, metadata } = req.body || {};
+  if (!action) return res.status(400).json({ error: "action_required" });
+
+  try {
+    if (action === "create_code") {
+      const emailNorm = email ? String(email).trim().toLowerCase() : null;
+      const user = emailNorm ? await db("users").where({ email: emailNorm }).first() : null;
+      const code = String(req.body.code || makeReferralCode(emailNorm || "creator")).toUpperCase();
+      const rows = await db("referral_codes").insert({ id: crypto.randomUUID(), user_id: user?.id || null, email: emailNorm, code, cashapp_handle: null, metadata: { source: "admin_test_lab" }, updated_at: db.fn.now() }).onConflict("code").merge({ user_id: user?.id || null, email: emailNorm, status: "active", metadata: { source: "admin_test_lab" }, updated_at: db.fn.now() }).returning("*");
+      await writeAdminAudit(req, { action: "referral_code.test_create", resourceType: "referral_code", resourceId: code, afterValue: rows[0] });
+      return res.json({ item: rows[0] });
+    }
+
+    if (!email) return res.status(400).json({ error: "email_required" });
+    const target = await requireTargetUserByEmail(String(email));
+
+    if (action === "simulate_signup") {
+      if (!referralIdentifier) return res.status(400).json({ error: "referral_identifier_required" });
+      await applySignupReferral({ newUserId: target.id, newUserEmail: target.email, referralIdentifier, cashAppTag: req.body.cashAppTag });
+      const result = await recordVerifiedReferralSignup({ referredUserId: target.id, productSlug });
+      await writeAdminAudit(req, { action: "referral.test_simulate_signup", resourceType: "user", resourceId: target.id, afterValue: { result } });
+      return res.json({ result });
+    }
+
+    if (action === "simulate_purchase") {
+      if (!purchaseRef) return res.status(400).json({ error: "purchase_ref_required" });
+      const result = await recordReferralPurchase({ referredUserId: target.id, productSlug, purchaseRef, metadata: metadata || {} });
+      await writeAdminAudit(req, { action: "referral.test_simulate_purchase", resourceType: "user", resourceId: target.id, afterValue: { result } });
+      return res.json({ result });
+    }
+
+    if (action === "record_verified_signup") {
+      const result = await recordVerifiedReferralSignup({ referredUserId: target.id, productSlug });
+      await writeAdminAudit(req, { action: "referral.test_record_verified_signup", resourceType: "user", resourceId: target.id, afterValue: { result } });
+      return res.json({ result });
+    }
+
+    return res.status(400).json({ error: "unknown_action" });
+  } catch (err) {
+    log("error", "admin_referral_test_lab_failed", { requestId: getRequestId(req), action: req.body?.action, email: req.body?.email, message: String(err?.message || err), code: err?.code });
+    return res.status(err?.statusCode || 500).json({ error: String(err?.message || "server_error") });
+  }
 });
 
 adminRouter.get("/referrals/programs", async (_req, res) => {
