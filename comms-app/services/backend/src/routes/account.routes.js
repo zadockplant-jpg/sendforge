@@ -15,7 +15,7 @@ import {
 } from "../services/referrals/referral.service.js";
 import { sendReferralInviteEmail } from "../services/email.service.js";
 import { env } from "../config/env.js";
-import { getRequestId, log } from "../utils/logger.js";
+import { getRequestId } from "../utils/logger.js";
 
 export const accountRouter = Router();
 
@@ -168,7 +168,16 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
 
     const code = await ensureReferralCodeForUser(user);
 
-    const [programRows, inviteRows, signupRows, purchaseRows, rewardRows] = await Promise.all([
+    const [
+      programRows,
+      inviteRows,
+      signupRows,
+      purchaseRows,
+      rewardRows,
+      inviteCountRow,
+      verifiedSignupCountRow,
+      verifiedPurchaseCountRow,
+    ] = await Promise.all([
       db("referral_programs")
         .where({ product_slug: "tabforge", status: "active" })
         .orderBy("product_slug", "asc"),
@@ -200,14 +209,23 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         .where({ user_id: user.id, product_slug: "tabforge" })
         .orderBy("created_at", "desc")
         .limit(100),
+      db("referral_events")
+        .where({ referrer_user_id: user.id, product_slug: "tabforge", event_type: "invite" })
+        .count({ count: "id" })
+        .first(),
+      db("referral_events")
+        .where({ referrer_user_id: user.id, product_slug: "tabforge", event_type: "signup", status: "verified" })
+        .count({ count: "id" })
+        .first(),
+      db("referral_events")
+        .where({ referrer_user_id: user.id, product_slug: "tabforge", event_type: "purchase", status: "verified" })
+        .countDistinct({ count: "referred_user_id" })
+        .first(),
     ]);
 
-    const verifiedReferrals = signupRows.filter((row) => row.status === "verified").length;
-    const verifiedPurchases = new Set(
-      purchaseRows
-        .filter((row) => row.status === "verified")
-        .map((row) => row.referred_user_id || row.id)
-    ).size;
+    const invitesSent = Number(inviteCountRow?.count || 0);
+    const verifiedReferrals = Number(verifiedSignupCountRow?.count || 0);
+    const verifiedPurchases = Number(verifiedPurchaseCountRow?.count || 0);
 
     const programs = programRows.map((program) => {
       const tiers = tiersFromProgram(program).map((tier) => ({
@@ -258,7 +276,7 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         tiers: programs[0]?.tiers || fallbackTiers,
       },
       totals: {
-        invitesSent: inviteRows.length,
+        invitesSent,
         verifiedReferrals,
         verifiedPurchases,
         pendingRewards: rewardRows.filter((row) => row.status === "pending").length,
@@ -359,7 +377,6 @@ accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
       referralUrl,
       recipientEmail,
       emailMode: sendResult?.mode || "sendgrid",
-      providerMessageId: sendResult?.messageId || null,
     });
   } catch (err) {
     if (err?.code === "SELF_REFERRAL") {
@@ -392,30 +409,15 @@ async function handleCashAppUpdate(req, res) {
     const knownErrors = new Set([
       "cash_app_tag_in_use",
       "cash_app_tag_locked_for_approved_payout",
-      "cash_app_storage_unavailable",
     ]);
     const code = String(err?.code || err?.message || "");
-
-    log("error", "cashapp_tag_update_failed", {
-      requestId: getRequestId(req),
-      userId: req.user?.sub || null,
-      code,
-      message: String(err?.message || err),
-      databaseCode: err?.code || null,
-      detail: err?.detail || null,
-      constraint: err?.constraint || null,
-    });
-
     if (knownErrors.has(code)) {
-      const status = code === "cash_app_storage_unavailable"
-        ? 503
-        : (err?.statusCode || 409);
-      return res.status(status).json({ error: code });
+      return res.status(err?.statusCode || 409).json({ error: code });
     }
     if (code === "23505") {
       return res.status(409).json({ error: "cash_app_tag_in_use" });
     }
-    if (["42P01", "42703"].includes(code)) {
+    if (code === "42P01") {
       return res.status(503).json({ error: "cash_app_storage_unavailable" });
     }
     return res.status(500).json({
