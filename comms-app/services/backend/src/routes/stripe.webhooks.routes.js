@@ -25,6 +25,10 @@ function normalizeSlug(slug) {
     .toLowerCase();
 }
 
+function isReferralQualifyingPurchase(entitlementSlug) {
+  return normalizeSlug(entitlementSlug) === "tabforge";
+}
+
 function parseCheckoutItems(raw) {
   if (!raw) return [];
 
@@ -178,16 +182,18 @@ async function grantCheckoutEntitlements({
         },
       });
 
-      await recordReferralPurchase({
-        referredUserId: userId,
-        productSlug: entitlementSlug,
-        purchaseRef: `${sourceRef}:${entitlementSlug}`,
-        metadata: {
-          checkout_session_id: checkoutSessionId,
-          checkout_item_kind: kind,
-          quantity: quantityPurchased,
-        },
-      });
+      if (isReferralQualifyingPurchase(entitlementSlug)) {
+        await recordReferralPurchase({
+          referredUserId: userId,
+          productSlug: entitlementSlug,
+          purchaseRef: `${sourceRef}:${entitlementSlug}`,
+          metadata: {
+            checkout_session_id: checkoutSessionId,
+            checkout_item_kind: kind,
+            quantity: quantityPurchased,
+          },
+        });
+      }
 
       continue;
     }
@@ -223,16 +229,18 @@ async function grantCheckoutEntitlements({
       });
     }
 
-    await recordReferralPurchase({
-      referredUserId: userId,
-      productSlug: entitlementSlug,
-      purchaseRef: `${sourceRef}:${entitlementSlug}`,
-      metadata: {
-        checkout_session_id: checkoutSessionId,
-        checkout_item_kind: kind || null,
-        checkout_item_slug: slug || entitlementSlug,
-      },
-    });
+    if (isReferralQualifyingPurchase(entitlementSlug)) {
+      await recordReferralPurchase({
+        referredUserId: userId,
+        productSlug: entitlementSlug,
+        purchaseRef: `${sourceRef}:${entitlementSlug}`,
+        metadata: {
+          checkout_session_id: checkoutSessionId,
+          checkout_item_kind: kind || null,
+          checkout_item_slug: slug || entitlementSlug,
+        },
+      });
+    }
   }
 }
 

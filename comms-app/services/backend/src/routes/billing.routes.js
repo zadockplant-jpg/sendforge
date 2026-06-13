@@ -31,6 +31,36 @@ const PRODUCT_CATALOG = {
     defaultSuccessPath: "/products/tabforge/index.html",
     defaultCancelPath: "/products/tabforge/index.html",
   },
+  "tabforge-skin-command-center": {
+    slug: "tabforge-skin-command-center",
+    displayName: "TabForge Command Center Skin Bundle",
+    mode: "payment",
+    unitAmountCents: 700,
+    entitlementSlug: "tabforge-skin-bundle-command-center",
+    requiresEntitlement: "tabforge",
+    defaultSuccessPath: "/account/index.html",
+    defaultCancelPath: "/store/index.html#tabforge-skins",
+  },
+  "tabforge-skin-creator-money": {
+    slug: "tabforge-skin-creator-money",
+    displayName: "TabForge Creator + Money Skin Bundle",
+    mode: "payment",
+    unitAmountCents: 700,
+    entitlementSlug: "tabforge-skin-bundle-creator-money",
+    requiresEntitlement: "tabforge",
+    defaultSuccessPath: "/account/index.html",
+    defaultCancelPath: "/store/index.html#tabforge-skins",
+  },
+  "tabforge-skin-wild-forge": {
+    slug: "tabforge-skin-wild-forge",
+    displayName: "TabForge Wild Forge Skin Bundle",
+    mode: "payment",
+    unitAmountCents: 700,
+    entitlementSlug: "tabforge-skin-bundle-wild-forge",
+    requiresEntitlement: "tabforge",
+    defaultSuccessPath: "/account/index.html",
+    defaultCancelPath: "/store/index.html#tabforge-skins",
+  },
 };
 
 const TABFORGE_PACK_CATALOG = {
@@ -525,12 +555,16 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
         max,
       });
     }
+  }
 
-    const hasPro = await userHasEntitlement(req.user.sub, product.requiresEntitlement);
-    if (!hasPro) {
+  if (product?.requiresEntitlement) {
+    const hasRequiredEntitlement = await userHasEntitlement(req.user.sub, product.requiresEntitlement);
+    if (!hasRequiredEntitlement) {
       return res.status(403).json({
         error: "pro_required",
-        message: "TabForge Pro is required before purchasing extra pages.",
+        message: product.slug === "tabforge-page"
+          ? "TabForge Pro is required before purchasing extra pages."
+          : "TabForge Pro is required before purchasing this add-on.",
       });
     }
   }
@@ -545,12 +579,14 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
-  if (product?.slug === "tabforge") {
-    const alreadyOwnsPro = await userHasEntitlement(req.user.sub, "tabforge");
-    if (alreadyOwnsPro) {
+  if (product && product.slug !== "tabforge-page") {
+    const productEntitlementSlug = product.entitlementSlug || product.slug;
+    const alreadyOwnsProduct = await userHasEntitlement(req.user.sub, productEntitlementSlug);
+    if (alreadyOwnsProduct) {
       return res.status(409).json({
         error: "already_owned",
-        message: "You already own TabForge Pro.",
+        message: product.slug === "tabforge" ? "You already own TabForge Pro." : "You already own this product.",
+        productSlug: productEntitlementSlug,
       });
     }
   }
