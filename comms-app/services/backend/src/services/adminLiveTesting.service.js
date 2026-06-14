@@ -9,35 +9,32 @@ const MAX_LIVE_TEST_COUNT = 10000;
 const TEST_SOURCE = "admin_live_test";
 const OWNER_ENTITLEMENT_SOURCE = "admin_owner_grant";
 const TEST_ENTITLEMENT_PRESETS = [
-  { slug: "tabforge", label: "TabForge Pro", category: "core" },
-  { slug: "tabforge-pages", label: "Extra Pages", category: "core" },
-  { slug: "tabforge-pack-builder", label: "Builder Pack", category: "packs" },
-  { slug: "tabforge-pack-money", label: "Money Pack", category: "packs" },
-  { slug: "tabforge-pack-dev", label: "Developer Pack", category: "packs" },
-  { slug: "tabforge-pack-media", label: "Media Pack", category: "packs" },
-  { slug: "tabforge-pack-research", label: "Research Pack", category: "packs" },
-  { slug: "tabforge-pack-games", label: "Games Pack", category: "packs" },
-  { slug: "tabforge-pack-productivity", label: "Productivity Pack", category: "packs" },
-  { slug: "tabforge-pack-ai", label: "AI Tools Pack", category: "packs" },
-  { slug: "tabforge-pack-business", label: "Business Pack", category: "packs" },
-  { slug: "tabforge-pack-creator", label: "Creator Pack", category: "packs" },
-  { slug: "tabforge-pack-finance", label: "Finance Pack", category: "packs" },
-  { slug: "tabforge-pack-shopping", label: "Shopping Pack", category: "packs" },
-  { slug: "tabforge-pack-social", label: "Social Pack", category: "packs" },
-  { slug: "tabforge-skin-terminal", label: "Terminal Skin", category: "skins" },
-  { slug: "tabforge-skin-neon", label: "Neon Skin", category: "skins" },
-  { slug: "tabforge-skin-executive", label: "Executive Skin", category: "skins" },
-  { slug: "tabforge-skin-money-mode", label: "Money Mode Skin", category: "skins" },
-  { slug: "tabforge-skin-cyber", label: "Cyber Skin", category: "skins" },
-  { slug: "tabforge-skin-graphite", label: "Graphite Skin", category: "skins" },
-  { slug: "tabforge-skin-retro", label: "Retro Skin", category: "skins" },
-  { slug: "tabforge-skin-minimal", label: "Minimal Skin", category: "skins" },
-  { slug: "tabforge-skin-creator", label: "Creator Skin", category: "skins" },
-  { slug: "tabforge-skin-studio", label: "Studio Skin", category: "skins" },
-  { slug: "tabforge-skin-ocean", label: "Ocean Skin", category: "skins" },
-  { slug: "tabforge-skin-forest", label: "Forest Skin", category: "skins" },
-  { slug: "tabforge-skin-space", label: "Space Skin", category: "skins" },
-  { slug: "tabforge-skin-paper", label: "Paper Skin", category: "skins" },
+  // Product features that are purchasable/account-visible. Extra Pages belongs
+  // here, not in shortcut packs.
+  { slug: "tabforge", label: "TabForge Pro", category: "product_features" },
+  { slug: "tabforge-pages", label: "Extra Pages", category: "product_features" },
+
+  // Shortcut pack entitlements. Keep this aligned with what the TabForge store
+  // actually sells as packs.
+  { slug: "tabforge-pack-builder", label: "Builder Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-money", label: "Money Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-dev", label: "Developer Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-media", label: "Media Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-research", label: "Research Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-games", label: "Games Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-productivity", label: "Productivity Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-ai", label: "AI Tools Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-business", label: "Business Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-creator", label: "Creator Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-finance", label: "Finance Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-shopping", label: "Shopping Pack", category: "shortcut_packs" },
+  { slug: "tabforge-pack-social", label: "Social Pack", category: "shortcut_packs" },
+
+  // Skin access is sold as three purchasable skin options right now. Do not
+  // list every individual internal visual variant here.
+  { slug: "tabforge-skin-terminal", label: "Terminal Skin Pack", category: "skin_packs" },
+  { slug: "tabforge-skin-neon", label: "Neon Skin Pack", category: "skin_packs" },
+  { slug: "tabforge-skin-executive", label: "Executive Skin Pack", category: "skin_packs" },
 ];
 
 function normalizeEmail(value) {

@@ -555,16 +555,22 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
         max,
       });
     }
+
+    const hasPro = await userHasEntitlement(req.user.sub, product.requiresEntitlement);
+    if (!hasPro) {
+      return res.status(403).json({
+        error: "pro_required",
+        message: "TabForge Pro is required before purchasing extra pages.",
+      });
+    }
   }
 
-  if (product?.requiresEntitlement) {
+  if (product?.requiresEntitlement && product.slug !== "tabforge-page") {
     const hasRequiredEntitlement = await userHasEntitlement(req.user.sub, product.requiresEntitlement);
     if (!hasRequiredEntitlement) {
       return res.status(403).json({
         error: "pro_required",
-        message: product.slug === "tabforge-page"
-          ? "TabForge Pro is required before purchasing extra pages."
-          : "TabForge Pro is required before purchasing this add-on.",
+        message: "TabForge Pro is required before purchasing this add-on.",
       });
     }
   }
@@ -579,14 +585,12 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
-  if (product && product.slug !== "tabforge-page") {
-    const productEntitlementSlug = product.entitlementSlug || product.slug;
-    const alreadyOwnsProduct = await userHasEntitlement(req.user.sub, productEntitlementSlug);
-    if (alreadyOwnsProduct) {
+  if (product?.slug === "tabforge") {
+    const alreadyOwnsPro = await userHasEntitlement(req.user.sub, "tabforge");
+    if (alreadyOwnsPro) {
       return res.status(409).json({
         error: "already_owned",
-        message: product.slug === "tabforge" ? "You already own TabForge Pro." : "You already own this product.",
-        productSlug: productEntitlementSlug,
+        message: "You already own TabForge Pro.",
       });
     }
   }
@@ -603,6 +607,17 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
         error: "already_owned",
         message: "You already own one or more selected packs.",
         productSlugs: ownedPackSlugs,
+      });
+    }
+  }
+
+  if (product?.entitlementSlug && product.slug !== "tabforge-page") {
+    const alreadyOwnsProduct = await userHasEntitlement(req.user.sub, product.entitlementSlug);
+    if (alreadyOwnsProduct) {
+      return res.status(409).json({
+        error: "already_owned",
+        message: "You already own this add-on.",
+        productSlug: product.entitlementSlug,
       });
     }
   }
