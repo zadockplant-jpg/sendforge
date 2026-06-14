@@ -317,6 +317,7 @@ accountRouter.get("/referrals/invite/:token", async (req, res) => {
       ok: true,
       recipientEmail: invite.recipientEmail,
       productSlug: invite.productSlug,
+      referralCode: invite.referralCode?.code || null,
     });
   } catch (err) {
     return res.status(500).json({
