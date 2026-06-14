@@ -256,13 +256,25 @@ adminRouter.get("/referrals", async (_req, res) => {
     db("referral_programs").orderBy("product_slug", "asc"),
     db("reward_queue as r")
       .leftJoin("users as owner", "r.user_id", "owner.id")
-      .select("r.*", "owner.email as account_email", "owner.cash_app_tag as account_cash_app_tag")
+      .leftJoin("referral_codes as reward_code", "r.referral_code_id", "reward_code.id")
+      .select(
+        "r.*",
+        "owner.email as account_email",
+        "owner.cash_app_tag as account_cash_app_tag",
+        "reward_code.code as referral_code",
+        "reward_code.email as referral_code_email",
+        "reward_code.cashapp_handle as referral_code_cashapp_handle"
+      )
       .orderBy("r.created_at", "desc")
       .limit(500),
   ]);
 
   const programMap = new Map(programs.map((program) => [normalizeSlug(program.product_slug), program]));
-  const rewards = rawRewards.map((row) => enrichReward(row, programMap));
+  const rewards = rawRewards.map((row) => ({
+    ...enrichReward(row, programMap),
+    referralCode: row.referral_code || null,
+    referralCodeEmail: row.referral_code_email || null,
+  }));
   const events = rawEvents.map((event) => {
     const meta = rewardMetadata(event);
     return {
@@ -315,11 +327,13 @@ adminRouter.get("/referrals", async (_req, res) => {
   for (const reward of rewards) {
     const key = reward.user_id || reward.email || reward.cashapp_handle;
     const row = ensureCatalogRow(key, {
-      referrerEmail: reward.email || reward.account_email || null,
-      cashAppTag: reward.cashapp_handle || reward.account_cash_app_tag || null,
+      referrerEmail: reward.email || reward.account_email || reward.referralCodeEmail || null,
+      cashAppTag: reward.cashapp_handle || reward.account_cash_app_tag || reward.referral_code_cashapp_handle || null,
+      referralCode: reward.referral_code || reward.referralCode || null,
     });
-    row.referrerEmail ||= reward.email || reward.account_email || null;
-    row.cashAppTag ||= reward.cashapp_handle || reward.account_cash_app_tag || null;
+    row.referrerEmail ||= reward.email || reward.account_email || reward.referralCodeEmail || null;
+    row.cashAppTag ||= reward.cashapp_handle || reward.account_cash_app_tag || reward.referral_code_cashapp_handle || null;
+    row.referralCode ||= reward.referral_code || reward.referralCode || null;
     const cents = Number(reward.reward_amount_cents || 0);
     if (reward.status === "pending") row.pendingRewardCents += cents;
     if (reward.status === "approved") row.approvedRewardCents += cents;
@@ -382,7 +396,15 @@ adminRouter.get("/rewards", async (_req, res) => {
   const [rows, programs] = await Promise.all([
     db("reward_queue as r")
       .leftJoin("users as owner", "r.user_id", "owner.id")
-      .select("r.*", "owner.email as account_email", "owner.cash_app_tag as account_cash_app_tag")
+      .leftJoin("referral_codes as reward_code", "r.referral_code_id", "reward_code.id")
+      .select(
+        "r.*",
+        "owner.email as account_email",
+        "owner.cash_app_tag as account_cash_app_tag",
+        "reward_code.code as referral_code",
+        "reward_code.email as referral_code_email",
+        "reward_code.cashapp_handle as referral_code_cashapp_handle"
+      )
       .orderBy("r.created_at", "desc")
       .limit(500),
     db("referral_programs"),

@@ -10,31 +10,24 @@ const TEST_SOURCE = "admin_live_test";
 const OWNER_ENTITLEMENT_SOURCE = "admin_owner_grant";
 const TEST_ENTITLEMENT_PRESETS = [
   // Product features that are purchasable/account-visible. Extra Pages belongs
-  // here, not in shortcut packs.
-  { slug: "tabforge", label: "TabForge Pro", category: "product_features" },
-  { slug: "tabforge-pages", label: "Extra Pages", category: "product_features" },
+  // here, not in shortcut packs. The extension uses tabforge-pages metadata to
+  // calculate extra page capacity.
+  { slug: "tabforge", label: "TabForge Pro", category: "product_features", description: "Main Pro unlock. Backend device/license checks still apply." },
+  { slug: "tabforge-pages", label: "Extra Pages", category: "product_features", description: "Purchased page expansion. Kept separate from shortcut packs." },
 
-  // Shortcut pack entitlements. Keep this aligned with what the TabForge store
-  // actually sells as packs.
-  { slug: "tabforge-pack-builder", label: "Builder Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-money", label: "Money Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-dev", label: "Developer Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-media", label: "Media Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-research", label: "Research Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-games", label: "Games Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-productivity", label: "Productivity Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-ai", label: "AI Tools Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-business", label: "Business Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-creator", label: "Creator Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-finance", label: "Finance Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-shopping", label: "Shopping Pack", category: "shortcut_packs" },
-  { slug: "tabforge-pack-social", label: "Social Pack", category: "shortcut_packs" },
+  // Shortcut pack entitlements. Keep this aligned with the active TabForge
+  // extension/store unlock map. Do not list internal labels or future-only ideas.
+  { slug: "tabforge-pack-builder", label: "Builder Pack", category: "shortcut_packs", description: "Construction, trades, and field tools." },
+  { slug: "tabforge-pack-money", label: "Money Pack", category: "shortcut_packs", description: "Banking, budgeting, and finance shortcuts." },
+  { slug: "tabforge-pack-dev", label: "Developer Pack", category: "shortcut_packs", description: "Code, docs, dashboards, and deploy tools." },
+  { slug: "tabforge-pack-media", label: "Media Pack", category: "shortcut_packs", description: "Music, video, editing, and publishing." },
+  { slug: "tabforge-pack-research", label: "Research Pack", category: "shortcut_packs", description: "AI, search, notes, and reference links." },
 
-  // Skin access is sold as three purchasable skin options right now. Do not
-  // list every individual internal visual variant here.
-  { slug: "tabforge-skin-terminal", label: "Terminal Skin Pack", category: "skin_packs" },
-  { slug: "tabforge-skin-neon", label: "Neon Skin Pack", category: "skin_packs" },
-  { slug: "tabforge-skin-executive", label: "Executive Skin Pack", category: "skin_packs" },
+  // Skin access is sold as three purchasable skin options right now. Individual
+  // layout/font/theme pieces stay inside the extension Skin Studio.
+  { slug: "tabforge-skin-terminal", label: "Terminal Skin Pack", category: "skin_packs", description: "Terminal/Hacker skin option." },
+  { slug: "tabforge-skin-neon", label: "Neon Skin Pack", category: "skin_packs", description: "Neon/Cyber skin option." },
+  { slug: "tabforge-skin-executive", label: "Executive Skin Pack", category: "skin_packs", description: "Executive/Clean skin option." },
 ];
 
 function normalizeEmail(value) {
@@ -82,6 +75,35 @@ function isTestMetadata(metadata) {
   return Boolean(metadata && typeof metadata === "object" && metadata.admin_live_test === true);
 }
 
+function ownerToolLogEntry(action, detail = {}) {
+  return {
+    at: new Date().toISOString(),
+    action,
+    ...detail,
+  };
+}
+
+function appendOwnerToolLog(metadata = {}, entry) {
+  const previous = Array.isArray(metadata.owner_tool_log) ? metadata.owner_tool_log : [];
+  return {
+    ...metadata,
+    owner_tool_log: [entry, ...previous].slice(0, 30),
+  };
+}
+
+async function appendSessionLog(trx, session, action, detail = {}) {
+  const metadata = appendOwnerToolLog(session.metadata || {}, ownerToolLogEntry(action, detail));
+  await trx("admin_live_test_sessions")
+    .where({ id: session.id })
+    .update({ metadata, updated_at: trx.fn.now() });
+  return { ...session, metadata };
+}
+
+function catalogItemForSlug(slug) {
+  const normalized = normalizeEntitlementSlug(slug);
+  return TEST_ENTITLEMENT_PRESETS.find((item) => item.slug === normalized) || null;
+}
+
 export function liveTestingOwnerEmail() {
   return normalizeEmail(process.env.ADMIN_LIVE_TEST_OWNER_EMAIL || DEFAULT_OWNER_EMAIL);
 }
@@ -93,6 +115,30 @@ export function liveTestingEnabledFor(adminEmail) {
 
 export function liveTestingConfirmation() {
   return `LIVE TEST ${liveTestingOwnerEmail()}`;
+}
+
+export function ownerEntitlementCatalog() {
+  const sections = [
+    {
+      key: "product_features",
+      title: "Product features",
+      description: "Account-level TabForge purchases. Extra Pages is a product feature, not a shortcut pack.",
+      items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "product_features"),
+    },
+    {
+      key: "shortcut_packs",
+      title: "Shortcut pack entitlements",
+      description: "Only pack slugs the current TabForge extension/store know how to unlock.",
+      items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "shortcut_packs"),
+    },
+    {
+      key: "skin_packs",
+      title: "Skin pack entitlements",
+      description: "Only the 3 purchasable skin packs. Individual theme pieces live inside Skin Studio.",
+      items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "skin_packs"),
+    },
+  ];
+  return { sections, flat: TEST_ENTITLEMENT_PRESETS };
 }
 
 async function requireOwnerUser(trx = db) {
@@ -124,9 +170,13 @@ async function ownerEntitlements(trx, owner, session) {
     const isLegacyTest = row.source === TEST_SOURCE
       && (row.source_ref === session.id || metadata.admin_live_test_session_id === session.id);
     const isOwnerGrant = row.source === OWNER_ENTITLEMENT_SOURCE;
+    const catalogItem = TEST_ENTITLEMENT_PRESETS.find((item) => item.slug === row.product_slug) || null;
     return {
       id: row.id,
       productSlug: row.product_slug,
+      label: catalogItem?.label || row.product_slug,
+      category: catalogItem?.category || "other",
+      catalogItem: Boolean(catalogItem),
       status: row.status,
       source: row.source,
       sourceRef: row.source_ref || null,
@@ -412,6 +462,7 @@ async function writeOwnerAccountEntitlement({ trx, owner, session, enabled, prod
       };
     }
 
+    const catalogItem = catalogItemForSlug(slug);
     const metadata = {
       ...(existing?.metadata || {}),
       owned: true,
@@ -419,10 +470,17 @@ async function writeOwnerAccountEntitlement({ trx, owner, session, enabled, prod
       owner_email: normalizeEmail(owner.email),
       granted_by_admin_panel: true,
       device_limits_still_enforced: true,
+      catalog_label: catalogItem?.label || slug,
+      catalog_category: catalogItem?.category || "custom",
       previous_source: existing?.source || null,
       previous_status: existing?.status || null,
       updated_at: new Date().toISOString(),
     };
+
+    if (slug === "tabforge-pages") {
+      metadata.purchased_quantity_total = Math.max(1, Number(metadata.purchased_quantity_total || 1));
+      metadata.last_quantity_purchased = Math.max(1, Number(metadata.last_quantity_purchased || 1));
+    }
 
     if (existing) {
       await trx("product_entitlements")
@@ -448,7 +506,8 @@ async function writeOwnerAccountEntitlement({ trx, owner, session, enabled, prod
         updated_at: trx.fn.now(),
       });
     }
-    return { supported: true, active: true, protectedRealEntitlement: false, source: OWNER_ENTITLEMENT_SOURCE };
+    await appendSessionLog(trx, session, "owner_entitlement_enabled", { slug, label: catalogItemForSlug(slug)?.label || slug });
+    return { supported: true, active: true, protectedRealEntitlement: false, source: OWNER_ENTITLEMENT_SOURCE, productSlug: slug };
   }
 
   if (existing && !isOwnerGrant && !isLegacyTest) {
@@ -471,7 +530,8 @@ async function writeOwnerAccountEntitlement({ trx, owner, session, enabled, prod
         updated_at: trx.fn.now(),
       });
   }
-  return { supported: true, active: false, protectedRealEntitlement: false, source: OWNER_ENTITLEMENT_SOURCE };
+  await appendSessionLog(trx, session, "owner_entitlement_disabled", { slug, label: catalogItemForSlug(slug)?.label || slug });
+  return { supported: true, active: false, protectedRealEntitlement: false, source: OWNER_ENTITLEMENT_SOURCE, productSlug: slug };
 }
 
 async function liveStateFromTransaction(trx, owner, session) {
@@ -534,8 +594,10 @@ async function liveStateFromTransaction(trx, owner, session) {
       tierRequiredPurchases: Number(row.metadata?.tier_required_purchases || 0),
       metadata: row.metadata || {},
     })),
+    entitlementCatalog: ownerEntitlementCatalog(),
     entitlementPresets: TEST_ENTITLEMENT_PRESETS,
     entitlements,
+    ownerToolLogs: Array.isArray(session.metadata?.owner_tool_log) ? session.metadata.owner_tool_log : [],
     safety: {
       ownerOnly: true,
       targetAccountFixed: true,
@@ -730,6 +792,7 @@ export async function updateLiveTestRewardStatus({ rewardId, status, note = null
     }
 
     await trx("reward_queue").where({ id: reward.id }).update(update);
+    await appendSessionLog(trx, session, "test_reward_status_changed", { rewardId: reward.id, status });
     const updatedSession = await trx("admin_live_test_sessions").where({ id: session.id }).first();
     return liveStateFromTransaction(trx, owner, updatedSession);
   });
