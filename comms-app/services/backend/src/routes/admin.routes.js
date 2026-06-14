@@ -46,6 +46,38 @@ const writeLimiter = createRateLimiter({ name: "admin-write", windowMs: 60 * 100
 
 function normalizeEmail(email) { return String(email || "").trim().toLowerCase(); }
 function normalizeSlug(slug) { return String(slug || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, ""); }
+function referralPayoutHoldDays(productSlug, explicitValue = null) {
+  const value = Number(explicitValue);
+  if (Number.isInteger(value) && value >= 0 && value <= 365) return value;
+  const envValue = Number(process.env.REFERRAL_PAYOUT_HOLD_DAYS || 10);
+  if (Number.isInteger(envValue) && envValue >= 0 && envValue <= 365) return envValue;
+  return normalizeSlug(productSlug) === "tabforge" ? 10 : 10;
+}
+function addDays(dateValue, days) {
+  const date = dateValue ? new Date(dateValue) : new Date();
+  const base = Number.isFinite(date.getTime()) ? date : new Date();
+  return new Date(base.getTime() + Number(days || 0) * 24 * 60 * 60 * 1000);
+}
+function rewardMetadata(row) { return row?.metadata && typeof row.metadata === "object" ? row.metadata : {}; }
+function isAdminLiveTestReward(row) { return Boolean(rewardMetadata(row).admin_live_test); }
+function rewardPayoutHoldInfo(row, programMap = new Map()) {
+  const meta = rewardMetadata(row);
+  const program = programMap.get(normalizeSlug(row?.product_slug));
+  const holdDays = Number(meta.payout_hold_days ?? program?.refund_hold_days ?? referralPayoutHoldDays(row?.product_slug));
+  const readyFromMeta = meta.payout_ready_at ? new Date(meta.payout_ready_at) : null;
+  const readyAt = Number.isFinite(readyFromMeta?.getTime())
+    ? readyFromMeta
+    : addDays(row?.created_at || new Date(), holdDays);
+  const complete = isAdminLiveTestReward(row) || readyAt.getTime() <= Date.now();
+  return {
+    payout_hold_days: holdDays,
+    payout_ready_at: readyAt.toISOString(),
+    payout_hold_complete: complete,
+  };
+}
+function enrichReward(row, programMap = new Map()) {
+  return { ...row, ...rewardPayoutHoldInfo(row, programMap) };
+}
 function allowedAdminEmails() { return String(process.env.ADMIN_ALLOWED_EMAILS || process.env.ADMIN_EMAIL || "zadockplant@gmail.com").split(",").map(normalizeEmail).filter(Boolean); }
 function isAllowedAdmin(email) { return allowedAdminEmails().includes(normalizeEmail(email)); }
 function sha256(value) { return crypto.createHash("sha256").update(String(value)).digest("hex"); }
@@ -204,13 +236,100 @@ adminRouter.post("/entitlements/revoke", writeLimiter, async (req, res) => {
 });
 
 adminRouter.get("/referrals", async (_req, res) => {
-  const [codes, events, programs, rewards] = await Promise.all([
-    db("referral_codes").orderBy("created_at", "desc").limit(250),
-    db("referral_events").orderBy("created_at", "desc").limit(250),
+  const [codes, rawEvents, programs, rawRewards] = await Promise.all([
+    db("referral_codes").orderBy("created_at", "desc").limit(500),
+    db("referral_events as e")
+      .leftJoin("users as referrer", "e.referrer_user_id", "referrer.id")
+      .leftJoin("users as referred", "e.referred_user_id", "referred.id")
+      .leftJoin("referral_codes as code", "e.referral_code_id", "code.id")
+      .select(
+        "e.*",
+        "referrer.email as referrer_email",
+        "referrer.cash_app_tag as referrer_cash_app_tag",
+        "referred.email as referred_email",
+        "code.code as referral_code",
+        "code.email as referral_code_email",
+        "code.cashapp_handle as referral_code_cashapp_handle"
+      )
+      .orderBy("e.created_at", "desc")
+      .limit(500),
     db("referral_programs").orderBy("product_slug", "asc"),
-    db("reward_queue").orderBy("created_at", "desc").limit(250),
+    db("reward_queue as r")
+      .leftJoin("users as owner", "r.user_id", "owner.id")
+      .select("r.*", "owner.email as account_email", "owner.cash_app_tag as account_cash_app_tag")
+      .orderBy("r.created_at", "desc")
+      .limit(500),
   ]);
-  res.json({ items: events, codes, events, programs, rewards });
+
+  const programMap = new Map(programs.map((program) => [normalizeSlug(program.product_slug), program]));
+  const rewards = rawRewards.map((row) => enrichReward(row, programMap));
+  const events = rawEvents.map((event) => {
+    const meta = rewardMetadata(event);
+    return {
+      ...event,
+      referrerEmail: event.referrer_email || event.referral_code_email || null,
+      cashAppTag: event.referrer_cash_app_tag || event.referral_code_cashapp_handle || null,
+      referredEmail: event.referred_email || meta.referred_email || meta.recipient_email || null,
+    };
+  });
+
+  const catalogMap = new Map();
+  function ensureCatalogRow(key, seed = {}) {
+    const safeKey = key || seed.referrerEmail || seed.cashAppTag || "unknown";
+    if (!catalogMap.has(safeKey)) {
+      catalogMap.set(safeKey, {
+        referrerEmail: seed.referrerEmail || null,
+        cashAppTag: seed.cashAppTag || null,
+        referralCode: seed.referralCode || null,
+        invites: 0,
+        verifiedSignups: 0,
+        qualifiedPurchases: 0,
+        refundedPurchases: 0,
+        pendingRewardCents: 0,
+        approvedRewardCents: 0,
+        paidRewardCents: 0,
+        rejectedRewardCents: 0,
+        lastActivityAt: null,
+      });
+    }
+    return catalogMap.get(safeKey);
+  }
+
+  for (const event of events) {
+    const key = event.referrer_user_id || event.referrerEmail || event.cashAppTag || event.referral_code_id;
+    const row = ensureCatalogRow(key, {
+      referrerEmail: event.referrerEmail,
+      cashAppTag: event.cashAppTag,
+      referralCode: event.referral_code,
+    });
+    row.referrerEmail ||= event.referrerEmail || null;
+    row.cashAppTag ||= event.cashAppTag || null;
+    row.referralCode ||= event.referral_code || null;
+    if (event.event_type === "invite") row.invites += 1;
+    if (event.event_type === "signup" && event.status === "verified") row.verifiedSignups += 1;
+    if (event.event_type === "purchase" && event.status === "verified") row.qualifiedPurchases += 1;
+    if (event.event_type === "purchase" && event.status === "refunded") row.refundedPurchases += 1;
+    row.lastActivityAt = row.lastActivityAt && row.lastActivityAt > event.created_at ? row.lastActivityAt : event.created_at;
+  }
+
+  for (const reward of rewards) {
+    const key = reward.user_id || reward.email || reward.cashapp_handle;
+    const row = ensureCatalogRow(key, {
+      referrerEmail: reward.email || reward.account_email || null,
+      cashAppTag: reward.cashapp_handle || reward.account_cash_app_tag || null,
+    });
+    row.referrerEmail ||= reward.email || reward.account_email || null;
+    row.cashAppTag ||= reward.cashapp_handle || reward.account_cash_app_tag || null;
+    const cents = Number(reward.reward_amount_cents || 0);
+    if (reward.status === "pending") row.pendingRewardCents += cents;
+    if (reward.status === "approved") row.approvedRewardCents += cents;
+    if (reward.status === "paid") row.paidRewardCents += cents;
+    if (reward.status === "rejected") row.rejectedRewardCents += cents;
+    row.lastActivityAt = row.lastActivityAt && row.lastActivityAt > reward.created_at ? row.lastActivityAt : reward.created_at;
+  }
+
+  const catalog = Array.from(catalogMap.values()).sort((a, b) => String(b.lastActivityAt || "").localeCompare(String(a.lastActivityAt || "")));
+  res.json({ items: events, codes, events, programs, rewards, catalog });
 });
 
 adminRouter.get("/referrals/codes", async (_req, res) => {
@@ -246,15 +365,30 @@ adminRouter.post("/referrals/programs", writeLimiter, async (req, res) => {
         { requiredPurchases: 50, rewardAmountCents: 7500 },
       ];
   const primaryTier = tiers[0];
-  const metadata = { ...(p.metadata || {}), tiers };
-  const rows = await db("referral_programs").insert({ id: crypto.randomUUID(), product_slug: normalizeSlug(p.productSlug), required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: p.refundHoldDays ?? 0, status: p.status || "active", metadata, updated_at: db.fn.now() }).onConflict("product_slug").merge({ required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: p.refundHoldDays ?? 0, status: p.status || "active", metadata, updated_at: db.fn.now() }).returning("*");
+  const holdDays = referralPayoutHoldDays(p.productSlug, p.refundHoldDays);
+  const metadata = {
+    ...(p.metadata || {}),
+    qualification: (p.metadata || {}).qualification || "verified_purchase",
+    payout_hold_days: holdDays,
+    payout_hold_reason: "Fraud/refund verification window before manual Cash App payout.",
+    tiers,
+  };
+  const rows = await db("referral_programs").insert({ id: crypto.randomUUID(), product_slug: normalizeSlug(p.productSlug), required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: holdDays, status: p.status || "active", metadata, updated_at: db.fn.now() }).onConflict("product_slug").merge({ required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: holdDays, status: p.status || "active", metadata, updated_at: db.fn.now() }).returning("*");
   await writeAdminAudit(req, { action: "referral_program.upsert", resourceType: "referral_program", resourceId: normalizeSlug(p.productSlug), afterValue: rows[0] });
   res.json({ item: rows[0] });
 });
 
 adminRouter.get("/rewards", async (_req, res) => {
-  const rows = await db("reward_queue").orderBy("created_at", "desc").limit(500);
-  res.json({ items: rows });
+  const [rows, programs] = await Promise.all([
+    db("reward_queue as r")
+      .leftJoin("users as owner", "r.user_id", "owner.id")
+      .select("r.*", "owner.email as account_email", "owner.cash_app_tag as account_cash_app_tag")
+      .orderBy("r.created_at", "desc")
+      .limit(500),
+    db("referral_programs"),
+  ]);
+  const programMap = new Map(programs.map((program) => [normalizeSlug(program.product_slug), program]));
+  res.json({ items: rows.map((row) => enrichReward(row, programMap)) });
 });
 
 async function updateRewardStatus(req, res) {
@@ -300,6 +434,17 @@ async function updateRewardStatus(req, res) {
       .where({ user_id: existing.user_id, normalized_tag: cashAppTagKey(cashAppHandle), status: "active" })
       .first();
     if (!claim) return res.status(409).json({ error: "cash_app_tag_not_owned_by_reward_user" });
+
+    const program = await db("referral_programs").where({ product_slug: existing.product_slug }).first();
+    const holdInfo = rewardPayoutHoldInfo(existing, new Map([[normalizeSlug(existing.product_slug), program]]));
+    if (!holdInfo.payout_hold_complete) {
+      return res.status(409).json({
+        error: "payout_hold_not_complete",
+        message: `Payout is still in the ${holdInfo.payout_hold_days}-day verification window.`,
+        payoutReadyAt: holdInfo.payout_ready_at,
+        payoutHoldDays: holdInfo.payout_hold_days,
+      });
+    }
   }
 
   const payoutReference = String(parsed.data.payoutReference || "").trim()

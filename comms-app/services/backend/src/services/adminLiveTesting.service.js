@@ -9,17 +9,35 @@ const MAX_LIVE_TEST_COUNT = 10000;
 const TEST_SOURCE = "admin_live_test";
 const OWNER_ENTITLEMENT_SOURCE = "admin_owner_grant";
 const TEST_ENTITLEMENT_PRESETS = [
-  { slug: "tabforge", label: "TabForge Pro" },
-  { slug: "tabforge-pages", label: "TabForge Extra Pages" },
-  { slug: "tabforge-pack-builder", label: "Builder Pack" },
-  { slug: "tabforge-pack-money", label: "Money Pack" },
-  { slug: "tabforge-pack-dev", label: "Developer Pack" },
-  { slug: "tabforge-pack-media", label: "Media Pack" },
-  { slug: "tabforge-pack-research", label: "Research Pack" },
-  { slug: "tabforge-pack-games", label: "Games Pack" },
-  { slug: "tabforge-skin-terminal", label: "Terminal Skin" },
-  { slug: "tabforge-skin-neon", label: "Neon Skin" },
-  { slug: "tabforge-skin-executive", label: "Executive Skin" },
+  { slug: "tabforge", label: "TabForge Pro", category: "core" },
+  { slug: "tabforge-pages", label: "Extra Pages", category: "core" },
+  { slug: "tabforge-pack-builder", label: "Builder Pack", category: "packs" },
+  { slug: "tabforge-pack-money", label: "Money Pack", category: "packs" },
+  { slug: "tabforge-pack-dev", label: "Developer Pack", category: "packs" },
+  { slug: "tabforge-pack-media", label: "Media Pack", category: "packs" },
+  { slug: "tabforge-pack-research", label: "Research Pack", category: "packs" },
+  { slug: "tabforge-pack-games", label: "Games Pack", category: "packs" },
+  { slug: "tabforge-pack-productivity", label: "Productivity Pack", category: "packs" },
+  { slug: "tabforge-pack-ai", label: "AI Tools Pack", category: "packs" },
+  { slug: "tabforge-pack-business", label: "Business Pack", category: "packs" },
+  { slug: "tabforge-pack-creator", label: "Creator Pack", category: "packs" },
+  { slug: "tabforge-pack-finance", label: "Finance Pack", category: "packs" },
+  { slug: "tabforge-pack-shopping", label: "Shopping Pack", category: "packs" },
+  { slug: "tabforge-pack-social", label: "Social Pack", category: "packs" },
+  { slug: "tabforge-skin-terminal", label: "Terminal Skin", category: "skins" },
+  { slug: "tabforge-skin-neon", label: "Neon Skin", category: "skins" },
+  { slug: "tabforge-skin-executive", label: "Executive Skin", category: "skins" },
+  { slug: "tabforge-skin-money-mode", label: "Money Mode Skin", category: "skins" },
+  { slug: "tabforge-skin-cyber", label: "Cyber Skin", category: "skins" },
+  { slug: "tabforge-skin-graphite", label: "Graphite Skin", category: "skins" },
+  { slug: "tabforge-skin-retro", label: "Retro Skin", category: "skins" },
+  { slug: "tabforge-skin-minimal", label: "Minimal Skin", category: "skins" },
+  { slug: "tabforge-skin-creator", label: "Creator Skin", category: "skins" },
+  { slug: "tabforge-skin-studio", label: "Studio Skin", category: "skins" },
+  { slug: "tabforge-skin-ocean", label: "Ocean Skin", category: "skins" },
+  { slug: "tabforge-skin-forest", label: "Forest Skin", category: "skins" },
+  { slug: "tabforge-skin-space", label: "Space Skin", category: "skins" },
+  { slug: "tabforge-skin-paper", label: "Paper Skin", category: "skins" },
 ];
 
 function normalizeEmail(value) {
@@ -473,10 +491,12 @@ async function liveStateFromTransaction(trx, owner, session) {
 
   const realVerifiedPurchases = await countRealVerifiedPurchases(trx, owner.id);
   const program = await getReferralProgram(PRODUCT_SLUG, trx);
+  const payoutHoldDays = Number.isInteger(Number(program?.refund_hold_days)) ? Number(program.refund_hold_days) : 10;
   const tiers = tiersFromProgram(program).map((tier) => ({
     ...tier,
     reached: realVerifiedPurchases + testQualifiedPurchases >= tier.requiredPurchases,
     remaining: Math.max(0, tier.requiredPurchases - realVerifiedPurchases - testQualifiedPurchases),
+    payoutHoldDays,
   }));
 
   return {
@@ -687,7 +707,7 @@ export async function updateLiveTestRewardStatus({ rewardId, status, note = null
 
     const update = {
       status,
-      admin_note: note || `LIVE TEST ONLY - no Cash App transfer was sent (${status}).`,
+      admin_note: note || `LIVE TEST ONLY — no Cash App transfer was sent (${status}).`,
       cashapp_handle: owner.cash_app_tag || null,
       updated_at: trx.fn.now(),
     };
@@ -774,3 +794,4 @@ export async function resetLiveTestState({ restoreCashAppTag = true } = {}) {
     return liveStateFromTransaction(trx, owner, nextSession);
   });
 }
+
