@@ -381,14 +381,12 @@ Your rewards are based on completed Pro purchases made through your link:
 
 A signup by itself does not count. The referred person must use your link and complete a ${productName} Pro purchase.
 
-Why ${productName} Pro is easy to recommend:
-- 36 organized shortcuts
-- One included Curated Pack Credit adds 36 more shortcuts
-- Easy bookmark organization
-- Simple, intuitive use
-- No popups
-- No subscriptions
-- Pay once and keep it forever
+A product people will fall in love with:
+- 36 shortcuts
+- One included collection adds 36 more shortcuts
+- Works as is, then customizes around the way they use the web
+- No popups. No subscriptions.
+- We don't collect your data. Pay once and keep it forever.
 
 Use this invitation to create your SendForge account and continue to ${productName} Pro:
 ${referralUrl}
@@ -433,20 +431,22 @@ Need help? Contact ${supportEmail()}.`;
 
           <div style="padding:0 28px 22px;">
             <div style="border-radius:20px;background:rgba(77,143,255,.12);border:1px solid rgba(77,143,255,.24);padding:20px;">
-              <h2 style="margin:0 0 8px;color:#ffffff;font-size:22px;">A product people will want to keep</h2>
+              <h2 style="margin:0 0 8px;color:#ffffff;font-size:22px;">A product people will fall in love with</h2>
               <p style="margin:0 0 14px;color:#c7d3ee;">${safeProduct} Pro turns the new-tab page into a clean, visual workspace for the sites people use every day.</p>
               <div style="display:grid;gap:9px;">
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ 36 organized shortcuts.</div>
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ One included Curated Pack Credit adds 36 more shortcuts.</div>
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ Easy bookmark organization and simple, intuitive controls.</div>
-                <div style="border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.12);color:#dce6ff;">✓ No popups. No subscriptions. Pay once and keep it forever.</div>
+                <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ 36 shortcuts.</div>
+                <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ One included collection adds 36 more shortcuts.</div>
+                <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ Works as is, then customizes around the way they use the web.</div>
+                <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ No popups. No subscriptions.</div>
+                <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ We don't collect your data. Pay once and keep it forever.</div>
               </div>
             </div>
           </div>
 
           <div style="padding:0 28px 32px;text-align:center;">
-            <p style="margin:0 0 16px;color:#aebcda;font-size:14px;">Invited by ${safeFrom}</p>
-            <a href="${safeUrl}" style="display:inline-block;padding:16px 24px;border-radius:16px;background:linear-gradient(135deg,#4d8fff,#2ce0b7);color:#061019;text-decoration:none;font-weight:950;box-shadow:0 16px 36px rgba(44,224,183,.28);">
+            <p style="display:inline-block;margin:0 0 18px;padding:8px 13px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);color:#f5f9ff;font-size:14px;font-weight:800;">Invited by <span style="color:#ffffff;font-weight:950;">${safeFrom}</span></p>
+            <br>
+            <a href="${safeUrl}" style="display:inline-block;padding:24px 36px;border-radius:18px;background:linear-gradient(135deg,#4d8fff,#2ce0b7);border:2px solid #bfffea;color:#061019;text-decoration:none;font-size:18px;font-weight:950;box-shadow:0 0 0 4px rgba(44,224,183,.20),0 18px 48px rgba(44,224,183,.42),0 0 30px rgba(77,143,255,.34);">
               Create Account &amp; See ${safeProduct} Pro
             </a>
             <p style="margin:14px 0 0;color:#98a7c7;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${safeUrl}</p>
