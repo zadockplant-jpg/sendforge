@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { db } from "../../config/db.js";
+import { log } from "../../utils/logger.js";
 
 const DEFAULT_PURCHASE_TIERS = [
   { requiredPurchases: 5, rewardAmountCents: 1000 },
@@ -14,17 +15,6 @@ const TABFORGE_PURCHASE_TIERS = [
 ];
 
 const INVITE_TTL_DAYS = 30;
-const DEFAULT_PAYOUT_HOLD_DAYS = 10;
-
-function payoutHoldDaysForProgram(program) {
-  const value = Number(program?.refund_hold_days ?? DEFAULT_PAYOUT_HOLD_DAYS);
-  if (!Number.isInteger(value) || value < 0 || value > 365) return DEFAULT_PAYOUT_HOLD_DAYS;
-  return value;
-}
-
-function addDays(date, days) {
-  return new Date(new Date(date).getTime() + Number(days || 0) * 24 * 60 * 60 * 1000);
-}
 
 export function normalizeReferralValue(value) {
   return String(value || "").trim();
@@ -306,6 +296,16 @@ async function hasTableSafe(knex, tableName) {
   }
 }
 
+async function hasColumnsSafe(knex, tableName, columns) {
+  try {
+    if (!(await knex.schema.hasTable(tableName))) return false;
+    const checks = await Promise.all(columns.map((column) => knex.schema.hasColumn(tableName, column)));
+    return checks.every(Boolean);
+  } catch {
+    return false;
+  }
+}
+
 async function findCurrentCashAppOwner(knex, normalizedKey, excludeUserId) {
   if (!normalizedKey) return null;
 
@@ -329,8 +329,24 @@ async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedL
 
   const currentKey = cashAppTagKey(user.cash_app_tag);
   const rewardQueueExists = await hasTableSafe(trx, "reward_queue");
-  const referralCodesExists = await hasTableSafe(trx, "referral_codes");
   const claimsTableExists = await hasTableSafe(trx, "cash_app_tag_claims");
+  const claimsTableReady = claimsTableExists
+    ? await hasColumnsSafe(trx, "cash_app_tag_claims", [
+        "id",
+        "user_id",
+        "normalized_tag",
+        "display_tag",
+        "status",
+        "claimed_at",
+        "retired_at",
+        "created_at",
+        "updated_at",
+      ])
+    : false;
+
+  if (normalizedKey && claimsTableExists && !claimsTableReady) {
+    throw referralServiceError("cash_app_storage_unavailable", 503);
+  }
 
   const approvedReward = enforceApprovedLock && rewardQueueExists
     ? await trx("reward_queue")
@@ -351,7 +367,7 @@ async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedL
     }
   }
 
-  if (claimsTableExists) {
+  if (claimsTableReady) {
     const activeClaim = await trx("cash_app_tag_claims")
       .where({ user_id: user.id, status: "active" })
       .forUpdate()
@@ -422,24 +438,54 @@ async function persistUserCashAppTag({ trx, userId, cashAppTag, enforceApprovedL
     .update({ cash_app_tag: normalized })
     .returning("*");
 
-  if (referralCodesExists) {
-    await trx("referral_codes")
-      .where({ user_id: user.id })
-      .update({ cashapp_handle: normalized, updated_at: trx.fn.now() });
-  }
-
-  if (rewardQueueExists) {
-    await trx("reward_queue")
-      .where({ user_id: user.id })
-      .whereIn("status", ["pending", "approved"])
-      .update({ cashapp_handle: normalized, updated_at: trx.fn.now() });
-  }
-
   return updatedUser;
 }
 
+async function syncCashAppTagToPayoutTables({ userId, cashAppTag }) {
+  const tasks = [];
+
+  if (await hasTableSafe(db, "referral_codes")) {
+    tasks.push(
+      db("referral_codes")
+        .where({ user_id: userId })
+        .update({ cashapp_handle: cashAppTag, updated_at: db.fn.now() })
+    );
+  }
+
+  if (await hasTableSafe(db, "reward_queue")) {
+    tasks.push(
+      db("reward_queue")
+        .where({ user_id: userId })
+        .whereIn("status", ["pending", "approved"])
+        .update({ cashapp_handle: cashAppTag, updated_at: db.fn.now() })
+    );
+  }
+
+  const results = await Promise.allSettled(tasks);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      log("warn", "cashapp_tag_secondary_sync_failed", {
+        userId,
+        message: String(result.reason?.message || result.reason),
+        code: result.reason?.code || null,
+      });
+    }
+  }
+}
+
 export async function updateUserCashAppTag({ userId, cashAppTag }) {
-  return db.transaction((trx) => persistUserCashAppTag({ trx, userId, cashAppTag }));
+  const updatedUser = await db.transaction((trx) =>
+    persistUserCashAppTag({ trx, userId, cashAppTag })
+  );
+
+  if (updatedUser) {
+    await syncCashAppTagToPayoutTables({
+      userId,
+      cashAppTag: updatedUser.cash_app_tag || null,
+    });
+  }
+
+  return updatedUser;
 }
 
 function normalizeTier(raw) {
@@ -494,12 +540,10 @@ export async function getReferralProgram(productSlug, trx = db) {
         required_purchases: 5,
         reward_amount_cents: 1000,
         reward_type: "cashapp_manual",
-        refund_hold_days: DEFAULT_PAYOUT_HOLD_DAYS,
+        refund_hold_days: 0,
         status: "active",
         metadata: {
           qualification: "verified_purchase",
-          payout_hold_days: DEFAULT_PAYOUT_HOLD_DAYS,
-          payout_hold_reason: "Fraud/refund verification window before manual Cash App payout.",
           tiers,
           description: isTabForge
             ? "The referrer may participate without purchasing. Only completed TabForge Pro purchases made through the referral link count: $10 at 5, $20 at 15, and $75 at 50."
@@ -528,8 +572,6 @@ async function queueRewardsForVerifiedCount({
 }) {
   const rewards = [];
   const tiers = tiersFromProgram(program);
-  const payoutHoldDays = payoutHoldDaysForProgram(program);
-  const payoutReadyAt = addDays(new Date(), payoutHoldDays).toISOString();
 
   for (const tier of tiers) {
     if (verifiedCount < tier.requiredPurchases) continue;
@@ -567,9 +609,6 @@ async function queueRewardsForVerifiedCount({
           qualification_ref: qualificationRef,
           tier_required_purchases: tier.requiredPurchases,
           verified_purchase_count: verifiedCount,
-          payout_hold_days: payoutHoldDays,
-          payout_ready_at: payoutReadyAt,
-          payout_hold_reason: "Fraud/refund verification window after qualifying Pro purchase.",
         },
         updated_at: trx.fn.now(),
       })
@@ -713,6 +752,9 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
   const slug = normalizeProductSlug(productSlug);
   const ref = normalizeReferralValue(purchaseRef);
   if (!referredUserId || !slug || !ref) return { recorded: false, reason: "missing_input" };
+  // Only a qualifying TabForge Pro purchase earns referral credit. Add-ons, pages,
+  // collections, and skin bundles remain normal purchases but never advance payout tiers.
+  if (slug !== "tabforge") return { recorded: false, reason: "not_qualifying_product" };
 
   return db.transaction(async (trx) => {
     const referredUser = await trx("users").where({ id: referredUserId }).first();

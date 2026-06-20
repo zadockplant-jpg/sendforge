@@ -33,32 +33,32 @@ const PRODUCT_CATALOG = {
   },
   "tabforge-skin-command-center": {
     slug: "tabforge-skin-command-center",
-    displayName: "TabForge Command Center Skin Bundle",
+    displayName: "TabForge Skins — Star Base",
     mode: "payment",
     unitAmountCents: 700,
     entitlementSlug: "tabforge-skin-bundle-command-center",
-    requiresEntitlement: "tabforge",
-    defaultSuccessPath: "/account/index.html",
+    singlePurchase: true,
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
     defaultCancelPath: "/store/index.html#tabforge-skins",
   },
   "tabforge-skin-creator-money": {
     slug: "tabforge-skin-creator-money",
-    displayName: "TabForge Creator + Money Skin Bundle",
+    displayName: "TabForge Skins — Creator",
     mode: "payment",
     unitAmountCents: 700,
     entitlementSlug: "tabforge-skin-bundle-creator-money",
-    requiresEntitlement: "tabforge",
-    defaultSuccessPath: "/account/index.html",
+    singlePurchase: true,
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
     defaultCancelPath: "/store/index.html#tabforge-skins",
   },
   "tabforge-skin-wild-forge": {
     slug: "tabforge-skin-wild-forge",
-    displayName: "TabForge Wild Forge Skin Bundle",
+    displayName: "TabForge Skins — Wild Forge",
     mode: "payment",
     unitAmountCents: 700,
     entitlementSlug: "tabforge-skin-bundle-wild-forge",
-    requiresEntitlement: "tabforge",
-    defaultSuccessPath: "/account/index.html",
+    singlePurchase: true,
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
     defaultCancelPath: "/store/index.html#tabforge-skins",
   },
 };
@@ -565,16 +565,6 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
-  if (product?.requiresEntitlement && product.slug !== "tabforge-page") {
-    const hasRequiredEntitlement = await userHasEntitlement(req.user.sub, product.requiresEntitlement);
-    if (!hasRequiredEntitlement) {
-      return res.status(403).json({
-        error: "pro_required",
-        message: "TabForge Pro is required before purchasing this add-on.",
-      });
-    }
-  }
-
   if (packs.length > 0) {
     const hasPro = await userHasEntitlement(req.user.sub, "tabforge");
     if (!hasPro) {
@@ -585,12 +575,13 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
-  if (product?.slug === "tabforge") {
-    const alreadyOwnsPro = await userHasEntitlement(req.user.sub, "tabforge");
-    if (alreadyOwnsPro) {
+  if (product?.singlePurchase || product?.slug === "tabforge") {
+    const entitlementSlug = product.entitlementSlug || product.slug;
+    const alreadyOwned = await userHasEntitlement(req.user.sub, entitlementSlug);
+    if (alreadyOwned) {
       return res.status(409).json({
         error: "already_owned",
-        message: "You already own TabForge Pro.",
+        message: `You already own ${product.displayName}.`,
       });
     }
   }
@@ -607,17 +598,6 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
         error: "already_owned",
         message: "You already own one or more selected packs.",
         productSlugs: ownedPackSlugs,
-      });
-    }
-  }
-
-  if (product?.entitlementSlug && product.slug !== "tabforge-page") {
-    const alreadyOwnsProduct = await userHasEntitlement(req.user.sub, product.entitlementSlug);
-    if (alreadyOwnsProduct) {
-      return res.status(409).json({
-        error: "already_owned",
-        message: "You already own this add-on.",
-        productSlug: product.entitlementSlug,
       });
     }
   }
