@@ -15,13 +15,13 @@ const PRODUCT_CATALOG = {
     displayName: "TabForge",
     mode: "payment",
     stripePriceId: env.stripePriceTabforge,
-    unitAmountCents: 500,
+    unitAmountCents: 1000,
     defaultSuccessPath: "/products/tabforge/index.html",
     defaultCancelPath: "/products/tabforge/index.html",
   },
   "tabforge-page": {
     slug: "tabforge-page",
-    displayName: "TabForge Extra Pages",
+    displayName: "TabForge Extra Pages (Retired)",
     mode: "payment",
     unitAmountCents: 500,
     entitlementSlug: "tabforge-pages",
@@ -30,6 +30,16 @@ const PRODUCT_CATALOG = {
     requiresEntitlement: "tabforge",
     defaultSuccessPath: "/products/tabforge/index.html",
     defaultCancelPath: "/products/tabforge/index.html",
+  },
+  "tabforge-collections-subscription": {
+    slug: "tabforge-collections-subscription",
+    displayName: "TabForge Collections",
+    mode: "subscription",
+    unitAmountCents: 800,
+    entitlementSlug: "tabforge-collections",
+    subscriptionPlan: "tabforge_collections",
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-collections",
+    defaultCancelPath: "/store/index.html#tabforge-collections",
   },
   "tabforge-skin-command-center": {
     slug: "tabforge-skin-command-center",
@@ -316,20 +326,25 @@ function buildLineItems({ product, packs, skins, quantity }) {
   if (product) {
     const itemQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
 
-    lineItems.push({
-      quantity: itemQuantity,
-      price_data: {
-        currency: "usd",
-        unit_amount: product.unitAmountCents,
-        product_data: {
-          name: product.displayName,
-          metadata: {
-            kind: product.slug === "tabforge-page" ? "page_quantity" : "product",
-            slug: product.slug,
-            entitlement_slug: product.entitlementSlug || product.slug,
-          },
+    const priceData = {
+      currency: "usd",
+      unit_amount: product.unitAmountCents,
+      product_data: {
+        name: product.displayName,
+        metadata: {
+          kind: product.mode === "subscription" ? "subscription" : (product.slug === "tabforge-page" ? "page_quantity" : "product"),
+          slug: product.slug,
+          entitlement_slug: product.entitlementSlug || product.slug,
         },
       },
+    };
+    if (product.mode === "subscription") {
+      priceData.recurring = { interval: "month" };
+    }
+
+    lineItems.push({
+      quantity: itemQuantity,
+      price_data: priceData,
     });
   }
 
@@ -377,7 +392,7 @@ function buildCheckoutSummary({ product, packs, skins, quantity }) {
 
   if (product) {
     const itemQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
-    const kind = product.slug === "tabforge-page" ? "page_quantity" : "product";
+    const kind = product.mode === "subscription" ? "subscription" : (product.slug === "tabforge-page" ? "page_quantity" : "product");
 
     items.push({
       kind,
@@ -579,8 +594,9 @@ billingRouter.post("/activate", requireAuth, async (req, res) => {
  * POST /v1/billing/catalog/checkout-session
  * Supports:
  * - single product checkout
- * - tabforge extra-page quantity checkout
- * - multi-pack checkout
+ * - retired extra-page requests return an explicit error
+ * - collections subscription checkout
+ * - legacy multi-pack checkout
  */
 billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) => {
   const parsed = CatalogCheckoutSchema.safeParse(req.body);
@@ -627,24 +643,10 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
   }
 
   if (product?.slug === "tabforge-page") {
-    const min = product.quantityMin || 1;
-    const max = product.quantityMax || 10;
-
-    if (!Number.isInteger(quantity) || quantity < min || quantity > max) {
-      return res.status(400).json({
-        error: "invalid_quantity",
-        min,
-        max,
-      });
-    }
-
-    const hasPro = await userHasEntitlement(req.user.sub, product.requiresEntitlement);
-    if (!hasPro) {
-      return res.status(403).json({
-        error: "pro_required",
-        message: "TabForge Pro is required before purchasing extra pages.",
-      });
-    }
+    return res.status(410).json({
+      error: "product_retired",
+      message: "Extra page purchases have been retired. TabForge Pro now includes all 10 pages.",
+    });
   }
 
   if (packs.length > 0) {
@@ -657,7 +659,7 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
-  if (product?.singlePurchase || product?.slug === "tabforge") {
+  if (product?.singlePurchase || product?.slug === "tabforge" || product?.slug === "tabforge-collections-subscription") {
     const entitlementSlug = product.entitlementSlug || product.slug;
     const alreadyOwned = await userHasEntitlement(req.user.sub, entitlementSlug);
     if (alreadyOwned) {
@@ -740,12 +742,13 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
           }
         : {
             user_id: user.id,
+            product_slug: product?.slug || "",
             fulfillment_type: "multi_entitlement_cart",
             checkout_items: serializeCheckoutItems(checkoutItems),
           };
 
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
+    const sessionConfig = {
+      mode: product?.mode === "subscription" ? "subscription" : "payment",
       customer: customerId,
       client_reference_id: user.id,
       line_items: lineItems,
@@ -758,7 +761,21 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
         checkout: "cancelled",
       }),
       metadata,
-    });
+    };
+    if (sessionConfig.mode === "subscription") {
+      sessionConfig.subscription_data = {
+        metadata: {
+          user_id: user.id,
+          product_slug: product?.slug || "",
+          entitlement_slug: product?.entitlementSlug || product?.slug || "",
+          plan: product?.subscriptionPlan || product?.slug || "subscription",
+          fulfillment_type: "subscription_entitlement",
+          checkout_items: serializeCheckoutItems(checkoutItems),
+        },
+      };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionConfig);
 
     return res.json({
       ok: true,
@@ -782,7 +799,7 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
 
 /**
  * POST /v1/billing/catalog/redeem-included-pack
- * Redeems the one curated-pack credit included with TabForge Pro.
+ * Legacy endpoint for redeeming old included-pack credits.
  */
 billingRouter.post("/catalog/redeem-included-pack", requireAuth, async (req, res) => {
   const parsed = IncludedPackRedeemSchema.safeParse(req.body || {});

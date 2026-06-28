@@ -36,6 +36,7 @@ app.use(
 
 app.use(
   express.json({
+    limit: "5mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
@@ -66,6 +67,17 @@ app.use("/v1/blasts/send", blastsSendRouter);
 // ----- WEBHOOKS -----
 app.use("/v1/webhooks", webhooksRouter);
 app.use("/v1/webhooks/stripe", stripeWebhooksRouter);
+
+app.use((err, _req, res, next) => {
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({
+      error: "payload_too_large",
+      message:
+        "Saved TabForge layouts cannot include large note/image data. Update TabForge and export notes separately.",
+    });
+  }
+  return next(err);
+});
 
 app.get("/", (_req, res) => {
   res.json({

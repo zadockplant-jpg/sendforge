@@ -137,9 +137,11 @@ Verify your email to finish creating your account and continue to TabForge Pro.
 Once verified, your account also includes a personal referral link. You do not have to purchase TabForge to participate as a referrer. A referral counts only when someone uses your link and completes a TabForge Pro purchase.
 
 Referral payouts:
-- 5 qualified Pro purchases = $10
-- 15 qualified Pro purchases = $20
-- 50 qualified Pro purchases = $75
+- 5 qualified Pro purchases = $17
+- 15 qualified Pro purchases = $35
+- 25 qualified Pro purchases = $40
+- 50 qualified Pro purchases = $150
+- Each additional 25 qualified Pro purchases after 50 = $150
 
 Verify your email:
 ${verifyUrl}
@@ -159,8 +161,8 @@ If you did not create this account, ignore this email.`;
           </div>
           <div style="padding:0 26px 22px;">
             <div style="border:1px solid rgba(44,224,183,.25);border-radius:16px;padding:15px;background:rgba(44,224,183,.08);color:#dce6ff;margin-bottom:12px;">
-              <strong style="display:block;color:#ffffff;font-size:18px;margin-bottom:5px;">Earn real Cash App payouts</strong>
-              You do not have to purchase to share your own link. A referral qualifies only when the person using your link completes a TabForge Pro purchase: 5 = $10, 15 = $20, 50 = $75.
+              <strong style="display:block;color:#ffffff;font-size:18px;margin-bottom:5px;">Earn Cash App payouts</strong>
+              You do not have to purchase to share your own link. A referral qualifies only when the person using your link completes a TabForge Pro purchase: 5 = $17, 15 = $35, 25 = $40, 50 = $150, then $150 for each additional 25.
             </div>
             <div style="display:grid;gap:10px;">
               <div style="border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.03);color:#dce6ff;">✓ Pro unlocks 36 organized shortcuts.</div>
@@ -366,7 +368,7 @@ export async function sendReferralInviteEmail({ to, fromEmail, referralUrl, prod
   const safeProduct = escapeHtml(productName);
   const safeFrom = escapeHtml(referrerEmail || "a TabForge user");
   const safeUrl = escapeHtml(referralUrl);
-  const subject = `Earn $10 when 5 friends buy ${productName} Pro`;
+  const subject = `Earn $17 when 5 friends buy ${productName} Pro`;
 
   const text = `Get paid to share ${productName} Pro
 
@@ -375,9 +377,11 @@ ${referrerEmail || "A TabForge user"} invited you to check out ${productName} Pr
 Create your SendForge account and you will get your own personal referral link. You do not have to purchase ${productName} to participate in the referral program.
 
 Your rewards are based on completed Pro purchases made through your link:
-- 5 qualified Pro purchases = $10 to your Cash App
-- 15 qualified Pro purchases = $20 to your Cash App
-- 50 qualified Pro purchases = $75 to your Cash App
+- 5 qualified Pro purchases = $17 to your Cash App
+- 15 qualified Pro purchases = $35 to your Cash App
+- 25 qualified Pro purchases = $40 to your Cash App
+- 50 qualified Pro purchases = $150 to your Cash App
+- Each additional 25 qualified Pro purchases after 50 = $150 to your Cash App
 
 A signup by itself does not count. The referred person must use your link and complete a ${productName} Pro purchase.
 
@@ -400,10 +404,10 @@ Need help? Contact ${supportEmail()}.`;
         <div style="border:1px solid rgba(44,224,183,.36);border-radius:28px;background:radial-gradient(circle at top left,rgba(44,224,183,.22),transparent 36%),radial-gradient(circle at top right,rgba(77,143,255,.20),transparent 38%),linear-gradient(135deg,#0b1220,#081019 58%,#07120f);box-shadow:0 30px 90px rgba(0,0,0,.45);overflow:hidden;">
           <div style="padding:34px 28px 22px;text-align:center;">
             <div style="display:inline-block;padding:8px 13px;border-radius:999px;background:rgba(44,224,183,.14);border:1px solid rgba(44,224,183,.38);color:#8ff7df;font-size:12px;font-weight:900;letter-spacing:.10em;text-transform:uppercase;">
-              Real Cash App rewards
+              Cash App rewards
             </div>
             <h1 style="margin:18px 0 10px;font-size:40px;line-height:1.04;color:#ffffff;letter-spacing:-.035em;">
-              Earn $10 when 5 friends buy ${safeProduct} Pro.
+              Earn $17 when 5 friends buy ${safeProduct} Pro.
             </h1>
             <p style="margin:0 auto;max-width:570px;color:#c7d3ee;font-size:18px;">
               Create a SendForge account, get your personal referral link, and start sharing. You do not have to buy ${safeProduct} to participate.
@@ -415,14 +419,15 @@ Need help? Contact ${supportEmail()}.`;
               <h2 style="margin:0 0 12px;color:#ffffff;font-size:23px;text-align:center;">Simple rewards. Real money.</h2>
               <div style="display:grid;gap:9px;">
                 <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">1.</strong> Create your SendForge account and get your referral link.</div>
-                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">2.</strong> Share it with people who would actually use ${safeProduct} Pro.</div>
+                <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">2.</strong> Share your referral link with people who may want ${safeProduct} Pro.</div>
                 <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">3.</strong> Their completed Pro purchases count toward your Cash App payouts.</div>
               </div>
               <table role="presentation" width="100%" cellspacing="8" cellpadding="0" style="margin-top:14px;border-collapse:separate;">
                 <tr>
-                  <td style="width:33.33%;border:1px solid rgba(44,224,183,.30);border-radius:14px;padding:12px 8px;background:rgba(44,224,183,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">5</strong><span style="font-size:12px;color:#aeeedc;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$10</strong></td>
-                  <td style="width:33.33%;border:1px solid rgba(77,143,255,.30);border-radius:14px;padding:12px 8px;background:rgba(77,143,255,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">15</strong><span style="font-size:12px;color:#b9ccff;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$20</strong></td>
-                  <td style="width:33.33%;border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:12px 8px;background:rgba(255,255,255,.06);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">50</strong><span style="font-size:12px;color:#dce6ff;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$75</strong></td>
+                  <td style="width:25%;border:1px solid rgba(44,224,183,.30);border-radius:14px;padding:12px 8px;background:rgba(44,224,183,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">5</strong><span style="font-size:12px;color:#aeeedc;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$17</strong></td>
+                  <td style="width:25%;border:1px solid rgba(77,143,255,.30);border-radius:14px;padding:12px 8px;background:rgba(77,143,255,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">15</strong><span style="font-size:12px;color:#b9ccff;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$35</strong></td>
+                  <td style="width:25%;border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:12px 8px;background:rgba(255,255,255,.06);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">25</strong><span style="font-size:12px;color:#dce6ff;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$40</strong></td>
+                  <td style="width:25%;border:1px solid rgba(255,176,50,.30);border-radius:14px;padding:12px 8px;background:rgba(255,176,50,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">50</strong><span style="font-size:12px;color:#ffe4b5;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$150</strong></td>
                 </tr>
               </table>
               <p style="margin:14px 0 0;color:#ffffff;font-size:15px;font-weight:800;text-align:center;">The referrer does not need to purchase. A referral qualifies only when the referred person buys ${safeProduct} Pro.</p>

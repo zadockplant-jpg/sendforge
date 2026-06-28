@@ -10,7 +10,7 @@ import {
   createReferralInvite,
   ensureReferralCodeForUser,
   resolveReferralInviteToken,
-  tiersFromProgram,
+  tiersForVerifiedCount,
   updateUserCashAppTag,
 } from "../services/referrals/referral.service.js";
 import { sendReferralInviteEmail } from "../services/email.service.js";
@@ -228,9 +228,10 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
     const verifiedPurchases = Number(verifiedPurchaseCountRow?.count || 0);
 
     const programs = programRows.map((program) => {
-      const tiers = tiersFromProgram(program).map((tier) => ({
+      const tiers = tiersForVerifiedCount(program, verifiedPurchases).map((tier) => ({
         requiredPurchases: tier.requiredPurchases,
         rewardAmountCents: tier.rewardAmountCents,
+        recurring: Boolean(tier.recurring),
         reached: verifiedPurchases >= tier.requiredPurchases,
         remaining: Math.max(0, tier.requiredPurchases - verifiedPurchases),
       }));
@@ -249,9 +250,10 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
     });
 
     const fallbackTiers = [
-      { requiredPurchases: 5, rewardAmountCents: 1000, reached: verifiedPurchases >= 5, remaining: Math.max(0, 5 - verifiedPurchases) },
-      { requiredPurchases: 15, rewardAmountCents: 2000, reached: verifiedPurchases >= 15, remaining: Math.max(0, 15 - verifiedPurchases) },
-      { requiredPurchases: 50, rewardAmountCents: 7500, reached: verifiedPurchases >= 50, remaining: Math.max(0, 50 - verifiedPurchases) },
+      { requiredPurchases: 5, rewardAmountCents: 1700, reached: verifiedPurchases >= 5, remaining: Math.max(0, 5 - verifiedPurchases) },
+      { requiredPurchases: 15, rewardAmountCents: 3500, reached: verifiedPurchases >= 15, remaining: Math.max(0, 15 - verifiedPurchases) },
+      { requiredPurchases: 25, rewardAmountCents: 4000, reached: verifiedPurchases >= 25, remaining: Math.max(0, 25 - verifiedPurchases) },
+      { requiredPurchases: 50, rewardAmountCents: 15000, reached: verifiedPurchases >= 50, remaining: Math.max(0, 50 - verifiedPurchases) },
     ];
 
     return res.json({
@@ -269,7 +271,7 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
       rule: {
         productSlug: "tabforge",
         requiredPurchases: 5,
-        rewardAmountCents: 1000,
+        rewardAmountCents: 1700,
         qualification: "verified_purchase",
         referrerPurchaseRequired: false,
         referredPurchaseRequired: true,

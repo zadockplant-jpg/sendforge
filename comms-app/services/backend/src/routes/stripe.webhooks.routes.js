@@ -28,6 +28,19 @@ function normalizeSlug(slug) {
 function isReferralQualifyingPurchase(entitlementSlug) {
   return normalizeSlug(entitlementSlug) === "tabforge";
 }
+const TABFORGE_COLLECTION_ENTITLEMENTS = [
+  "tabforge-collections",
+  "tabforge-pack-builder",
+  "tabforge-pack-money",
+  "tabforge-pack-dev",
+  "tabforge-pack-media",
+  "tabforge-pack-research",
+];
+
+function isCollectionsEntitlement(entitlementSlug) {
+  return TABFORGE_COLLECTION_ENTITLEMENTS.includes(normalizeSlug(entitlementSlug));
+}
+
 
 function parseCheckoutItems(raw) {
   if (!raw) return [];
@@ -58,6 +71,42 @@ async function attachStripeCustomerToUser(userId, customerId) {
     .where({ id: userId })
     .update({
       stripe_customer_id: String(customerId),
+    });
+}
+
+
+async function syncTabForgeCollectionsSubscriptionEntitlements({ userId, subscriptionId, status, sourceRef }) {
+  if (!userId || !subscriptionId) return;
+  const active = ["active", "trialing"].includes(String(status || "").toLowerCase());
+  const ref = sourceRef || `subscription:${subscriptionId}:tabforge-collections`;
+
+  if (active) {
+    for (const productSlug of TABFORGE_COLLECTION_ENTITLEMENTS) {
+      await grantProductEntitlement({
+        userId,
+        productSlug,
+        source: "stripe_subscription",
+        sourceRef: ref,
+        metadata: {
+          subscription_id: String(subscriptionId),
+          collection_subscription: true,
+          grants_all_current_collections: true,
+        },
+      });
+    }
+    return;
+  }
+
+  await db("product_entitlements")
+    .where({ user_id: userId, source_ref: ref })
+    .whereIn("product_slug", TABFORGE_COLLECTION_ENTITLEMENTS)
+    .update({
+      status: "revoked",
+      metadata: db.raw("coalesce(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+        collection_subscription_canceled_at: new Date().toISOString(),
+        subscription_status: String(status || "canceled"),
+      })]),
+      updated_at: db.fn.now(),
     });
 }
 
@@ -105,20 +154,42 @@ async function upsertStripeSubscription(sub) {
     await db("subscriptions")
       .where({ id: existing.id })
       .update(payload);
-    return;
+  } else {
+    await db("subscriptions").insert({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      provider: "stripe",
+      ...payload,
+    });
   }
 
-  await db("subscriptions").insert({
-    id: crypto.randomUUID(),
-    user_id: userId,
-    provider: "stripe",
-    ...payload,
-  });
+  const productSlug = normalizeSlug(sub.metadata?.product_slug || sub.metadata?.entitlement_slug || "");
+  const checkoutItems = parseCheckoutItems(sub.metadata?.checkout_items);
+  const includesCollections =
+    productSlug === "tabforge-collections-subscription" ||
+    productSlug === "tabforge-collections" ||
+    checkoutItems.some((item) => isCollectionsEntitlement(item?.entitlementSlug || item?.slug));
+
+  if (includesCollections) {
+    await syncTabForgeCollectionsSubscriptionEntitlements({
+      userId,
+      subscriptionId: sub.id,
+      status: payload.status,
+      sourceRef: `subscription:${sub.id}:tabforge-collections`,
+    });
+  }
 }
 
 async function markStripeSubscriptionCanceled(sub) {
   const providerSubscriptionId = String(sub.id || "");
   if (!providerSubscriptionId) return;
+
+  const existing = await db("subscriptions")
+    .where({
+      provider: "stripe",
+      provider_subscription_id: providerSubscriptionId,
+    })
+    .first();
 
   await db("subscriptions")
     .where({
@@ -130,6 +201,16 @@ async function markStripeSubscriptionCanceled(sub) {
       raw: sub,
       updated_at: db.fn.now(),
     });
+
+  const userId = existing?.user_id || (await findUserIdFromStripeCustomer(sub.customer));
+  if (userId) {
+    await syncTabForgeCollectionsSubscriptionEntitlements({
+      userId,
+      subscriptionId: providerSubscriptionId,
+      status: "canceled",
+      sourceRef: `subscription:${providerSubscriptionId}:tabforge-collections`,
+    });
+  }
 }
 
 async function getExistingEntitlement(userId, productSlug) {
@@ -155,6 +236,28 @@ async function grantCheckoutEntitlements({
     const entitlementSlug = normalizeSlug(item?.entitlementSlug || slug);
 
     if (!entitlementSlug) continue;
+
+    if (isCollectionsEntitlement(entitlementSlug)) {
+      for (const collectionSlug of TABFORGE_COLLECTION_ENTITLEMENTS) {
+        await grantProductEntitlement({
+          userId,
+          productSlug: collectionSlug,
+          source: "stripe_subscription",
+          sourceRef: sourceRef || `subscription:${checkoutSessionId}:tabforge-collections`,
+          metadata: {
+            checkout_session_id: checkoutSessionId,
+            customer_id: customerId || null,
+            payment_intent: paymentIntent || null,
+            checkout_item_kind: kind || "subscription",
+            checkout_item_slug: slug || entitlementSlug,
+            checkout_item_display_name: item?.displayName || "TabForge Collections",
+            collection_subscription: true,
+            grants_all_current_collections: true,
+          },
+        });
+      }
+      continue;
+    }
 
     if (entitlementSlug === "tabforge-skin-bundle-all") {
       for (const skinEntitlementSlug of [
@@ -237,21 +340,8 @@ async function grantCheckoutEntitlements({
       },
     });
 
-    if (entitlementSlug === "tabforge") {
-      await grantProductEntitlement({
-        userId,
-        productSlug: "tabforge-included-pack-credit",
-        source: "stripe",
-        sourceRef: `${sourceRef}:included-pack-credit`,
-        metadata: {
-          checkout_session_id: checkoutSessionId,
-          customer_id: customerId || null,
-          payment_intent: paymentIntent || null,
-          included_with: "tabforge",
-          redeemable_for: "tabforge-pack-*",
-        },
-      });
-    }
+    // TabForge Pro now includes all 10 pages. Collections are a separate subscription,
+    // so new Pro purchases no longer grant an included collection credit.
 
     if (isReferralQualifyingPurchase(entitlementSlug)) {
       await recordReferralPurchase({
@@ -282,9 +372,14 @@ async function handleCheckoutSessionCompleted(session) {
     await attachStripeCustomerToUser(userId, session.customer);
   }
 
-  const sourceRef = String(session.payment_intent || session.id || "");
   const fulfillmentType = String(session.metadata?.fulfillment_type || "");
   const checkoutItems = parseCheckoutItems(session.metadata?.checkout_items);
+  const checkoutIncludesCollections = checkoutItems.some((item) => isCollectionsEntitlement(item?.entitlementSlug || item?.slug));
+  const sourceRef = String(
+    session.subscription && checkoutIncludesCollections
+      ? `subscription:${session.subscription}:tabforge-collections`
+      : (session.payment_intent || session.subscription || session.id || "")
+  );
 
   if (fulfillmentType === "inmate_records_merch_order") {
     const order = await markInmateRecordsOrderPaidFromStripe(session);

@@ -1,7 +1,7 @@
 import crypto from "crypto";
 
 import { db } from "../config/db.js";
-import { ensureReferralCodeForUser, getReferralProgram, tiersFromProgram, updateUserCashAppTag } from "./referrals/referral.service.js";
+import { ensureReferralCodeForUser, getReferralProgram, tiersForVerifiedCount, updateUserCashAppTag } from "./referrals/referral.service.js";
 
 const DEFAULT_OWNER_EMAIL = "zadockplant@gmail.com";
 const PRODUCT_SLUG = "tabforge";
@@ -396,7 +396,7 @@ async function reconcileTestRewards({ trx, owner, session, referralCode }) {
   const testVerifiedPurchases = await countTestEvents(trx, owner.id, session.id, "purchase", "verified");
   const effectiveVerifiedPurchases = realVerifiedPurchases + testVerifiedPurchases;
   const program = await getReferralProgram(PRODUCT_SLUG, trx);
-  const tiers = tiersFromProgram(program);
+  const tiers = tiersForVerifiedCount(program, effectiveVerifiedPurchases);
   const existingTestRewards = await testRewards(trx, owner.id, session.id);
 
   const realRewards = await trx("reward_queue")
@@ -566,7 +566,7 @@ async function liveStateFromTransaction(trx, owner, session) {
   const realVerifiedPurchases = await countRealVerifiedPurchases(trx, owner.id);
   const program = await getReferralProgram(PRODUCT_SLUG, trx);
   const payoutHoldDays = Number.isInteger(Number(program?.refund_hold_days)) ? Number(program.refund_hold_days) : 10;
-  const tiers = tiersFromProgram(program).map((tier) => ({
+  const tiers = tiersForVerifiedCount(program, realVerifiedPurchases + testQualifiedPurchases).map((tier) => ({
     ...tier,
     reached: realVerifiedPurchases + testQualifiedPurchases >= tier.requiredPurchases,
     remaining: Math.max(0, tier.requiredPurchases - realVerifiedPurchases - testQualifiedPurchases),

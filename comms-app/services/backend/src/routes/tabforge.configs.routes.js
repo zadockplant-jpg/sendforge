@@ -31,6 +31,34 @@ const SnapshotUpdateSchema = z
     message: "name_or_payload_required",
   });
 
+const EMPTY_NOTES_SHELL = Object.freeze({
+  reminders: "",
+  calendar: "",
+  bills: "",
+  goals: "",
+  floatingNotes: [],
+});
+
+function sanitizeTabForgeLayoutPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+
+  const cleaned = { ...payload };
+
+  // TabForge saved configurations are layout/config snapshots only. Notes can
+  // contain pasted images and must stay in extension local storage or the
+  // explicit notes export flow, never in cloud layout saves.
+  cleaned.notes = { ...EMPTY_NOTES_SHELL };
+  cleaned.noteDataExcluded = true;
+
+  delete cleaned.floatingNotes;
+  delete cleaned.noteImages;
+  delete cleaned.imageNotes;
+
+  return cleaned;
+}
+
 function normalizeName(name) {
   return String(name || "").trim();
 }
@@ -123,7 +151,7 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
         await db("tabforge_saved_configs")
           .where({ id: existing.id, user_id: req.user.sub })
           .update({
-            payload: parsed.payload,
+            payload: sanitizeTabForgeLayoutPayload(parsed.payload),
             updated_at: db.fn.now(),
           });
 
@@ -145,7 +173,7 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
       id,
       user_id: req.user.sub,
       name,
-      payload: parsed.payload,
+      payload: sanitizeTabForgeLayoutPayload(parsed.payload),
       created_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
@@ -202,7 +230,7 @@ tabforgeConfigsRouter.put("/:id", async (req, res) => {
     };
 
     if (parsed.payload) {
-      updates.payload = parsed.payload;
+      updates.payload = sanitizeTabForgeLayoutPayload(parsed.payload);
     }
 
     await db("tabforge_saved_configs")

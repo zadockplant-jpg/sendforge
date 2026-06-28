@@ -374,9 +374,10 @@ adminRouter.post("/referrals/programs", writeLimiter, async (req, res) => {
   const tiers = Array.isArray(p.tiers) && p.tiers.length
     ? p.tiers
     : [
-        { requiredPurchases: p.requiredPurchases || 5, rewardAmountCents: p.rewardAmountCents ?? 1000 },
-        { requiredPurchases: 15, rewardAmountCents: 2000 },
-        { requiredPurchases: 50, rewardAmountCents: 7500 },
+        { requiredPurchases: p.requiredPurchases || 5, rewardAmountCents: p.rewardAmountCents ?? 1700 },
+        { requiredPurchases: 15, rewardAmountCents: 3500 },
+        { requiredPurchases: 25, rewardAmountCents: 4000 },
+        { requiredPurchases: 50, rewardAmountCents: 15000 },
       ];
   const primaryTier = tiers[0];
   const holdDays = referralPayoutHoldDays(p.productSlug, p.refundHoldDays);

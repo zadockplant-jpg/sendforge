@@ -3,16 +3,24 @@ import { db } from "../../config/db.js";
 import { log } from "../../utils/logger.js";
 
 const DEFAULT_PURCHASE_TIERS = [
-  { requiredPurchases: 5, rewardAmountCents: 1000 },
-  { requiredPurchases: 15, rewardAmountCents: 2000 },
-  { requiredPurchases: 50, rewardAmountCents: 7500 },
+  { requiredPurchases: 5, rewardAmountCents: 1700 },
+  { requiredPurchases: 15, rewardAmountCents: 3500 },
+  { requiredPurchases: 25, rewardAmountCents: 4000 },
+  { requiredPurchases: 50, rewardAmountCents: 15000 },
 ];
 
 const TABFORGE_PURCHASE_TIERS = [
-  { requiredPurchases: 5, rewardAmountCents: 1000 },
-  { requiredPurchases: 15, rewardAmountCents: 2000 },
-  { requiredPurchases: 50, rewardAmountCents: 7500 },
+  { requiredPurchases: 5, rewardAmountCents: 1700 },
+  { requiredPurchases: 15, rewardAmountCents: 3500 },
+  { requiredPurchases: 25, rewardAmountCents: 4000 },
+  { requiredPurchases: 50, rewardAmountCents: 15000 },
 ];
+
+const TABFORGE_RECURRING_PURCHASE_TIER = {
+  startAfterPurchases: 50,
+  everyPurchases: 25,
+  rewardAmountCents: 15000,
+};
 
 const INVITE_TTL_DAYS = 30;
 
@@ -524,6 +532,49 @@ export function tiersFromProgram(program) {
     .sort((a, b) => a.requiredPurchases - b.requiredPurchases);
 }
 
+function recurringTierFromProgram(program) {
+  const slug = normalizeProductSlug(program?.product_slug);
+  const meta = program?.metadata && typeof program.metadata === "object" ? program.metadata : {};
+  const raw = meta.recurringTier && typeof meta.recurringTier === "object" ? meta.recurringTier : null;
+  const fallback = slug === "tabforge" ? TABFORGE_RECURRING_PURCHASE_TIER : null;
+  const source = raw || fallback;
+  if (!source) return null;
+
+  const startAfterPurchases = Number(source.startAfterPurchases ?? source.start_after_purchases ?? source.afterPurchases ?? 0);
+  const everyPurchases = Number(source.everyPurchases ?? source.every_purchases ?? source.intervalPurchases ?? 0);
+  const rewardAmountCents = Number(source.rewardAmountCents ?? source.reward_amount_cents ?? 0);
+  if (!Number.isInteger(startAfterPurchases) || startAfterPurchases <= 0) return null;
+  if (!Number.isInteger(everyPurchases) || everyPurchases <= 0) return null;
+  if (!Number.isInteger(rewardAmountCents) || rewardAmountCents <= 0) return null;
+  return { startAfterPurchases, everyPurchases, rewardAmountCents };
+}
+
+export function tiersForVerifiedCount(program, verifiedCount = 0) {
+  const fixedTiers = tiersFromProgram(program);
+  const count = Math.max(0, Number(verifiedCount || 0));
+  const recurring = recurringTierFromProgram(program);
+  const tiers = [...fixedTiers];
+
+  if (recurring && count >= recurring.startAfterPurchases) {
+    const maxRequiredPurchases = count + recurring.everyPurchases;
+    for (
+      let requiredPurchases = recurring.startAfterPurchases + recurring.everyPurchases;
+      requiredPurchases <= maxRequiredPurchases;
+      requiredPurchases += recurring.everyPurchases
+    ) {
+      if (!tiers.some((tier) => Number(tier.requiredPurchases) === requiredPurchases)) {
+        tiers.push({
+          requiredPurchases,
+          rewardAmountCents: recurring.rewardAmountCents,
+          recurring: true,
+        });
+      }
+    }
+  }
+
+  return tiers.sort((a, b) => a.requiredPurchases - b.requiredPurchases);
+}
+
 export async function getReferralProgram(productSlug, trx = db) {
   const slug = normalizeProductSlug(productSlug);
   let program = await trx("referral_programs")
@@ -538,15 +589,16 @@ export async function getReferralProgram(productSlug, trx = db) {
         id: crypto.randomUUID(),
         product_slug: slug,
         required_purchases: 5,
-        reward_amount_cents: 1000,
+        reward_amount_cents: 1700,
         reward_type: "cashapp_manual",
         refund_hold_days: 0,
         status: "active",
         metadata: {
           qualification: "verified_purchase",
           tiers,
+          recurringTier: isTabForge ? TABFORGE_RECURRING_PURCHASE_TIER : null,
           description: isTabForge
-            ? "The referrer may participate without purchasing. Only completed TabForge Pro purchases made through the referral link count: $10 at 5, $20 at 15, and $75 at 50."
+            ? "The referrer may participate without purchasing. Only completed TabForge Pro purchases made through the referral link count: $17 at 5, $35 at 15, $40 at 25, $150 at 50, then $150 for each additional 25 qualified purchases."
             : "Default manual Cash App purchase referral tiers.",
         },
         updated_at: trx.fn.now(),
@@ -571,7 +623,7 @@ async function queueRewardsForVerifiedCount({
   qualificationRef,
 }) {
   const rewards = [];
-  const tiers = tiersFromProgram(program);
+  const tiers = tiersForVerifiedCount(program, verifiedCount);
 
   for (const tier of tiers) {
     if (verifiedCount < tier.requiredPurchases) continue;
