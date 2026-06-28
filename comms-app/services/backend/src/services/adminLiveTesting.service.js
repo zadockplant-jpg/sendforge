@@ -23,12 +23,27 @@ const TEST_ENTITLEMENT_PRESETS = [
   { slug: "tabforge-pack-media", label: "Media Pack", category: "shortcut_packs", description: "Music, video, editing, and publishing." },
   { slug: "tabforge-pack-research", label: "Research Pack", category: "shortcut_packs", description: "AI, search, notes, and reference links." },
 
-  // Skin access is sold as three purchasable skin options right now. Individual
-  // layout/font/theme pieces stay inside the extension Skin Studio.
-  { slug: "tabforge-skin-terminal", label: "Terminal Skin Pack", category: "skin_packs", description: "Terminal/Hacker skin option." },
-  { slug: "tabforge-skin-neon", label: "Neon Skin Pack", category: "skin_packs", description: "Neon/Cyber skin option." },
-  { slug: "tabforge-skin-executive", label: "Executive Skin Pack", category: "skin_packs", description: "Executive/Clean skin option." },
+  // Skin access is sold as three purchasable bundles. Keep these slugs aligned
+  // with TabForge extension/store unlock logic. Legacy admin slugs are normalized
+  // below so older rows still resolve to the current bundles.
+  { slug: "tabforge-skin-bundle-command-center", label: "Star Base", category: "skin_packs", description: "Seven TabForge workspace skins." },
+  { slug: "tabforge-skin-bundle-creator-money", label: "Creator", category: "skin_packs", description: "Seven TabForge workspace skins." },
+  { slug: "tabforge-skin-bundle-wild-forge", label: "Wild Forge", category: "skin_packs", description: "Seven TabForge workspace skins." },
 ];
+
+const LEGACY_SKIN_ENTITLEMENT_ALIASES = Object.freeze({
+  "tabforge-skin-terminal": "tabforge-skin-bundle-command-center",
+  "tabforge-skin-neon": "tabforge-skin-bundle-creator-money",
+  "tabforge-skin-executive": "tabforge-skin-bundle-wild-forge",
+  "tabforge-skin-command-center": "tabforge-skin-bundle-command-center",
+  "tabforge-skin-creator-money": "tabforge-skin-bundle-creator-money",
+  "tabforge-skin-wild-forge": "tabforge-skin-bundle-wild-forge",
+});
+
+function canonicalEntitlementSlug(value) {
+  const slug = String(value || "").trim().toLowerCase();
+  return LEGACY_SKIN_ENTITLEMENT_ALIASES[slug] || slug;
+}
 
 function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
@@ -46,7 +61,7 @@ function asCount(value) {
 }
 
 function normalizeEntitlementSlug(value) {
-  const slug = String(value || "").trim().toLowerCase();
+  const slug = canonicalEntitlementSlug(value);
   if (!/^[a-z0-9][a-z0-9-]{1,99}$/.test(slug)) {
     const err = new Error("invalid_entitlement_slug");
     err.code = "invalid_entitlement_slug";
@@ -167,14 +182,16 @@ async function ownerEntitlements(trx, owner, session) {
     .orderBy("product_slug", "asc");
   return rows.map((row) => {
     const metadata = row.metadata || {};
+    const canonicalSlug = canonicalEntitlementSlug(row.product_slug);
     const isLegacyTest = row.source === TEST_SOURCE
       && (row.source_ref === session.id || metadata.admin_live_test_session_id === session.id);
     const isOwnerGrant = row.source === OWNER_ENTITLEMENT_SOURCE;
-    const catalogItem = TEST_ENTITLEMENT_PRESETS.find((item) => item.slug === row.product_slug) || null;
+    const catalogItem = TEST_ENTITLEMENT_PRESETS.find((item) => item.slug === canonicalSlug) || null;
     return {
       id: row.id,
-      productSlug: row.product_slug,
-      label: catalogItem?.label || row.product_slug,
+      productSlug: canonicalSlug,
+      rawProductSlug: row.product_slug,
+      label: catalogItem?.label || canonicalSlug,
       category: catalogItem?.category || "other",
       catalogItem: Boolean(catalogItem),
       status: row.status,

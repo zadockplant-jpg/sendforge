@@ -3,10 +3,10 @@ import crypto from "crypto";
 const SKIN_BUNDLE_PRODUCTS = [
   {
     slug: "tabforge-skin-command-center",
-    name: "TabForge Command Center Skin Bundle",
+    name: "TabForge Skins — Star Base",
     product_line: "tabforge",
     product_type: "extension_add_on",
-    description: "Seven premium TabForge skins for neon, gaming, terminal, blueprint, ice, solar, and carbon command-center layouts.",
+    description: "Seven TabForge workspace skins in the Star Base bundle.",
     price_cents: 700,
     currency: "usd",
     entitlement_slug: "tabforge-skin-bundle-command-center",
@@ -15,6 +15,7 @@ const SKIN_BUNDLE_PRODUCTS = [
     metadata: {
       bundle_id: "command-center",
       bundle_size: 7,
+      display_name: "Star Base",
       requires_entitlement: "tabforge",
       skins: [
         "Neon CyberForge",
@@ -29,10 +30,10 @@ const SKIN_BUNDLE_PRODUCTS = [
   },
   {
     slug: "tabforge-skin-creator-money",
-    name: "TabForge Creator + Money Skin Bundle",
+    name: "TabForge Skins — Creator",
     product_line: "tabforge",
     product_type: "extension_add_on",
-    description: "Seven premium TabForge skins for creators, finance, focus, luxury, cloud glass, vaporwave, and studio workflows.",
+    description: "Seven TabForge workspace skins in the Creator bundle.",
     price_cents: 700,
     currency: "usd",
     entitlement_slug: "tabforge-skin-bundle-creator-money",
@@ -55,10 +56,10 @@ const SKIN_BUNDLE_PRODUCTS = [
   },
   {
     slug: "tabforge-skin-wild-forge",
-    name: "TabForge Wild Forge Skin Bundle",
+    name: "TabForge Skins — Wild Forge",
     product_line: "tabforge",
     product_type: "extension_add_on",
-    description: "Seven premium TabForge skins for psychedelic, jungle, woodsy, earth, ocean, desert, and aurora visual workspaces.",
+    description: "Seven TabForge workspace skins in the Wild Forge bundle.",
     price_cents: 700,
     currency: "usd",
     entitlement_slug: "tabforge-skin-bundle-wild-forge",

@@ -61,6 +61,16 @@ const PRODUCT_CATALOG = {
     defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
     defaultCancelPath: "/store/index.html#tabforge-skins",
   },
+  "tabforge-skin-all": {
+    slug: "tabforge-skin-all",
+    displayName: "TabForge Skins — All 3 Bundles",
+    mode: "payment",
+    unitAmountCents: 1500,
+    entitlementSlug: "tabforge-skin-bundle-all",
+    singlePurchase: false,
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
+    defaultCancelPath: "/store/index.html#tabforge-skins",
+  },
 };
 
 const TABFORGE_PACK_CATALOG = {
@@ -102,10 +112,36 @@ const TABFORGE_PACK_CATALOG = {
   },
 };
 
+const TABFORGE_SKIN_CART_CATALOG = {
+  "command-center": {
+    slug: "command-center",
+    displayName: "Star Base",
+    productSlug: "tabforge-skin-command-center",
+    entitlementSlug: "tabforge-skin-bundle-command-center",
+    unitAmountCents: 700,
+  },
+  "creator-money": {
+    slug: "creator-money",
+    displayName: "Creator",
+    productSlug: "tabforge-skin-creator-money",
+    entitlementSlug: "tabforge-skin-bundle-creator-money",
+    unitAmountCents: 700,
+  },
+  "wild-forge": {
+    slug: "wild-forge",
+    displayName: "Wild Forge",
+    productSlug: "tabforge-skin-wild-forge",
+    entitlementSlug: "tabforge-skin-bundle-wild-forge",
+    unitAmountCents: 700,
+  },
+};
+const TABFORGE_ALL_SKIN_ENTITLEMENTS = Object.values(TABFORGE_SKIN_CART_CATALOG).map((skin) => skin.entitlementSlug);
+
 const CatalogCheckoutSchema = z
   .object({
     productSlug: z.string().min(1).optional(),
     packSlugs: z.array(z.string().min(1)).max(100).optional(),
+    skinSlugs: z.array(z.string().min(1)).max(3).optional(),
     quantity: z.number().int().min(1).max(10).optional(),
     successPath: z.string().optional(),
     cancelPath: z.string().optional(),
@@ -113,20 +149,22 @@ const CatalogCheckoutSchema = z
   .superRefine((value, ctx) => {
     const hasProduct = Boolean(value.productSlug);
     const hasPacks = Array.isArray(value.packSlugs) && value.packSlugs.length > 0;
+    const hasSkins = Array.isArray(value.skinSlugs) && value.skinSlugs.length > 0;
 
-    if (!hasProduct && !hasPacks) {
+    if (!hasProduct && !hasPacks && !hasSkins) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["productSlug"],
-        message: "Either productSlug or packSlugs is required",
+        message: "productSlug, packSlugs, or skinSlugs is required",
       });
     }
 
-    if (hasProduct && hasPacks) {
+    const selectedGroups = [hasProduct, hasPacks, hasSkins].filter(Boolean).length;
+    if (selectedGroups > 1) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["packSlugs"],
-        message: "Use either productSlug or packSlugs in a single checkout request",
+        path: ["productSlug"],
+        message: "Use productSlug, packSlugs, or skinSlugs in a single checkout request",
       });
     }
   });
@@ -156,6 +194,11 @@ function getProductDefinition(productSlug) {
 
 function getPackDefinition(packSlug) {
   return TABFORGE_PACK_CATALOG[normalizeSlug(packSlug)] || null;
+}
+
+function getSkinDefinition(skinSlug) {
+  const slug = normalizeSlug(skinSlug);
+  return TABFORGE_SKIN_CART_CATALOG[slug] || Object.values(TABFORGE_SKIN_CART_CATALOG).find((skin) => skin.productSlug === slug || skin.entitlementSlug === slug) || null;
 }
 
 function sanitizeRelativePath(path, fallback) {
@@ -267,7 +310,7 @@ async function userHasEntitlement(userId, productSlug) {
   return Boolean(row);
 }
 
-function buildLineItems({ product, packs, quantity }) {
+function buildLineItems({ product, packs, skins, quantity }) {
   const lineItems = [];
 
   if (product) {
@@ -308,10 +351,28 @@ function buildLineItems({ product, packs, quantity }) {
     });
   }
 
+  for (const skin of skins) {
+    lineItems.push({
+      quantity: 1,
+      price_data: {
+        currency: "usd",
+        unit_amount: skin.unitAmountCents,
+        product_data: {
+          name: `TabForge Skins - ${skin.displayName}`,
+          metadata: {
+            kind: "skin",
+            slug: skin.slug,
+            entitlement_slug: skin.entitlementSlug,
+          },
+        },
+      },
+    });
+  }
+
   return lineItems;
 }
 
-function buildCheckoutSummary({ product, packs, quantity }) {
+function buildCheckoutSummary({ product, packs, skins, quantity }) {
   const items = [];
 
   if (product) {
@@ -335,6 +396,17 @@ function buildCheckoutSummary({ product, packs, quantity }) {
       displayName: pack.displayName,
       entitlementSlug: pack.entitlementSlug,
       unitAmountCents: pack.unitAmountCents,
+      quantity: 1,
+    });
+  }
+
+  for (const skin of skins) {
+    items.push({
+      kind: "skin",
+      slug: skin.slug,
+      displayName: skin.displayName,
+      entitlementSlug: skin.entitlementSlug,
+      unitAmountCents: skin.unitAmountCents,
       quantity: 1,
     });
   }
@@ -537,10 +609,20 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     });
   }
 
+  const requestedSkinSlugs = uniqStrings(parsed.data.skinSlugs || []);
+  const unknownSkinSlugs = requestedSkinSlugs.filter((slug) => !getSkinDefinition(slug));
+  if (unknownSkinSlugs.length) {
+    return res.status(404).json({
+      error: "unknown_skin_bundle",
+      skinSlugs: unknownSkinSlugs,
+    });
+  }
+
   const packs = requestedPackSlugs.map((slug) => getPackDefinition(slug)).filter(Boolean);
+  const skins = requestedSkinSlugs.map((slug) => getSkinDefinition(slug)).filter(Boolean);
   const quantity = Number.isInteger(parsed.data.quantity) ? parsed.data.quantity : 1;
 
-  if (!product && packs.length === 0) {
+  if (!product && packs.length === 0 && skins.length === 0) {
     return res.status(400).json({ error: "empty_checkout" });
   }
 
@@ -602,6 +684,35 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
+  if (product?.slug === "tabforge-skin-all") {
+    const ownedSkinSlugs = [];
+    for (const entitlementSlug of TABFORGE_ALL_SKIN_ENTITLEMENTS) {
+      if (await userHasEntitlement(req.user.sub, entitlementSlug)) ownedSkinSlugs.push(entitlementSlug);
+    }
+    if (ownedSkinSlugs.length > 0) {
+      return res.status(409).json({
+        error: "already_owned",
+        message: "You already own one or more selected skin bundles.",
+        productSlugs: ownedSkinSlugs,
+      });
+    }
+  }
+
+  if (skins.length > 0) {
+    const ownedSkinSlugs = [];
+    for (const skin of skins) {
+      const alreadyOwnsSkin = await userHasEntitlement(req.user.sub, skin.entitlementSlug);
+      if (alreadyOwnsSkin) ownedSkinSlugs.push(skin.entitlementSlug);
+    }
+    if (ownedSkinSlugs.length > 0) {
+      return res.status(409).json({
+        error: "already_owned",
+        message: "You already own one or more selected skin bundles.",
+        productSlugs: ownedSkinSlugs,
+      });
+    }
+  }
+
   const stripe = getStripe();
   if (!stripe) {
     return res.status(500).json({ error: "stripe_not_configured" });
@@ -610,17 +721,13 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
   try {
     const { user, customerId } = await getOrCreateStripeCustomerForUser(req.user.sub);
 
-    const successPath = sanitizeRelativePath(
-      parsed.data.successPath,
-      product?.defaultSuccessPath || "/products/tabforge/index.html"
-    );
-    const cancelPath = sanitizeRelativePath(
-      parsed.data.cancelPath,
-      product?.defaultCancelPath || "/products/tabforge/index.html"
-    );
+    const defaultSuccessPath = product?.defaultSuccessPath || (skins.length ? "/account/index.html?purchase_context=tf-skins" : "/products/tabforge/index.html");
+    const defaultCancelPath = product?.defaultCancelPath || (skins.length ? "/store/index.html#tabforge-skins" : "/products/tabforge/index.html");
+    const successPath = sanitizeRelativePath(parsed.data.successPath, defaultSuccessPath);
+    const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, defaultCancelPath);
 
-    const checkoutItems = buildCheckoutSummary({ product, packs, quantity });
-    const lineItems = buildLineItems({ product, packs, quantity });
+    const checkoutItems = buildCheckoutSummary({ product, packs, skins, quantity });
+    const lineItems = buildLineItems({ product, packs, skins, quantity });
 
     const metadata =
       checkoutItems.length === 1 &&

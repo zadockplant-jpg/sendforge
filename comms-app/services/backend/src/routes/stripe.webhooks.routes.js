@@ -156,6 +156,30 @@ async function grantCheckoutEntitlements({
 
     if (!entitlementSlug) continue;
 
+    if (entitlementSlug === "tabforge-skin-bundle-all") {
+      for (const skinEntitlementSlug of [
+        "tabforge-skin-bundle-command-center",
+        "tabforge-skin-bundle-creator-money",
+        "tabforge-skin-bundle-wild-forge",
+      ]) {
+        await grantProductEntitlement({
+          userId,
+          productSlug: skinEntitlementSlug,
+          source: "stripe",
+          sourceRef,
+          metadata: {
+            checkout_session_id: checkoutSessionId,
+            customer_id: customerId || null,
+            payment_intent: paymentIntent || null,
+            checkout_item_kind: "skin_bundle_all",
+            checkout_item_slug: slug || entitlementSlug,
+            checkout_item_display_name: item?.displayName || "All TabForge Skin Bundles",
+          },
+        });
+      }
+      continue;
+    }
+
     if (kind === "page_quantity") {
       const quantityPurchased = Math.max(1, Number(item?.quantity || 1));
       const existing = await getExistingEntitlement(userId, entitlementSlug);
