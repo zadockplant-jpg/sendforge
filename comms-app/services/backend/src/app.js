@@ -36,7 +36,7 @@ app.use(
 
 app.use(
   express.json({
-    limit: "5mb",
+    limit: "25mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
@@ -73,7 +73,7 @@ app.use((err, _req, res, next) => {
     return res.status(413).json({
       error: "payload_too_large",
       message:
-        "Saved TabForge layouts cannot include large note/image data. Update TabForge and export notes separately.",
+        "A single TabForge cloud sync request is too large. Sync + Collections includes the 20GB cloud-storage profile, but external cloud hosting is staged and large note/image updates should be split or compressed.",
     });
   }
   return next(err);

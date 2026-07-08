@@ -3,11 +3,18 @@ import { Router } from "express";
 import { z } from "zod";
 import { db } from "../config/db.js";
 import { requireAuth } from "../middleware/auth.js";
+import { hasProductEntitlement } from "../services/entitlement.service.js";
 import { createRateLimiter, rateLimitByUserOrIp } from "../middleware/rateLimit.js";
 
 export const tabforgeConfigsRouter = Router();
 
 const CLOUD_AUTOSAVE_NAME = "TabForge Cloud Autosave";
+const CLOUD_NOTES_AUTOSAVE_NAME = "TabForge Notes Cloud Autosave";
+const TABFORGE_CLOUD_AUTOSAVE_NAMES = new Set([CLOUD_AUTOSAVE_NAME, CLOUD_NOTES_AUTOSAVE_NAME]);
+const TABFORGE_CLOUD_OWNER_EMAIL = String(
+  process.env.TABFORGE_CLOUD_OWNER_EMAIL || process.env.ADMIN_LIVE_TEST_OWNER_EMAIL || "zadockplant@gmail.com"
+).trim().toLowerCase();
+const TABFORGE_CLOUD_PROVIDER_STATUS = String(process.env.TABFORGE_CLOUD_PROVIDER_STATUS || "stubbed_until_provider").trim().toLowerCase();
 
 const tabforgeConfigWriteLimiter = createRateLimiter({
   name: "tabforge-config-write",
@@ -15,6 +22,14 @@ const tabforgeConfigWriteLimiter = createRateLimiter({
   max: 20,
   keyGenerator: rateLimitByUserOrIp,
   message: "too_many_config_writes",
+});
+
+const tabforgeCloudAutosaveWriteLimiter = createRateLimiter({
+  name: "tabforge-cloud-autosave-write",
+  windowMs: 60 * 60 * 1000,
+  max: 240,
+  keyGenerator: rateLimitByUserOrIp,
+  message: "too_many_cloud_autosave_writes",
 });
 
 const SnapshotBodySchema = z.object({
@@ -31,32 +46,96 @@ const SnapshotUpdateSchema = z
     message: "name_or_payload_required",
   });
 
-const EMPTY_NOTES_SHELL = Object.freeze({
-  reminders: "",
-  calendar: "",
-  bills: "",
-  goals: "",
-  floatingNotes: [],
-});
+const TABFORGE_CLOUD_STORAGE_LIMIT_GB = 20;
+const TABFORGE_CLOUD_STORAGE_LIMIT_BYTES = TABFORGE_CLOUD_STORAGE_LIMIT_GB * 1024 * 1024 * 1024;
+const TABFORGE_SYNC_ENTITLEMENTS = ["tabforge-subscription", "tabforge-collections", "tabforge-collections-subscription", "tabforge-sync-collections"];
 
-function sanitizeTabForgeLayoutPayload(payload) {
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isTabForgeCloudOwnerEmail(email) {
+  return normalizeEmail(email) === TABFORGE_CLOUD_OWNER_EMAIL;
+}
+
+function isTabForgeCloudOwnerRequest(req) {
+  return isTabForgeCloudOwnerEmail(req?.user?.email);
+}
+
+function cloudStatusForRequest(req) {
+  const owner = isTabForgeCloudOwnerRequest(req);
+  return {
+    enabled: owner,
+    ownerOnly: true,
+    stubbedForNonOwner: !owner,
+    providerStatus: TABFORGE_CLOUD_PROVIDER_STATUS,
+    cloudStorageLimitGb: owner ? TABFORGE_CLOUD_STORAGE_LIMIT_GB : 0,
+    message: owner
+      ? "Admin-only TabForge cloud saving is enabled for this account while the external cloud provider is staged."
+      : "TabForge cloud hosting is stubbed for non-admin accounts until the cloud provider is wired in.",
+  };
+}
+
+function sendCloudStubbed(res, req, statusCode = 501) {
+  return res.status(statusCode).json({
+    error: "tabforge_cloud_hosting_stubbed",
+    message: "TabForge cloud hosting is currently enabled only for the admin account while the cloud provider is being wired in.",
+    cloud: cloudStatusForRequest(req),
+  });
+}
+
+function sanitizeTabForgeCloudPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return payload;
   }
 
   const cleaned = { ...payload };
-
-  // TabForge saved configurations are layout/config snapshots only. Notes can
-  // contain pasted images and must stay in extension local storage or the
-  // explicit notes export flow, never in cloud layout saves.
-  cleaned.notes = { ...EMPTY_NOTES_SHELL };
-  cleaned.noteDataExcluded = true;
-
-  delete cleaned.floatingNotes;
-  delete cleaned.noteImages;
-  delete cleaned.imageNotes;
-
+  cleaned.cloudStorageLimitGb = TABFORGE_CLOUD_STORAGE_LIMIT_GB;
+  if (!("noteDataExcluded" in cleaned)) cleaned.noteDataExcluded = false;
+  delete cleaned.user?.token;
+  delete cleaned.authToken;
+  delete cleaned.token;
   return cleaned;
+}
+
+function payloadSizeBytes(payload) {
+  return Buffer.byteLength(JSON.stringify(payload || {}), "utf8");
+}
+
+async function userHasTabForgeSync(userId, email = null) {
+  if (isTabForgeCloudOwnerEmail(email)) return true;
+  for (const slug of TABFORGE_SYNC_ENTITLEMENTS) {
+    if (await hasProductEntitlement(userId, slug)) return true;
+  }
+  return false;
+}
+
+async function getStoredConfigUsageBytes(userId, exceptConfigId = null) {
+  const query = db("tabforge_saved_configs")
+    .select("id", "payload")
+    .where({ user_id: userId });
+
+  if (exceptConfigId) query.whereNot({ id: exceptConfigId });
+
+  const rows = await query;
+  return rows.reduce((total, row) => total + payloadSizeBytes(row.payload), 0);
+}
+
+async function enforceTabForgeCloudStorage(user, payload, exceptConfigId = null) {
+  const userId = typeof user === "object" ? user?.sub : user;
+  const email = typeof user === "object" ? user?.email : null;
+  if (!(await userHasTabForgeSync(userId, email))) {
+    const err = new Error("tabforge_subscription_required");
+    err.statusCode = 402;
+    throw err;
+  }
+
+  const nextUsage = (await getStoredConfigUsageBytes(userId, exceptConfigId)) + payloadSizeBytes(payload);
+  if (nextUsage > TABFORGE_CLOUD_STORAGE_LIMIT_BYTES) {
+    const err = new Error("tabforge_cloud_storage_limit_exceeded");
+    err.statusCode = 413;
+    throw err;
+  }
 }
 
 function normalizeName(name) {
@@ -91,6 +170,9 @@ async function getOwnedConfigOr404(userId, configId) {
 
 tabforgeConfigsRouter.use(requireAuth);
 tabforgeConfigsRouter.use((req, res, next) => {
+  if (req.method === "POST" && TABFORGE_CLOUD_AUTOSAVE_NAMES.has(normalizeName(req.body?.name))) {
+    return tabforgeCloudAutosaveWriteLimiter(req, res, next);
+  }
   if (["POST", "PUT", "DELETE"].includes(req.method)) {
     return tabforgeConfigWriteLimiter(req, res, next);
   }
@@ -99,6 +181,18 @@ tabforgeConfigsRouter.use((req, res, next) => {
 
 tabforgeConfigsRouter.get("/", async (req, res) => {
   try {
+    if (!isTabForgeCloudOwnerRequest(req)) {
+      return res.json({
+        items: [],
+        storage: {
+          limitGb: 0,
+          usedBytes: 0,
+          stubbed: true,
+        },
+        cloud: cloudStatusForRequest(req),
+      });
+    }
+
     const rows = await db("tabforge_saved_configs")
       .select("id", "name", "created_at", "updated_at")
       .where({ user_id: req.user.sub })
@@ -106,17 +200,28 @@ tabforgeConfigsRouter.get("/", async (req, res) => {
 
     return res.json({
       items: rows.map(mapRow),
+      storage: {
+        limitGb: TABFORGE_CLOUD_STORAGE_LIMIT_GB,
+        usedBytes: await getStoredConfigUsageBytes(req.user.sub),
+      },
+      cloud: cloudStatusForRequest(req),
     });
   } catch (err) {
-    return res.status(500).json({
-      error: "server_error",
-      message: String(err?.message || err),
+    const statusCode = err?.statusCode || 500;
+    return res.status(statusCode).json({
+      error: err?.message === "tabforge_subscription_required"
+        ? "tabforge_subscription_required"
+        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error")),
+      message: err?.message === "tabforge_subscription_required"
+        ? "TabForge cloud sync requires the $5/month Sync + Collections subscription."
+        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err))),
     });
   }
 });
 
 tabforgeConfigsRouter.get("/:id", async (req, res) => {
   try {
+    if (!isTabForgeCloudOwnerRequest(req)) return sendCloudStubbed(res, req);
     const row = await getOwnedConfigOr404(req.user.sub, req.params.id);
 
     return res.json({
@@ -128,14 +233,19 @@ tabforgeConfigsRouter.get("/:id", async (req, res) => {
   } catch (err) {
     const statusCode = err?.statusCode || 500;
     return res.status(statusCode).json({
-      error: statusCode === 404 ? "config_not_found" : "server_error",
-      message: statusCode === 404 ? undefined : String(err?.message || err),
+      error: statusCode === 404
+        ? "config_not_found"
+        : (err?.message === "tabforge_subscription_required" ? "tabforge_subscription_required" : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error"))),
+      message: statusCode === 404
+        ? undefined
+        : (err?.message === "tabforge_subscription_required" ? "TabForge cloud sync requires the $5/month Sync + Collections subscription." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err)))),
     });
   }
 });
 
 tabforgeConfigsRouter.post("/", async (req, res) => {
   try {
+    if (!isTabForgeCloudOwnerRequest(req)) return sendCloudStubbed(res, req);
     const parsed = SnapshotBodySchema.parse(req.body || {});
     const name = normalizeName(parsed.name);
 
@@ -147,11 +257,13 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
       .first();
 
     if (existing) {
-      if (name === CLOUD_AUTOSAVE_NAME) {
+      if (TABFORGE_CLOUD_AUTOSAVE_NAMES.has(name)) {
+        const sanitizedPayload = sanitizeTabForgeCloudPayload(parsed.payload);
+        await enforceTabForgeCloudStorage(req.user, sanitizedPayload, existing.id);
         await db("tabforge_saved_configs")
           .where({ id: existing.id, user_id: req.user.sub })
           .update({
-            payload: sanitizeTabForgeLayoutPayload(parsed.payload),
+            payload: sanitizedPayload,
             updated_at: db.fn.now(),
           });
 
@@ -168,12 +280,14 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
     }
 
     const id = crypto.randomUUID();
+    const sanitizedPayload = sanitizeTabForgeCloudPayload(parsed.payload);
+    await enforceTabForgeCloudStorage(req.user, sanitizedPayload);
 
     await db("tabforge_saved_configs").insert({
       id,
       user_id: req.user.sub,
       name,
-      payload: sanitizeTabForgeLayoutPayload(parsed.payload),
+      payload: sanitizedPayload,
       created_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
@@ -196,15 +310,21 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
       });
     }
 
-    return res.status(500).json({
-      error: "server_error",
-      message: String(err?.message || err),
+    const statusCode = err?.statusCode || 500;
+    return res.status(statusCode).json({
+      error: err?.message === "tabforge_subscription_required"
+        ? "tabforge_subscription_required"
+        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error")),
+      message: err?.message === "tabforge_subscription_required"
+        ? "TabForge cloud sync requires the $5/month Sync + Collections subscription."
+        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err))),
     });
   }
 });
 
 tabforgeConfigsRouter.put("/:id", async (req, res) => {
   try {
+    if (!isTabForgeCloudOwnerRequest(req)) return sendCloudStubbed(res, req);
     const parsed = SnapshotUpdateSchema.parse(req.body || {});
     const current = await getOwnedConfigOr404(req.user.sub, req.params.id);
 
@@ -230,7 +350,8 @@ tabforgeConfigsRouter.put("/:id", async (req, res) => {
     };
 
     if (parsed.payload) {
-      updates.payload = sanitizeTabForgeLayoutPayload(parsed.payload);
+      updates.payload = sanitizeTabForgeCloudPayload(parsed.payload);
+      await enforceTabForgeCloudStorage(req.user, updates.payload, current.id);
     }
 
     await db("tabforge_saved_configs")
@@ -257,14 +378,19 @@ tabforgeConfigsRouter.put("/:id", async (req, res) => {
 
     const statusCode = err?.statusCode || 500;
     return res.status(statusCode).json({
-      error: statusCode === 404 ? "config_not_found" : "server_error",
-      message: statusCode === 404 ? undefined : String(err?.message || err),
+      error: statusCode === 404
+        ? "config_not_found"
+        : (err?.message === "tabforge_subscription_required" ? "tabforge_subscription_required" : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error"))),
+      message: statusCode === 404
+        ? undefined
+        : (err?.message === "tabforge_subscription_required" ? "TabForge cloud sync requires the $5/month Sync + Collections subscription." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err)))),
     });
   }
 });
 
 tabforgeConfigsRouter.delete("/:id", async (req, res) => {
   try {
+    if (!isTabForgeCloudOwnerRequest(req)) return sendCloudStubbed(res, req);
     await getOwnedConfigOr404(req.user.sub, req.params.id);
 
     await db("tabforge_saved_configs")
@@ -278,8 +404,12 @@ tabforgeConfigsRouter.delete("/:id", async (req, res) => {
   } catch (err) {
     const statusCode = err?.statusCode || 500;
     return res.status(statusCode).json({
-      error: statusCode === 404 ? "config_not_found" : "server_error",
-      message: statusCode === 404 ? undefined : String(err?.message || err),
+      error: statusCode === 404
+        ? "config_not_found"
+        : (err?.message === "tabforge_subscription_required" ? "tabforge_subscription_required" : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error"))),
+      message: statusCode === 404
+        ? undefined
+        : (err?.message === "tabforge_subscription_required" ? "TabForge cloud sync requires the $5/month Sync + Collections subscription." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err)))),
     });
   }
 });

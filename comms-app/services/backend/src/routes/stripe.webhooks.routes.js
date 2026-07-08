@@ -29,6 +29,7 @@ function isReferralQualifyingPurchase(entitlementSlug) {
   return normalizeSlug(entitlementSlug) === "tabforge";
 }
 const TABFORGE_COLLECTION_ENTITLEMENTS = [
+  "tabforge-subscription",
   "tabforge-collections",
   "tabforge-pack-builder",
   "tabforge-pack-money",
@@ -78,7 +79,7 @@ async function attachStripeCustomerToUser(userId, customerId) {
 async function syncTabForgeCollectionsSubscriptionEntitlements({ userId, subscriptionId, status, sourceRef }) {
   if (!userId || !subscriptionId) return;
   const active = ["active", "trialing"].includes(String(status || "").toLowerCase());
-  const ref = sourceRef || `subscription:${subscriptionId}:tabforge-collections`;
+  const ref = sourceRef || `subscription:${subscriptionId}:tabforge-sync-collections`;
 
   if (active) {
     for (const productSlug of TABFORGE_COLLECTION_ENTITLEMENTS) {
@@ -90,6 +91,10 @@ async function syncTabForgeCollectionsSubscriptionEntitlements({ userId, subscri
         metadata: {
           subscription_id: String(subscriptionId),
           collection_subscription: true,
+          tabforge_sync_collections: true,
+          cloud_storage_gb_limit: 20,
+          device_sync_limit: 5,
+          grants_tabforge_pro_while_active: true,
           grants_all_current_collections: true,
         },
       });
@@ -167,6 +172,7 @@ async function upsertStripeSubscription(sub) {
   const checkoutItems = parseCheckoutItems(sub.metadata?.checkout_items);
   const includesCollections =
     productSlug === "tabforge-collections-subscription" ||
+    productSlug === "tabforge-subscription" ||
     productSlug === "tabforge-collections" ||
     checkoutItems.some((item) => isCollectionsEntitlement(item?.entitlementSlug || item?.slug));
 
@@ -175,7 +181,7 @@ async function upsertStripeSubscription(sub) {
       userId,
       subscriptionId: sub.id,
       status: payload.status,
-      sourceRef: `subscription:${sub.id}:tabforge-collections`,
+      sourceRef: `subscription:${sub.id}:tabforge-sync-collections`,
     });
   }
 }
@@ -208,7 +214,7 @@ async function markStripeSubscriptionCanceled(sub) {
       userId,
       subscriptionId: providerSubscriptionId,
       status: "canceled",
-      sourceRef: `subscription:${providerSubscriptionId}:tabforge-collections`,
+      sourceRef: `subscription:${providerSubscriptionId}:tabforge-sync-collections`,
     });
   }
 }
@@ -243,7 +249,7 @@ async function grantCheckoutEntitlements({
           userId,
           productSlug: collectionSlug,
           source: "stripe_subscription",
-          sourceRef: sourceRef || `subscription:${checkoutSessionId}:tabforge-collections`,
+          sourceRef: sourceRef || `subscription:${checkoutSessionId}:tabforge-sync-collections`,
           metadata: {
             checkout_session_id: checkoutSessionId,
             customer_id: customerId || null,
@@ -252,6 +258,10 @@ async function grantCheckoutEntitlements({
             checkout_item_slug: slug || entitlementSlug,
             checkout_item_display_name: item?.displayName || "TabForge Collections",
             collection_subscription: true,
+            tabforge_sync_collections: true,
+            cloud_storage_gb_limit: 20,
+            device_sync_limit: 5,
+            grants_tabforge_pro_while_active: true,
             grants_all_current_collections: true,
           },
         });
@@ -377,7 +387,7 @@ async function handleCheckoutSessionCompleted(session) {
   const checkoutIncludesCollections = checkoutItems.some((item) => isCollectionsEntitlement(item?.entitlementSlug || item?.slug));
   const sourceRef = String(
     session.subscription && checkoutIncludesCollections
-      ? `subscription:${session.subscription}:tabforge-collections`
+      ? `subscription:${session.subscription}:tabforge-sync-collections`
       : (session.payment_intent || session.subscription || session.id || "")
   );
 

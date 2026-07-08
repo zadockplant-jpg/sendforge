@@ -4,31 +4,33 @@ import { db } from "../config/db.js";
 import { ensureReferralCodeForUser, getReferralProgram, tiersForVerifiedCount, updateUserCashAppTag } from "./referrals/referral.service.js";
 
 const DEFAULT_OWNER_EMAIL = "zadockplant@gmail.com";
+const TABFORGE_CLOUD_OWNER_EMAIL = normalizeEmail(
+  process.env.TABFORGE_CLOUD_OWNER_EMAIL || process.env.ADMIN_LIVE_TEST_OWNER_EMAIL || DEFAULT_OWNER_EMAIL
+);
+const TABFORGE_CLOUD_PROVIDER_STATUS = String(process.env.TABFORGE_CLOUD_PROVIDER_STATUS || "stubbed_until_provider").trim().toLowerCase();
+const TABFORGE_CLOUD_STORAGE_LIMIT_GB = 20;
 const PRODUCT_SLUG = "tabforge";
 const MAX_LIVE_TEST_COUNT = 10000;
 const TEST_SOURCE = "admin_live_test";
 const OWNER_ENTITLEMENT_SOURCE = "admin_owner_grant";
 const TEST_ENTITLEMENT_PRESETS = [
-  // Product features that are purchasable/account-visible. Extra Pages belongs
-  // here, not in shortcut packs. The extension uses tabforge-pages metadata to
-  // calculate extra page capacity.
-  { slug: "tabforge", label: "TabForge Pro", category: "product_features", description: "Main Pro unlock. Backend device/license checks still apply." },
-  { slug: "tabforge-pages", label: "Extra Pages", category: "product_features", description: "Purchased page expansion. Kept separate from shortcut packs." },
+  // Product features that are purchasable/account-visible in the current model.
+  { slug: "tabforge", label: "TabForge Pro", category: "product_features", description: "$10 one-time local Pro unlock for one device." },
+  { slug: "tabforge-subscription", label: "Sync + Collections", category: "product_features", description: "$5/month subscription profile: Pro while active, current collections, 20GB cloud-storage profile, and sync across up to 5 devices once cloud hosting is live. Cloud provider is admin-only/stubbed until wired." },
+  { slug: "tabforge-sync-collections", label: "Sync + Collections Alias", category: "product_features", description: "Compatibility alias for the current subscription entitlement." },
+  { slug: "tabforge-collections", label: "Collections Access", category: "product_features", description: "Legacy compatibility entitlement included with the Sync + Collections subscription." },
 
-  // Shortcut pack entitlements. Keep this aligned with the active TabForge
-  // extension/store unlock map. Do not list internal labels or future-only ideas.
-  { slug: "tabforge-pack-builder", label: "Builder Pack", category: "shortcut_packs", description: "Construction, trades, and field tools." },
-  { slug: "tabforge-pack-money", label: "Money Pack", category: "shortcut_packs", description: "Banking, budgeting, and finance shortcuts." },
-  { slug: "tabforge-pack-dev", label: "Developer Pack", category: "shortcut_packs", description: "Code, docs, dashboards, and deploy tools." },
-  { slug: "tabforge-pack-media", label: "Media Pack", category: "shortcut_packs", description: "Music, video, editing, and publishing." },
-  { slug: "tabforge-pack-research", label: "Research Pack", category: "shortcut_packs", description: "AI, search, notes, and reference links." },
+  // Shortcut pack entitlements are now included with the subscription tier.
+  { slug: "tabforge-pack-builder", label: "Builder Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
+  { slug: "tabforge-pack-money", label: "Money Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
+  { slug: "tabforge-pack-dev", label: "Developer Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
+  { slug: "tabforge-pack-media", label: "Media Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
+  { slug: "tabforge-pack-research", label: "Research Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
 
-  // Skin access is sold as three purchasable bundles. Keep these slugs aligned
-  // with TabForge extension/store unlock logic. Legacy admin slugs are normalized
-  // below so older rows still resolve to the current bundles.
-  { slug: "tabforge-skin-bundle-command-center", label: "Star Base", category: "skin_packs", description: "Seven TabForge workspace skins." },
-  { slug: "tabforge-skin-bundle-creator-money", label: "Creator", category: "skin_packs", description: "Seven TabForge workspace skins." },
-  { slug: "tabforge-skin-bundle-wild-forge", label: "Wild Forge", category: "skin_packs", description: "Seven TabForge workspace skins." },
+  // Skin/icon add-ons are delayed. Keep these available only for legacy/admin checks.
+  { slug: "tabforge-skin-bundle-command-center", label: "Star Base", category: "future_visual_addons", description: "Delayed future one-time visual add-on." },
+  { slug: "tabforge-skin-bundle-creator-money", label: "Creator", category: "future_visual_addons", description: "Delayed future one-time visual add-on." },
+  { slug: "tabforge-skin-bundle-wild-forge", label: "Wild Forge", category: "future_visual_addons", description: "Delayed future one-time visual add-on." },
 ];
 
 const LEGACY_SKIN_ENTITLEMENT_ALIASES = Object.freeze({
@@ -132,25 +134,43 @@ export function liveTestingConfirmation() {
   return `LIVE TEST ${liveTestingOwnerEmail()}`;
 }
 
+function tabforgeCloudStatus(ownerEmail = liveTestingOwnerEmail()) {
+  const normalizedOwner = normalizeEmail(ownerEmail);
+  const adminCloudEnabled = normalizedOwner === TABFORGE_CLOUD_OWNER_EMAIL;
+  return {
+    enabled: adminCloudEnabled,
+    ownerOnly: true,
+    ownerEmail: TABFORGE_CLOUD_OWNER_EMAIL,
+    providerStatus: TABFORGE_CLOUD_PROVIDER_STATUS,
+    cloudStorageLimitGb: TABFORGE_CLOUD_STORAGE_LIMIT_GB,
+    noteAutosaveRecord: "TabForge Notes Cloud Autosave",
+    shortcutAutosaveRecord: "TabForge Cloud Autosave",
+    nonOwnerCloudHosting: "stubbed_until_provider",
+    message: adminCloudEnabled
+      ? "Admin-only TabForge cloud saving is enabled for this owner account while the external cloud provider is staged."
+      : "TabForge cloud hosting is stubbed for non-owner accounts until the cloud provider is wired in.",
+  };
+}
+
 export function ownerEntitlementCatalog() {
   const sections = [
     {
       key: "product_features",
       title: "Product features",
-      description: "Account-level TabForge purchases. Extra Pages is a product feature, not a shortcut pack.",
+      description: "Account-level TabForge purchases and the active Sync + Collections subscription tier.",
       items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "product_features"),
     },
     {
       key: "shortcut_packs",
-      title: "Shortcut pack entitlements",
-      description: "Only pack slugs the current TabForge extension/store know how to unlock.",
+      title: "Included collection entitlements",
+      description: "Collections are no longer sold individually; these are granted through Sync + Collections.",
       items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "shortcut_packs"),
     },
     {
-      key: "skin_packs",
-      title: "Skin pack entitlements",
-      description: "Only the 3 purchasable skin packs. Individual theme pieces live inside Skin Studio.",
-      items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "skin_packs"),
+      key: "future_visual_addons",
+      title: "Future visual add-ons",
+      description: "Skins and icon packs are delayed and not part of active checkout.",
+      items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "future_visual_addons"),
     },
   ];
   return { sections, flat: TEST_ENTITLEMENT_PRESETS };
@@ -494,9 +514,13 @@ async function writeOwnerAccountEntitlement({ trx, owner, session, enabled, prod
       updated_at: new Date().toISOString(),
     };
 
-    if (slug === "tabforge-pages") {
-      metadata.purchased_quantity_total = Math.max(1, Number(metadata.purchased_quantity_total || 1));
-      metadata.last_quantity_purchased = Math.max(1, Number(metadata.last_quantity_purchased || 1));
+    if (["tabforge-subscription", "tabforge-collections", "tabforge-collections-subscription", "tabforge-sync-collections"].includes(slug)) {
+      metadata.collection_subscription = true;
+      metadata.tabforge_sync_collections = true;
+      metadata.cloud_storage_gb_limit = 20;
+      metadata.device_sync_limit = 5;
+      metadata.grants_tabforge_pro_while_active = true;
+      metadata.grants_all_current_collections = true;
     }
 
     if (existing) {
@@ -611,6 +635,7 @@ async function liveStateFromTransaction(trx, owner, session) {
       tierRequiredPurchases: Number(row.metadata?.tier_required_purchases || 0),
       metadata: row.metadata || {},
     })),
+    cloud: tabforgeCloudStatus(owner.email),
     entitlementCatalog: ownerEntitlementCatalog(),
     entitlementPresets: TEST_ENTITLEMENT_PRESETS,
     entitlements,
@@ -623,6 +648,9 @@ async function liveStateFromTransaction(trx, owner, session) {
       cashAppTransferDisabled: true,
       referralTestRowsTagged: true,
       ownerEntitlementWritesAreReal: true,
+      adminCloudOwnerOnly: true,
+      cloudProviderStubbedForNonOwner: true,
+      tabforgeCloudStorageLimitGb: TABFORGE_CLOUD_STORAGE_LIMIT_GB,
       maxCount: MAX_LIVE_TEST_COUNT,
     },
   };

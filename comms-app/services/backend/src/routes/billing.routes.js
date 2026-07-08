@@ -12,7 +12,7 @@ export const billingRouter = Router();
 const PRODUCT_CATALOG = {
   tabforge: {
     slug: "tabforge",
-    displayName: "TabForge",
+    displayName: "TabForge Pro",
     mode: "payment",
     stripePriceId: env.stripePriceTabforge,
     unitAmountCents: 1000,
@@ -33,13 +33,13 @@ const PRODUCT_CATALOG = {
   },
   "tabforge-collections-subscription": {
     slug: "tabforge-collections-subscription",
-    displayName: "TabForge Collections",
+    displayName: "TabForge Sync + Collections",
     mode: "subscription",
-    unitAmountCents: 800,
-    entitlementSlug: "tabforge-collections",
-    subscriptionPlan: "tabforge_collections",
-    defaultSuccessPath: "/account/index.html?purchase_context=tf-collections",
-    defaultCancelPath: "/store/index.html#tabforge-collections",
+    unitAmountCents: 500,
+    entitlementSlug: "tabforge-subscription",
+    subscriptionPlan: "tabforge_sync_collections",
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-pack",
+    defaultCancelPath: "/store/index.html#tabforge",
   },
   "tabforge-skin-command-center": {
     slug: "tabforge-skin-command-center",
@@ -48,8 +48,8 @@ const PRODUCT_CATALOG = {
     unitAmountCents: 700,
     entitlementSlug: "tabforge-skin-bundle-command-center",
     singlePurchase: true,
-    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
-    defaultCancelPath: "/store/index.html#tabforge-skins",
+    defaultSuccessPath: "/products/tabforge/index.html#pricing",
+    defaultCancelPath: "/store/index.html#tabforge",
   },
   "tabforge-skin-creator-money": {
     slug: "tabforge-skin-creator-money",
@@ -58,8 +58,8 @@ const PRODUCT_CATALOG = {
     unitAmountCents: 700,
     entitlementSlug: "tabforge-skin-bundle-creator-money",
     singlePurchase: true,
-    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
-    defaultCancelPath: "/store/index.html#tabforge-skins",
+    defaultSuccessPath: "/products/tabforge/index.html#pricing",
+    defaultCancelPath: "/store/index.html#tabforge",
   },
   "tabforge-skin-wild-forge": {
     slug: "tabforge-skin-wild-forge",
@@ -68,8 +68,8 @@ const PRODUCT_CATALOG = {
     unitAmountCents: 700,
     entitlementSlug: "tabforge-skin-bundle-wild-forge",
     singlePurchase: true,
-    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
-    defaultCancelPath: "/store/index.html#tabforge-skins",
+    defaultSuccessPath: "/products/tabforge/index.html#pricing",
+    defaultCancelPath: "/store/index.html#tabforge",
   },
   "tabforge-skin-all": {
     slug: "tabforge-skin-all",
@@ -78,8 +78,8 @@ const PRODUCT_CATALOG = {
     unitAmountCents: 1500,
     entitlementSlug: "tabforge-skin-bundle-all",
     singlePurchase: false,
-    defaultSuccessPath: "/account/index.html?purchase_context=tf-skins",
-    defaultCancelPath: "/store/index.html#tabforge-skins",
+    defaultSuccessPath: "/products/tabforge/index.html#pricing",
+    defaultCancelPath: "/store/index.html#tabforge",
   },
 };
 
@@ -178,6 +178,13 @@ const CatalogCheckoutSchema = z
       });
     }
   });
+
+const DonationCheckoutSchema = z.object({
+  toolSlug: z.string().trim().min(1).max(120).optional(),
+  defaultAmountDollars: z.coerce.number().min(1).max(500).optional(),
+  successPath: z.string().optional(),
+  cancelPath: z.string().optional(),
+});
 
 const IncludedPackRedeemSchema = z.object({
   packSlug: z.string().min(1),
@@ -591,12 +598,82 @@ billingRouter.post("/activate", requireAuth, async (req, res) => {
 });
 
 /**
+ * POST /v1/billing/donations/checkout-session
+ * Public optional donation checkout for developer tool downloads.
+ * Downloads are not gated; the website starts the file first, then opens this preset $5 flow.
+ */
+billingRouter.post("/donations/checkout-session", async (req, res) => {
+  const parsed = DonationCheckoutSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_input" });
+  }
+
+  const stripe = getStripe();
+  if (!stripe) {
+    return res.status(500).json({ error: "stripe_not_configured" });
+  }
+
+  const amountDollars = Math.min(500, Math.max(1, Math.round(Number(parsed.data.defaultAmountDollars || 5))));
+  const toolSlug = normalizeSlug(parsed.data.toolSlug || "developer-tools");
+  const successPath = sanitizeRelativePath(parsed.data.successPath, "/downloads/index.html?donation=success");
+  const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, "/downloads/index.html?donation=cancelled");
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      submit_type: "donate",
+      line_items: [
+        {
+          quantity: amountDollars,
+          adjustable_quantity: {
+            enabled: true,
+            minimum: 1,
+            maximum: 500,
+          },
+          price_data: {
+            currency: "usd",
+            unit_amount: 100,
+            product_data: {
+              name: "Optional SendForge developer tools donation",
+              description: "Downloads are free. Donations help us create projects that make the world a better place.",
+              metadata: {
+                kind: "developer_tools_donation",
+                tool_slug: toolSlug,
+              },
+            },
+          },
+        },
+      ],
+      success_url: buildSiteUrl(successPath, {
+        donation: "success",
+        session_id: "{CHECKOUT_SESSION_ID}",
+      }),
+      cancel_url: buildSiteUrl(cancelPath, {
+        donation: "cancelled",
+      }),
+      metadata: {
+        fulfillment_type: "optional_developer_tools_donation",
+        tool_slug: toolSlug,
+        default_amount_dollars: String(amountDollars),
+      },
+    });
+
+    return res.json({ ok: true, url: session.url, sessionId: session.id });
+  } catch (err) {
+    return res.status(500).json({
+      error: "donation_checkout_failed",
+      message: String(err?.message || err),
+    });
+  }
+});
+
+/**
  * POST /v1/billing/catalog/checkout-session
  * Supports:
  * - single product checkout
  * - retired extra-page requests return an explicit error
- * - collections subscription checkout
- * - legacy multi-pack checkout
+ * - Sync + Collections subscription checkout
+ * - retired collection/skin direct checkout returns explicit errors
  */
 billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) => {
   const parsed = CatalogCheckoutSchema.safeParse(req.body);
@@ -642,21 +719,25 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     return res.status(400).json({ error: "empty_checkout" });
   }
 
+  if (packs.length > 0) {
+    return res.status(410).json({
+      error: "individual_collections_retired",
+      message: "Individual collection purchases have been retired. Collections are included in the $5/month TabForge Sync + Collections subscription.",
+    });
+  }
+
+  if (skins.length > 0 || (product?.slug || "").startsWith("tabforge-skin-")) {
+    return res.status(410).json({
+      error: "visual_addons_delayed",
+      message: "Skin collections and icon packs are coming later as optional one-time add-ons.",
+    });
+  }
+
   if (product?.slug === "tabforge-page") {
     return res.status(410).json({
       error: "product_retired",
       message: "Extra page purchases have been retired. TabForge Pro now includes all 10 pages.",
     });
-  }
-
-  if (packs.length > 0) {
-    const hasPro = await userHasEntitlement(req.user.sub, "tabforge");
-    if (!hasPro) {
-      return res.status(403).json({
-        error: "pro_required",
-        message: "TabForge Pro is required before purchasing packs.",
-      });
-    }
   }
 
   if (product?.singlePurchase || product?.slug === "tabforge" || product?.slug === "tabforge-collections-subscription") {
@@ -723,8 +804,8 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
   try {
     const { user, customerId } = await getOrCreateStripeCustomerForUser(req.user.sub);
 
-    const defaultSuccessPath = product?.defaultSuccessPath || (skins.length ? "/account/index.html?purchase_context=tf-skins" : "/products/tabforge/index.html");
-    const defaultCancelPath = product?.defaultCancelPath || (skins.length ? "/store/index.html#tabforge-skins" : "/products/tabforge/index.html");
+    const defaultSuccessPath = product?.defaultSuccessPath || (skins.length ? "/products/tabforge/index.html#pricing" : "/products/tabforge/index.html");
+    const defaultCancelPath = product?.defaultCancelPath || (skins.length ? "/store/index.html#tabforge" : "/products/tabforge/index.html");
     const successPath = sanitizeRelativePath(parsed.data.successPath, defaultSuccessPath);
     const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, defaultCancelPath);
 
@@ -770,6 +851,8 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
           entitlement_slug: product?.entitlementSlug || product?.slug || "",
           plan: product?.subscriptionPlan || product?.slug || "subscription",
           fulfillment_type: "subscription_entitlement",
+          cloud_provider_status: "stubbed_until_provider_except_admin",
+          cloud_storage_gb_limit: product?.slug === "tabforge-collections-subscription" ? "20" : "",
           checkout_items: serializeCheckoutItems(checkoutItems),
         },
       };
