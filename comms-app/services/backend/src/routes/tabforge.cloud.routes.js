@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../config/db.js";
 import { requireAuth } from "../middleware/auth.js";
+import { createRateLimiter, rateLimitByUserOrIp } from "../middleware/rateLimit.js";
 import { hasProductEntitlement } from "../services/entitlement.service.js";
 
 export const tabforgeCloudRouter = Router();
@@ -23,6 +24,14 @@ const TABFORGE_SYNC_ENTITLEMENTS = [
 const STORAGE_LIMIT_BYTES = 20_000_000_000;
 const DEVICE_LIMIT = 5;
 
+const tabforgeCloudAccessLimiter = createRateLimiter({
+  name: "tabforge-cloud-access",
+  windowMs: 60 * 1000,
+  max: 240,
+  keyGenerator: rateLimitByUserOrIp,
+  message: "too_many_tabforge_cloud_access_checks",
+});
+
 function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
@@ -43,7 +52,7 @@ async function hasCloudAccess(userId, email) {
  * Metadata-only control-plane endpoint used by the Cloudflare Worker. It never
  * receives or returns TabForge notes, images, shortcuts, or layout payloads.
  */
-tabforgeCloudRouter.get("/access", requireAuth, async (req, res) => {
+tabforgeCloudRouter.get("/access", requireAuth, tabforgeCloudAccessLimiter, async (req, res) => {
   res.set("Cache-Control", "no-store");
 
   try {
