@@ -2,7 +2,10 @@ import { Router } from "express";
 import { db } from "../config/db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { createRateLimiter, rateLimitByUserOrIp } from "../middleware/rateLimit.js";
-import { hasProductEntitlement } from "../services/entitlement.service.js";
+import {
+  hasAnyProductEntitlement,
+  TABFORGE_CLOUD_ENTITLEMENTS,
+} from "../services/entitlement.service.js";
 
 export const tabforgeCloudRouter = Router();
 
@@ -14,20 +17,13 @@ const TABFORGE_CLOUD_OWNER_EMAIL = String(
   .trim()
   .toLowerCase();
 
-const TABFORGE_SYNC_ENTITLEMENTS = [
-  "tabforge-subscription",
-  "tabforge-collections",
-  "tabforge-collections-subscription",
-  "tabforge-sync-collections",
-];
-
 const STORAGE_LIMIT_BYTES = 20_000_000_000;
 const DEVICE_LIMIT = 5;
 
 const tabforgeCloudAccessLimiter = createRateLimiter({
   name: "tabforge-cloud-access",
   windowMs: 60 * 1000,
-  max: 240,
+  max: 60,
   keyGenerator: rateLimitByUserOrIp,
   message: "too_many_tabforge_cloud_access_checks",
 });
@@ -38,12 +34,7 @@ function normalizeEmail(value) {
 
 async function hasCloudAccess(userId, email) {
   if (normalizeEmail(email) === TABFORGE_CLOUD_OWNER_EMAIL) return true;
-
-  for (const slug of TABFORGE_SYNC_ENTITLEMENTS) {
-    if (await hasProductEntitlement(userId, slug)) return true;
-  }
-
-  return false;
+  return hasAnyProductEntitlement(userId, TABFORGE_CLOUD_ENTITLEMENTS);
 }
 
 /**

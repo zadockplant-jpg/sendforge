@@ -6,6 +6,7 @@ import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { getActivePlan, grantProductEntitlement } from "../services/entitlement.service.js";
+import { handleStripeWebhook } from "./stripe.webhooks.routes.js";
 
 export const billingRouter = Router();
 
@@ -1104,47 +1105,4 @@ billingRouter.post("/google/ingest", requireAuth, async (req, res) => {
 /**
  * STRIPE WEBHOOK (BACKWARD-COMPATIBLE)
  */
-billingRouter.post("/stripe/webhook", async (req, res) => {
-  const secret = env.stripeWebhookSecret;
-  const stripe = getStripe();
-
-  if (!secret || !stripe) {
-    return res.status(500).send("Stripe not configured");
-  }
-
-  const sig = req.headers["stripe-signature"];
-
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.rawBody, sig, secret);
-  } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  try {
-    switch (event.type) {
-      case "checkout.session.completed":
-        await handleStripeCheckoutSessionCompleted(event.data.object);
-        break;
-
-      case "customer.subscription.created":
-      case "customer.subscription.updated":
-        await upsertStripeSubscriptionFromWebhook(event.data.object);
-        break;
-
-      case "customer.subscription.deleted":
-        await cancelStripeSubscriptionFromWebhook(event.data.object);
-        break;
-
-      default:
-        break;
-    }
-
-    return res.json({ received: true });
-  } catch (err) {
-    return res.status(500).json({
-      error: "webhook_handler_failed",
-      message: String(err?.message || err),
-    });
-  }
-});
+billingRouter.post("/stripe/webhook", handleStripeWebhook);

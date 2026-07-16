@@ -3,7 +3,10 @@ import { Router } from "express";
 import Stripe from "stripe";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
-import { grantProductEntitlement } from "../services/entitlement.service.js";
+import {
+  grantProductEntitlement,
+  TABFORGE_CLOUD_ENTITLEMENTS,
+} from "../services/entitlement.service.js";
 import { recordReferralPurchase } from "../services/referrals/referral.service.js";
 import {
   markInmateRecordsOrderPaidFromStripe,
@@ -29,8 +32,7 @@ function isReferralQualifyingPurchase(entitlementSlug) {
   return normalizeSlug(entitlementSlug) === "tabforge";
 }
 const TABFORGE_COLLECTION_ENTITLEMENTS = [
-  "tabforge-subscription",
-  "tabforge-collections",
+  ...TABFORGE_CLOUD_ENTITLEMENTS,
   "tabforge-pack-builder",
   "tabforge-pack-money",
   "tabforge-pack-dev",
@@ -476,7 +478,7 @@ async function handleInvoicePaymentFailed(invoice) {
     });
 }
 
-async function handleStripeWebhook(req, res) {
+export async function handleStripeWebhook(req, res) {
   if (!env.stripeWebhookSecret || !env.stripeSecretKey) {
     return res.status(500).send("Stripe not configured");
   }

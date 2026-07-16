@@ -1,6 +1,13 @@
 import crypto from "crypto";
 import { db } from "../config/db.js";
 
+export const TABFORGE_CLOUD_ENTITLEMENTS = Object.freeze([
+  "tabforge-subscription",
+  "tabforge-collections",
+  "tabforge-collections-subscription",
+  "tabforge-sync-collections",
+]);
+
 function ym(date = new Date()) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -86,6 +93,24 @@ export async function hasProductEntitlement(userId, productSlug) {
       product_slug: slug,
       status: "active",
     })
+    .andWhere((qb) => {
+      qb.whereNull("expires_at").orWhere("expires_at", ">", db.fn.now());
+    })
+    .first();
+
+  return Boolean(row);
+}
+
+export async function hasAnyProductEntitlement(userId, productSlugs) {
+  const slugs = [...new Set((productSlugs || []).map(normalizeProductSlug).filter(Boolean))];
+  if (!userId || !slugs.length) return false;
+
+  const row = await db("product_entitlements")
+    .where({
+      user_id: userId,
+      status: "active",
+    })
+    .whereIn("product_slug", slugs)
     .andWhere((qb) => {
       qb.whereNull("expires_at").orWhere("expires_at", ">", db.fn.now());
     })
