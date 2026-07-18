@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node src/server.js",
     "worker": "node src/jobs/worker.js",
-    "migrate": "knex --knexfile knexfile.cjs migrate:latest"
+    "migrate": "knex --knexfile knexfile.cjs migrate:latest",
+    "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.4",

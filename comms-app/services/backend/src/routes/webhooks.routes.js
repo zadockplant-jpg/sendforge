@@ -2,9 +2,18 @@ import { Router } from "express";
 import { db } from "../config/db.js";
 import { verifyTwilioSignature } from "../middleware/twilioSignature.js";
 import { verifySendgridSignature } from "../middleware/sendgridSignature.js";
-import { addSuppression } from "../services/suppression.service.js";
+import {
+  addReferralDestinationSuppression,
+  addSuppression,
+} from "../services/suppression.service.js";
 import { logMessageEvent } from "../services/audit.service.js";
 import { upsertThread, insertMessage } from "../services/thread.service.js";
+import {
+  applyReferralInviteSendgridEvent,
+  isUuidValue,
+  sendgridCustomArg,
+} from "../services/emailDelivery.service.js";
+import { log, sanitizeEmail } from "../utils/logger.js";
 
 export const webhooksRouter = Router();
 
@@ -130,50 +139,135 @@ webhooksRouter.post(
   async (req, res) => {
     const events = Array.isArray(req.body) ? req.body : [];
 
-    for (const ev of events) {
-      const email = String(ev.email || "").trim().toLowerCase();
-      const event = String(ev.event || "");
-      const sgid = String(ev.sg_message_id || "");
+    try {
+      for (const ev of events) {
+        const email = String(ev.email || "").trim().toLowerCase();
+        const event = String(ev.event || "").toLowerCase();
+        const sgid = String(ev.sg_message_id || "");
+        const messageKind = sendgridCustomArg(ev, "sf_message_kind");
 
-      let br = null;
+        const referralResult = await applyReferralInviteSendgridEvent(ev);
+        if (referralResult.handled) {
+          log("info", "referral_sendgrid_event", {
+            referralEventId: referralResult.referralEventId,
+            event,
+            status: referralResult.status || null,
+            duplicate: Boolean(referralResult.duplicate),
+            recipient: sanitizeEmail(
+              referralResult.recipientEmail || email
+            ),
+          });
+          if (referralResult.shouldSuppress) {
+            if (referralResult.referrerUserId) {
+              await addSuppression({
+                userId: referralResult.referrerUserId,
+                channel: "email",
+                destination:
+                  referralResult.recipientEmail || email,
+                reason: event,
+              });
+            }
+            if (referralResult.shouldSuppressGlobally) {
+              await addReferralDestinationSuppression({
+                destination:
+                  referralResult.recipientEmail || email,
+                reason: event,
+              });
+            }
+          }
+          continue;
+        }
 
-      if (sgid) {
-        br = await db("blast_recipients")
-          .where({ provider_message_id: sgid })
-          .first();
-      }
+        if (messageKind) {
+          log("info", "transactional_sendgrid_event", {
+            messageKind,
+            messageRef:
+              sendgridCustomArg(ev, "sf_message_ref") || null,
+            event,
+            recipient: sanitizeEmail(email),
+          });
+          continue;
+        }
 
-      if (!br && email) {
-        br = await db("blast_recipients")
-          .where({ destination: email })
-          .orderBy("created_at", "desc")
-          .first();
-      }
+        const blastRecipientId = sendgridCustomArg(
+          ev,
+          "sf_blast_recipient_id"
+        );
+        let br = null;
+        if (blastRecipientId && isUuidValue(blastRecipientId)) {
+          br = await db("blast_recipients")
+            .where({ id: blastRecipientId })
+            .first();
+        }
+        if (!br && sgid) {
+          br = await db("blast_recipients")
+            .where({ provider_message_id: sgid })
+            .first();
+        }
 
-      if (!br) continue;
+        // Never guess by recipient address: one address can have several
+        // active sends, and a webhook must update only its exact message.
+        if (!br) continue;
 
-      await logMessageEvent({
-        userId: br.user_id,
-        blastId: br.blast_id,
-        blastRecipientId: br.id,
-        eventType: "provider_update",
-        payload: { provider: "sendgrid", event, raw: ev },
-      });
-
-      if (
-        event === "bounce" ||
-        event === "dropped" ||
-        event === "spamreport"
-      ) {
-        await addSuppression({
+        await logMessageEvent({
           userId: br.user_id,
-          channel: "email",
-          destination: br.destination,
-          reason: event,
+          blastId: br.blast_id,
+          blastRecipientId: br.id,
+          eventType: "provider_update",
+          payload: {
+            provider: "sendgrid",
+            event,
+            sg_event_id: ev.sg_event_id,
+          },
         });
+
+        const nextStatus =
+          event === "delivered"
+            ? "sent"
+            : [
+                "bounce",
+                "dropped",
+                "spamreport",
+                "unsubscribe",
+                "group_unsubscribe",
+              ].includes(event)
+              ? "failed"
+              : br.status;
+        if (nextStatus !== br.status) {
+          await db("blast_recipients")
+            .where({ id: br.id })
+            .update({
+              status: nextStatus,
+              updated_at: db.fn.now(),
+            });
+        }
+
+        if (
+          [
+            "bounce",
+            "dropped",
+            "spamreport",
+            "unsubscribe",
+            "group_unsubscribe",
+          ].includes(event)
+        ) {
+          await addSuppression({
+            userId: br.user_id,
+            channel: "email",
+            destination: br.destination,
+            reason: event,
+          });
+        }
       }
+    } catch (err) {
+      log("error", "sendgrid_webhook_processing_failed", {
+        code: err?.code,
+        message: String(err?.message || err).slice(0, 300),
+      });
+      // SendGrid retries non-2xx webhook responses.
+      return res.status(500).json({ error: "webhook_processing_failed" });
     }
 
-    res.json({ ok: true });
+    return res.json({ ok: true });
   }
 );

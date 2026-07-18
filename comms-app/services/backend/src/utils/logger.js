@@ -2,14 +2,16 @@
 import crypto from "crypto";
 
 export function getRequestId(req) {
-  return (
+  const supplied =
     req.headers["x-request-id"] ||
     req.headers["cf-ray"] ||
-    crypto.randomUUID()
-  );
+    "";
+  const candidate = String(supplied).trim();
+  return /^[a-zA-Z0-9._:-]{1,128}$/.test(candidate)
+    ? candidate
+    : crypto.randomUUID();
 }
 
-// JSON-line logs (Render-friendly)
 export function log(level, msg, meta = {}) {
   const payload = {
     ts: new Date().toISOString(),

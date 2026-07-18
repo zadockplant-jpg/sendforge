@@ -8,6 +8,15 @@ export const TABFORGE_CLOUD_ENTITLEMENTS = Object.freeze([
   "tabforge-sync-collections",
 ]);
 
+const ACCOUNT_PRODUCT_ALIASES = Object.freeze({
+  tabforge: "tabforge",
+  "tabforge-pro": "tabforge",
+  "tabforge-subscription": "tabforge-subscription",
+  "tabforge-collections": "tabforge-subscription",
+  "tabforge-collections-subscription": "tabforge-subscription",
+  "tabforge-sync-collections": "tabforge-subscription",
+});
+
 function ym(date = new Date()) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -81,6 +90,17 @@ export async function listProductEntitlements(userId, opts = {}) {
   }
 
   return query;
+}
+
+export function currentAccountProductEntitlements(rows) {
+  const current = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const sourceSlug = normalizeProductSlug(row?.product_slug);
+    const productSlug = ACCOUNT_PRODUCT_ALIASES[sourceSlug];
+    if (!productSlug || current.has(productSlug)) continue;
+    current.set(productSlug, { ...row, product_slug: productSlug });
+  }
+  return [...current.values()];
 }
 
 export async function hasProductEntitlement(userId, productSlug) {

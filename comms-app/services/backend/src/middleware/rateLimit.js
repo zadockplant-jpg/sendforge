@@ -1,14 +1,16 @@
+import crypto from "node:crypto";
+
 const buckets = new Map();
+const MAX_RATE_LIMIT_IDENTITY_CHARS = 512;
+const MAX_RATE_LIMIT_EMAIL_CHARS = 320;
 
 function nowMs() {
   return Date.now();
 }
 
 function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.trim()) {
-    return forwarded.split(",")[0].trim();
-  }
+  // Express resolves req.ip using the configured trust-proxy boundary.
+  // Reading X-Forwarded-For directly would let clients mint new buckets.
   return req.ip || req.socket?.remoteAddress || "unknown";
 }
 
@@ -17,6 +19,28 @@ function cleanOldBuckets(currentTime) {
   for (const [key, bucket] of buckets.entries()) {
     if (bucket.resetAt <= currentTime) buckets.delete(key);
   }
+}
+
+export function normalizeRateLimitEmail(value) {
+  return (
+    String(value || "")
+      .toLowerCase()
+      .trim()
+      .slice(0, MAX_RATE_LIMIT_EMAIL_CHARS) || "unknown-email"
+  );
+}
+
+export function hashRateLimitIdentity(value) {
+  // Store only a fixed-size digest. Request bodies are parsed before route
+  // validation and may be large, so never retain their raw values in Map keys.
+  const bounded = String(value || "unknown").slice(
+    0,
+    MAX_RATE_LIMIT_IDENTITY_CHARS
+  );
+  return crypto
+    .createHash("sha256")
+    .update(bounded)
+    .digest("base64url");
 }
 
 export function createRateLimiter({
@@ -34,7 +58,9 @@ export function createRateLimiter({
     const currentTime = nowMs();
     cleanOldBuckets(currentTime);
 
-    const identity = String(keyGenerator ? keyGenerator(req) : getClientIp(req) || "unknown");
+    const identity = hashRateLimitIdentity(
+      keyGenerator ? keyGenerator(req) : getClientIp(req) || "unknown"
+    );
     const key = `${name}:${identity}`;
     let bucket = buckets.get(key);
 
@@ -57,8 +83,12 @@ export function createRateLimiter({
 
 export function rateLimitByIpAndBodyEmail(req) {
   const ip = getClientIp(req);
-  const email = String(req.body?.email || "").toLowerCase().trim() || "unknown-email";
+  const email = normalizeRateLimitEmail(req.body?.email);
   return `${ip}:${email}`;
+}
+
+export function rateLimitByIp(req) {
+  return getClientIp(req);
 }
 
 export function rateLimitByUserOrIp(req) {

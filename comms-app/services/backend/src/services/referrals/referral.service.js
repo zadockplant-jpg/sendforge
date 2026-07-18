@@ -140,11 +140,17 @@ export async function createReferralInvite({
   referralCode,
   recipientEmail,
   productSlug = "tabforge",
+  recipientConsentAttested = false,
   trx = db,
 }) {
   const recipient = normalizeEmail(recipientEmail);
   const slug = normalizeProductSlug(productSlug) || "tabforge";
-  if (!referrerUser?.id || !recipient || !referralCode?.id) {
+  if (
+    !referrerUser?.id ||
+    !recipient ||
+    !referralCode?.id ||
+    recipientConsentAttested !== true
+  ) {
     throw new Error("invalid_referral_invite_input");
   }
   if (normalizeEmail(referrerUser.email) === recipient) {
@@ -164,10 +170,23 @@ export async function createReferralInvite({
       product_slug: slug,
       purchase_ref: invitePurchaseRef(token),
       event_type: "invite",
-      status: "sent",
+      // This is the referral lifecycle state, not proof of email delivery.
+      // Provider acceptance and webhook outcomes live in metadata.email_delivery.
+      status: "created",
       metadata: {
         recipient_email: recipient,
         expires_at: expiresAt.toISOString(),
+        email_delivery: {
+          provider: "sendgrid",
+          status: "pending",
+          created_at: new Date().toISOString(),
+        },
+        consent: {
+          recipient_permission_attested: true,
+          attested_by_user_id: referrerUser.id,
+          attested_at: new Date().toISOString(),
+          source: "referral_invite_api",
+        },
       },
       updated_at: trx.fn.now(),
     })

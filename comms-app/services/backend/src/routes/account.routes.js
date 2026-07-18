@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "../config/db.js";
 import { requireAuth } from "../middleware/auth.js";
 import {
+  currentAccountProductEntitlements,
   getActivePlan,
   listProductEntitlements,
 } from "../services/entitlement.service.js";
@@ -13,9 +14,33 @@ import {
   tiersForVerifiedCount,
   updateUserCashAppTag,
 } from "../services/referrals/referral.service.js";
-import { sendReferralInviteEmail } from "../services/email.service.js";
+import {
+  EmailSendError,
+  sendReferralInviteEmail,
+} from "../services/email.service.js";
+import {
+  markReferralInviteEmailAccepted,
+  markReferralInviteEmailFailed,
+  referralInviteCooldownRemainingMs,
+  REFERRAL_INVITE_AMBIGUITY_COOLDOWN_MS,
+  REFERRAL_INVITE_DELIVERY_COOLDOWN_MS,
+} from "../services/emailDelivery.service.js";
+import {
+  createRateLimiter,
+  normalizeRateLimitEmail,
+  rateLimitByUserOrIp,
+} from "../middleware/rateLimit.js";
+import {
+  createEmailUnsubscribeToken,
+  isSuppressed,
+  isReferralDestinationSuppressed,
+} from "../services/suppression.service.js";
 import { env } from "../config/env.js";
-import { getRequestId } from "../utils/logger.js";
+import {
+  getRequestId,
+  log,
+  sanitizeEmail,
+} from "../utils/logger.js";
 
 export const accountRouter = Router();
 
@@ -25,7 +50,36 @@ const CashAppSchema = z.object({
 
 const ReferralInviteSchema = z.object({
   toEmail: z.string().email(),
-  productSlug: z.string().max(80).optional().default("tabforge"),
+  productSlug: z.literal("tabforge").optional().default("tabforge"),
+  recipientConsent: z.literal(true),
+});
+
+const referralInviteUserRateLimiter = createRateLimiter({
+  name: "referral-invite-user",
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: rateLimitByUserOrIp,
+  message: "too_many_referral_invites",
+});
+
+const referralInviteRecipientRateLimiter = createRateLimiter({
+  name: "referral-invite-user-recipient",
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  keyGenerator: (req) => {
+    const userId = rateLimitByUserOrIp(req);
+    const recipient = normalizeRateLimitEmail(req.body?.toEmail);
+    return `${userId}:${recipient}`;
+  },
+  message: "too_many_invites_to_recipient",
+});
+
+const referralInviteDestinationRateLimiter = createRateLimiter({
+  name: "referral-invite-destination",
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => normalizeRateLimitEmail(req.body?.toEmail),
+  message: "too_many_invites_to_recipient",
 });
 
 function normalizeProductSlug(value) {
@@ -34,6 +88,91 @@ function normalizeProductSlug(value) {
 
 function publicSiteBase() {
   return String(env.publicSiteUrl || env.publicBaseUrl || "https://sendforge.app").replace(/\/+$/, "");
+}
+
+async function prepareReferralInvite({
+  user,
+  recipientEmail,
+  productSlug,
+  recipientConsentAttested,
+}) {
+  const lockKey =
+    `referral-invite:${productSlug}:${recipientEmail}`;
+
+  return db.transaction(async (trx) => {
+    // Serialize double-clicks and concurrent requests for this exact invite.
+    await trx.raw(
+      "select pg_advisory_xact_lock(hashtextextended(?::text, 0))",
+      [lockKey]
+    );
+
+    const recentRows = await trx("referral_events")
+      .select("created_at", "status", "metadata")
+      .where({
+        product_slug: productSlug,
+        event_type: "invite",
+      })
+      .where(
+        "created_at",
+        ">",
+        new Date(
+          Date.now() - REFERRAL_INVITE_DELIVERY_COOLDOWN_MS
+        )
+      )
+      .whereRaw("metadata ->> 'recipient_email' = ?", [recipientEmail])
+      .orderBy("created_at", "desc")
+      .limit(50);
+
+    const stateCooldownRemainingMs = recentRows.reduce(
+      (max, row) =>
+        Math.max(max, referralInviteCooldownRemainingMs(row)),
+      0
+    );
+    const oldestLimitedRow =
+      recentRows.length >= 5
+        ? recentRows[4]
+        : null;
+    const oldestLimitedAt = oldestLimitedRow
+      ? new Date(oldestLimitedRow.created_at).getTime()
+      : Number.NaN;
+    const volumeCooldownRemainingMs =
+      Number.isFinite(oldestLimitedAt)
+        ? Math.max(
+            0,
+            oldestLimitedAt +
+              REFERRAL_INVITE_DELIVERY_COOLDOWN_MS -
+              Date.now()
+          )
+        : 0;
+    const remainingMs = Math.max(
+      stateCooldownRemainingMs,
+      volumeCooldownRemainingMs
+    );
+    if (remainingMs > 0) {
+      return {
+        retryAfterSeconds: Math.max(
+          1,
+          Math.ceil(remainingMs / 1000)
+        ),
+      };
+    }
+
+    const code = await ensureReferralCodeForUser(user, trx);
+    const invite = await createReferralInvite({
+      referrerUser: user,
+      referralCode: code,
+      recipientEmail,
+      productSlug,
+      recipientConsentAttested,
+      trx,
+    });
+    const unsubscribeToken = await createEmailUnsubscribeToken({
+      userId: user.id,
+      destination: recipientEmail,
+      trx,
+    });
+    return { invite, unsubscribeToken };
+  });
 }
 
 function toCamelReward(row) {
@@ -81,7 +220,9 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
     }
 
     const activePlan = await getActivePlan(req.user.sub);
-    const entitlements = await listProductEntitlements(req.user.sub);
+    const entitlements = currentAccountProductEntitlements(
+      await listProductEntitlements(req.user.sub)
+    );
     const referralCode = await ensureReferralCodeForUser(user);
 
     return res.json({
@@ -134,7 +275,9 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
  */
 accountRouter.get("/entitlements", requireAuth, async (req, res) => {
   try {
-    const entitlements = await listProductEntitlements(req.user.sub);
+    const entitlements = currentAccountProductEntitlements(
+      await listProductEntitlements(req.user.sub)
+    );
     return res.json({
       items: entitlements.map((row) => ({
         productSlug: row.product_slug,
@@ -211,6 +354,12 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         .limit(100),
       db("referral_events")
         .where({ referrer_user_id: user.id, product_slug: "tabforge", event_type: "invite" })
+        .andWhere(function countAcceptedOrClaimedInvites() {
+          this.whereIn("status", ["sent", "claimed"]).orWhereRaw(
+            "metadata #>> '{email_delivery,status}' in (?, ?, ?, ?)",
+            ["accepted", "processed", "deferred", "delivered"]
+          );
+        })
         .count({ count: "id" })
         .first(),
       db("referral_events")
@@ -293,6 +442,11 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
           productSlug: row.product_slug,
           eventType: row.event_type,
           status: row.status,
+          emailStatus:
+            row.event_type === "invite"
+              ? row.metadata?.email_delivery?.status ||
+                (row.status === "sent" ? "accepted" : null)
+              : null,
           createdAt: row.created_at,
         })),
       rewards: rewardRows.map(toCamelReward),
@@ -335,62 +489,148 @@ accountRouter.get("/referrals/invite/:token", async (req, res) => {
  * invite token and is prefilled on signup; the referrer's identity is not put
  * into the signup email field.
  */
-accountRouter.post("/referrals/invite", requireAuth, async (req, res) => {
-  const parsed = ReferralInviteSchema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
-
-  try {
-    const user = await db("users")
-      .select("id", "email", "cash_app_tag")
-      .where({ id: req.user.sub })
-      .first();
-    if (!user) return res.status(404).json({ error: "user_not_found" });
-
-    const recipientEmail = parsed.data.toEmail.toLowerCase().trim();
-    if (recipientEmail === String(user.email || "").toLowerCase().trim()) {
-      return res.status(400).json({ error: "self_referral_not_allowed" });
+accountRouter.post(
+  "/referrals/invite",
+  requireAuth,
+  referralInviteUserRateLimiter,
+  referralInviteDestinationRateLimiter,
+  referralInviteRecipientRateLimiter,
+  async (req, res) => {
+    if (req.body?.recipientConsent !== true) {
+      return res
+        .status(400)
+        .json({ error: "recipient_consent_required" });
+    }
+    const parsed = ReferralInviteSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid_input" });
     }
 
-    const code = await ensureReferralCodeForUser(user);
-    const productSlug = normalizeProductSlug(parsed.data.productSlug);
-    const productName = productSlug === "tabforge" ? "TabForge" : productSlug;
-    const invite = await createReferralInvite({
-      referrerUser: user,
-      referralCode: code,
-      recipientEmail,
-      productSlug,
-    });
+    let invite = null;
+    const requestId = getRequestId(req);
 
-    const params = new URLSearchParams();
-    params.set("invite", invite.token);
-    params.set("next", "/store/index.html");
-    params.set("product", productSlug);
-    const referralUrl = `${publicSiteBase()}/signup.html?${params.toString()}`;
+    try {
+      const user = await db("users")
+        .select("id", "email", "cash_app_tag")
+        .where({ id: req.user.sub })
+        .first();
+      if (!user) return res.status(404).json({ error: "user_not_found" });
 
-    const sendResult = await sendReferralInviteEmail({
-      to: recipientEmail,
-      fromEmail: user.email,
-      referralUrl,
-      productName,
-      requestId: getRequestId(req),
-    });
+      const recipientEmail = parsed.data.toEmail.toLowerCase().trim();
+      if (recipientEmail === String(user.email || "").toLowerCase().trim()) {
+        return res.status(400).json({ error: "self_referral_not_allowed" });
+      }
+      const [senderSuppressed, globallySuppressed] = await Promise.all([
+        isSuppressed({
+          userId: user.id,
+          channel: "email",
+          destination: recipientEmail,
+        }),
+        isReferralDestinationSuppressed(recipientEmail),
+      ]);
+      if (senderSuppressed || globallySuppressed) {
+        return res.status(409).json({ error: "recipient_suppressed" });
+      }
 
-    return res.json({
-      ok: true,
-      referralUrl,
-      recipientEmail,
-      emailMode: sendResult?.mode || "sendgrid",
-    });
-  } catch (err) {
-    if (err?.code === "SELF_REFERRAL") {
-      return res.status(400).json({ error: "self_referral_not_allowed" });
+      const productSlug = normalizeProductSlug(parsed.data.productSlug);
+      const prepared = await prepareReferralInvite({
+        user,
+        recipientEmail,
+        productSlug,
+        recipientConsentAttested:
+          parsed.data.recipientConsent,
+      });
+      if (prepared.retryAfterSeconds) {
+        res.set(
+          "Retry-After",
+          String(prepared.retryAfterSeconds)
+        );
+        return res.status(409).json({
+          error: "invite_recently_sent",
+          retryAfterSeconds: prepared.retryAfterSeconds,
+        });
+      }
+
+      const productName = productSlug === "tabforge" ? "TabForge" : productSlug;
+      invite = prepared.invite;
+
+      const params = new URLSearchParams();
+      params.set("invite", invite.token);
+      params.set("next", "/store/index.html");
+      params.set("product", productSlug);
+      const referralUrl = `${publicSiteBase()}/signup.html?${params.toString()}`;
+      const unsubscribeUrl =
+        `${env.publicBaseUrl.replace(/\/+$/, "")}/v1/unsubscribe` +
+        `?token=${encodeURIComponent(prepared.unsubscribeToken)}`;
+
+      const sendResult = await sendReferralInviteEmail({
+        to: recipientEmail,
+        fromEmail: user.email,
+        referralUrl,
+        productName,
+        requestId,
+        referralEventId: invite.event.id,
+        unsubscribeUrl,
+      });
+      await markReferralInviteEmailAccepted({
+        referralEventId: invite.event.id,
+        sendResult,
+      }).catch((metadataError) => {
+        // The signed webhook carries this event ID and can still reconcile
+        // delivery. Do not encourage a duplicate send after provider acceptance.
+        log("error", "referral_email_acceptance_state_update_failed", {
+          requestId,
+          referralEventId: invite.event.id,
+          code: metadataError?.code,
+        });
+      });
+
+      return res.json({
+        ok: true,
+        referralUrl,
+        recipientEmail,
+        emailMode: sendResult?.mode || "sendgrid",
+        emailStatus: sendResult?.status || "accepted",
+      });
+    } catch (err) {
+      if (err?.code === "SELF_REFERRAL") {
+        return res.status(400).json({ error: "self_referral_not_allowed" });
+      }
+      if (invite?.event?.id && err instanceof EmailSendError) {
+        await markReferralInviteEmailFailed({
+          referralEventId: invite.event.id,
+          error: err,
+        }).catch((metadataError) => {
+          log("error", "referral_email_failure_state_update_failed", {
+            requestId,
+            referralEventId: invite.event.id,
+            code: metadataError?.code,
+          });
+        });
+      }
+      if (err instanceof EmailSendError) {
+        const deliveryUnknown = err.code === "network_error";
+        const retryAfterSeconds = Math.ceil(
+          REFERRAL_INVITE_AMBIGUITY_COOLDOWN_MS / 1000
+        );
+        log("error", "referral_email_send_failed", {
+          requestId,
+          referralEventId: invite?.event?.id || null,
+          recipient: sanitizeEmail(parsed.data.toEmail),
+          code: err.code,
+        });
+        res.set("Retry-After", String(retryAfterSeconds));
+        return res.status(502).json({
+          error: "referral_email_failed",
+          canRetry: !deliveryUnknown,
+          deliveryUnknown,
+          retryAfterSeconds,
+        });
+      }
+      return res.status(500).json({ error: "server_error" });
     }
-    return res.status(500).json({
-      error: "server_error",
-      message: String(err?.message || err),
-    });
   }
-});
+);
 
 async function handleCashAppUpdate(req, res) {
   const parsed = CashAppSchema.safeParse(req.body || {});

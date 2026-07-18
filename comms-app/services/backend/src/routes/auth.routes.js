@@ -13,7 +13,11 @@ import {
   EmailSendError,
 } from "../services/email.service.js";
 import { log, getRequestId, sanitizeEmail } from "../utils/logger.js";
-import { createRateLimiter, rateLimitByIpAndBodyEmail } from "../middleware/rateLimit.js";
+import {
+  createRateLimiter,
+  rateLimitByIp,
+  rateLimitByIpAndBodyEmail,
+} from "../middleware/rateLimit.js";
 import {
   applySignupReferral,
   claimReferralInviteToken,
@@ -60,6 +64,46 @@ const loginRateLimiter = createRateLimiter({
   message: "too_many_login_attempts",
 });
 
+const registerRateLimiter = createRateLimiter({
+  name: "auth-register",
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: rateLimitByIpAndBodyEmail,
+  message: "too_many_registration_attempts",
+});
+
+const registerIpRateLimiter = createRateLimiter({
+  name: "auth-register-ip",
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: rateLimitByIp,
+  message: "too_many_registration_attempts",
+});
+
+const verificationEmailRateLimiter = createRateLimiter({
+  name: "auth-verification-email",
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: rateLimitByIpAndBodyEmail,
+  message: "too_many_verification_requests",
+});
+
+const accountEmailRateLimiter = createRateLimiter({
+  name: "auth-account-email",
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: rateLimitByIpAndBodyEmail,
+  message: "too_many_account_email_requests",
+});
+
+const accountEmailIpRateLimiter = createRateLimiter({
+  name: "auth-account-email-ip",
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: rateLimitByIp,
+  message: "too_many_account_email_requests",
+});
+
 // Helpers
 function sha256(input) {
   return crypto.createHash("sha256").update(input).digest("hex");
@@ -90,6 +134,45 @@ function forgotPasswordUrl() {
   return `${siteBase}/forgot-password.html`;
 }
 
+export function emailDeliveryWasAmbiguous(error) {
+  return (
+    error instanceof EmailSendError &&
+    (error.code === "network_error" ||
+      error.details?.deliveryUnknown === true)
+  );
+}
+
+export async function restorePriorEmailTokenAfterDefinitiveFailure({
+  userId,
+  rotatedTokenHash,
+  priorTokenHash,
+  priorSentAt,
+  requestId,
+  operation,
+  database = db,
+  writeLog = log,
+}) {
+  // Keep a previously delivered link valid when SendGrid definitively rejects
+  // its replacement. The current-token condition is a concurrency guard: a
+  // newer request must never be rolled back by an older failed request.
+  const restoredRows = await database("users")
+    .where({
+      id: userId,
+      verification_token_hash: rotatedTokenHash,
+    })
+    .update({
+      verification_token_hash: priorTokenHash || null,
+      verification_sent_at: priorSentAt || null,
+    });
+
+  writeLog("info", "email_token_restore_after_send_failure", {
+    requestId,
+    userId,
+    operation,
+    restored: Number(restoredRows) > 0,
+  });
+}
+
 /**
  * POST /v1/auth/register
  *
@@ -100,9 +183,10 @@ function forgotPasswordUrl() {
  *
  * Email send failures:
  * - User remains unverified, token stored (so resend works)
- * - Response: 202 { ok:true, email_send:"failed", can_resend:true }
+ * - Definitive rejection: 202 { email_send:"failed", can_resend:true }
+ * - Ambiguous network failure: 202 { email_send:"unknown", can_resend:false }
  */
-authRouter.post("/register", async (req, res) => {
+authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (req, res) => {
   const requestId = getRequestId(req);
 
   if (!env.jwtSecret) {
@@ -186,7 +270,12 @@ authRouter.post("/register", async (req, res) => {
           });
         }
 
-        return { kind: "exists_unverified", userId: existing.id };
+        return {
+          kind: "exists_unverified",
+          userId: existing.id,
+          priorTokenHash: existing.verification_token_hash || null,
+          priorSentAt: existing.verification_sent_at || null,
+        };
       }
 
       // Create new user
@@ -240,26 +329,48 @@ authRouter.post("/register", async (req, res) => {
         to: email,
         verifyUrl,
         requestId,
+        userId: result.userId,
       });
     } catch (e) {
-      // Email failure should not lock out user. They can resend.
       const code =
         e instanceof EmailSendError ? e.code : "email_send_failed_unknown";
+      const deliveryUnknown = emailDeliveryWasAmbiguous(e);
 
       log("error", "register_email_send_failed", {
         requestId,
         email: sanitizeEmail(email),
         code,
+        deliveryUnknown,
       });
 
-      // Still “successful registration” from DB perspective, but email failed.
-      // Return 202 Accepted so UI can show “We couldn’t send; tap to resend.”
+      if (!deliveryUnknown && result.kind === "exists_unverified") {
+        await restorePriorEmailTokenAfterDefinitiveFailure({
+          userId: result.userId,
+          rotatedTokenHash: verifyTokenHash,
+          priorTokenHash: result.priorTokenHash,
+          priorSentAt: result.priorSentAt,
+          requestId,
+          operation: "register-verification",
+        }).catch((restoreError) => {
+          log("error", "register_email_token_restore_failed", {
+            requestId,
+            userId: result.userId,
+            code: restoreError?.code,
+          });
+        });
+      }
+
+      // A timeout/disconnect may happen after SendGrid accepted the request.
+      // Preserve the new token and tell the client not to trigger a duplicate.
       return res.status(202).json({
         ok: true,
-        status: result.kind, // created | exists_unverified | exists_verified
-        email_send: "failed",
-        can_resend: result.kind !== "exists_verified",
-        error: "verification_email_failed",
+        status: result.kind,
+        email_send: deliveryUnknown ? "unknown" : "failed",
+        can_resend:
+          !deliveryUnknown && result.kind !== "exists_verified",
+        error: deliveryUnknown
+          ? "verification_email_status_unknown"
+          : "verification_email_failed",
       });
     }
 
@@ -318,7 +429,7 @@ authRouter.post("/register", async (req, res) => {
  * Response should not leak existence:
  * - Always { ok:true }
  */
-authRouter.post("/resend-verification", async (req, res) => {
+authRouter.post("/resend-verification", accountEmailIpRateLimiter, verificationEmailRateLimiter, async (req, res) => {
   const requestId = getRequestId(req);
 
   const schema = z.object({ email: z.string().email() });
@@ -357,13 +468,36 @@ authRouter.post("/resend-verification", async (req, res) => {
       });
 
     try {
-      await sendVerificationEmail({ to: email, verifyUrl, requestId });
+      await sendVerificationEmail({
+        to: email,
+        verifyUrl,
+        requestId,
+        userId: user.id,
+      });
     } catch (e) {
+      const deliveryUnknown = emailDeliveryWasAmbiguous(e);
       log("error", "resend_email_send_failed", {
         requestId,
         email: sanitizeEmail(email),
         code: e?.code,
+        deliveryUnknown,
       });
+      if (!deliveryUnknown) {
+        await restorePriorEmailTokenAfterDefinitiveFailure({
+          userId: user.id,
+          rotatedTokenHash: verifyTokenHash,
+          priorTokenHash: user.verification_token_hash,
+          priorSentAt: user.verification_sent_at,
+          requestId,
+          operation: "resend-verification",
+        }).catch((restoreError) => {
+          log("error", "resend_email_token_restore_failed", {
+            requestId,
+            userId: user.id,
+            code: restoreError?.code,
+          });
+        });
+      }
       // Still return ok:true to prevent enumeration.
       return res.json({ ok: true });
     }
@@ -390,7 +524,7 @@ authRouter.post("/resend-verification", async (req, res) => {
  *   as a password-reset token store.
  * - For unverified users, we quietly refresh and resend verification instead.
  */
-authRouter.post("/forgot-password", async (req, res) => {
+authRouter.post("/forgot-password", accountEmailIpRateLimiter, accountEmailRateLimiter, async (req, res) => {
   const requestId = getRequestId(req);
 
   const parsed = ForgotPassword.safeParse(req.body);
@@ -429,13 +563,32 @@ authRouter.post("/forgot-password", async (req, res) => {
           to: email,
           verifyUrl,
           requestId,
+          userId: user.id,
         });
       } catch (e) {
+        const deliveryUnknown = emailDeliveryWasAmbiguous(e);
         log("error", "forgot_password_unverified_resend_failed", {
           requestId,
           email: sanitizeEmail(email),
           code: e?.code,
+          deliveryUnknown,
         });
+        if (!deliveryUnknown) {
+          await restorePriorEmailTokenAfterDefinitiveFailure({
+            userId: user.id,
+            rotatedTokenHash: verifyTokenHash,
+            priorTokenHash: user.verification_token_hash,
+            priorSentAt: user.verification_sent_at,
+            requestId,
+            operation: "forgot-password-verification",
+          }).catch((restoreError) => {
+            log("error", "forgot_password_email_token_restore_failed", {
+              requestId,
+              userId: user.id,
+              code: restoreError?.code,
+            });
+          });
+        }
       }
 
       return res.json({ ok: true });
@@ -460,11 +613,29 @@ authRouter.post("/forgot-password", async (req, res) => {
         requestId,
       });
     } catch (e) {
+      const deliveryUnknown = emailDeliveryWasAmbiguous(e);
       log("error", "forgot_password_email_send_failed", {
         requestId,
         email: sanitizeEmail(email),
         code: e?.code,
+        deliveryUnknown,
       });
+      if (!deliveryUnknown) {
+        await restorePriorEmailTokenAfterDefinitiveFailure({
+          userId: user.id,
+          rotatedTokenHash: resetTokenHash,
+          priorTokenHash: user.verification_token_hash,
+          priorSentAt: user.verification_sent_at,
+          requestId,
+          operation: "forgot-password-reset",
+        }).catch((restoreError) => {
+          log("error", "forgot_password_email_token_restore_failed", {
+            requestId,
+            userId: user.id,
+            code: restoreError?.code,
+          });
+        });
+      }
     }
 
     return res.json({ ok: true });
@@ -561,7 +732,7 @@ authRouter.post("/reset-password", async (req, res) => {
  * - if account exists, sends account reminder / next-step email
  * - always returns { ok:true } to avoid enumeration
  */
-authRouter.post("/recover-account", async (req, res) => {
+authRouter.post("/recover-account", accountEmailIpRateLimiter, accountEmailRateLimiter, async (req, res) => {
   const requestId = getRequestId(req);
 
   const parsed = RecoverAccount.safeParse(req.body);
