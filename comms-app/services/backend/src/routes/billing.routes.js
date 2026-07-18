@@ -5,7 +5,28 @@ import { z } from "zod";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
-import { getActivePlan, grantProductEntitlement } from "../services/entitlement.service.js";
+import {
+  getActivePlan,
+  grantProductEntitlement,
+  hasAnyProductEntitlement,
+} from "../services/entitlement.service.js";
+import {
+  buildTabForgeProBundleCheckoutItems,
+  buildTabForgeProBundleLineItems,
+  buildTabForgeSubscriptionCheckoutOptions,
+  buildTabForgeSyncLineItem,
+  isManageableTabForgeSubscriptionStatus,
+  isTabForgeSyncEntitlement,
+  tabForgePastDueSince,
+  TABFORGE_PRO_PRODUCT_SLUG,
+  TABFORGE_SYNC_ENTITLEMENT_ALIASES,
+  TABFORGE_SYNC_ENTITLEMENT_SLUG,
+  TABFORGE_SYNC_PLAN,
+  TABFORGE_SYNC_PLAN_ALIASES,
+  TABFORGE_SYNC_PRICE_CENTS,
+  TABFORGE_SYNC_PRODUCT_SLUG,
+  TABFORGE_SYNC_TRIAL_DAYS,
+} from "../services/tabforgeBilling.service.js";
 import { handleStripeWebhook } from "./stripe.webhooks.routes.js";
 
 export const billingRouter = Router();
@@ -14,10 +35,11 @@ const PRODUCT_CATALOG = {
   tabforge: {
     slug: "tabforge",
     displayName: "TabForge Pro",
-    mode: "payment",
+    mode: "subscription",
     stripePriceId: env.stripePriceTabforge,
     unitAmountCents: 1000,
-    defaultSuccessPath: "/products/tabforge/index.html",
+    includedSyncTrialDays: TABFORGE_SYNC_TRIAL_DAYS,
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-pro",
     defaultCancelPath: "/products/tabforge/index.html",
   },
   "tabforge-page": {
@@ -34,13 +56,16 @@ const PRODUCT_CATALOG = {
   },
   "tabforge-collections-subscription": {
     slug: "tabforge-collections-subscription",
-    displayName: "TabForge Sync + Collections",
+    displayName: "TabForge Private Sync",
     mode: "subscription",
-    unitAmountCents: 500,
-    entitlementSlug: "tabforge-subscription",
-    subscriptionPlan: "tabforge_sync_collections",
-    defaultSuccessPath: "/account/index.html?purchase_context=tf-pack",
-    defaultCancelPath: "/store/index.html#tabforge",
+    stripePriceId: env.stripePriceTabforgeSync,
+    unitAmountCents: TABFORGE_SYNC_PRICE_CENTS,
+    entitlementSlug: TABFORGE_SYNC_ENTITLEMENT_SLUG,
+    subscriptionPlan: TABFORGE_SYNC_PLAN,
+    requiresEntitlement: TABFORGE_PRO_PRODUCT_SLUG,
+    accountOnly: true,
+    defaultSuccessPath: "/account/index.html?purchase_context=tf-sync",
+    defaultCancelPath: "/account/index.html",
   },
   "tabforge-skin-command-center": {
     slug: "tabforge-skin-command-center",
@@ -206,6 +231,11 @@ function normalizeSlug(slug) {
     .toLowerCase();
 }
 
+function stripeResourceId(value) {
+  if (!value) return "";
+  return typeof value === "string" ? value : String(value.id || "");
+}
+
 function getProductDefinition(productSlug) {
   return PRODUCT_CATALOG[normalizeSlug(productSlug)] || null;
 }
@@ -220,10 +250,20 @@ function getSkinDefinition(skinSlug) {
 }
 
 function sanitizeRelativePath(path, fallback) {
-  if (typeof path === "string" && path.startsWith("/")) {
-    return path;
+  if (typeof path !== "string") return fallback;
+  const value = path.trim();
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) {
+    return fallback;
   }
-  return fallback;
+
+  try {
+    const base = new URL(env.publicSiteUrl);
+    const resolved = new URL(value, base);
+    if (resolved.origin !== base.origin) return fallback;
+    return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  } catch {
+    return fallback;
+  }
 }
 
 function buildSiteUrl(path, extraQuery = {}) {
@@ -252,6 +292,144 @@ function uniqStrings(values = []) {
 
 function serializeCheckoutItems(items = []) {
   return JSON.stringify(items);
+}
+
+function checkoutSelectionKey({ productSlug, mode, checkoutItems }) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        productSlug: normalizeSlug(productSlug),
+        mode: String(mode || ""),
+        items: checkoutItems,
+        paymentPolicy: "card_only_v1",
+      })
+    )
+    .digest("hex");
+}
+
+function checkoutIdempotencyKey({ userId, productSlug, selectionKey }) {
+  const thirtyMinuteBucket = Math.floor(Date.now() / (30 * 60 * 1000));
+  const digest = crypto
+    .createHash("sha256")
+    .update(
+      `${String(userId)}:${normalizeSlug(productSlug)}:${selectionKey}:${thirtyMinuteBucket}`
+    )
+    .digest("hex");
+  return `tabforge-checkout-v4:${digest}`;
+}
+
+function subscriptionIsTabForgeSync(subscription) {
+  const metadata = subscription?.metadata || {};
+  return (
+    normalizeSlug(metadata.plan) === TABFORGE_SYNC_PLAN ||
+    TABFORGE_SYNC_PLAN_ALIASES.includes(normalizeSlug(metadata.plan)) ||
+    normalizeSlug(metadata.product_slug) === TABFORGE_SYNC_PRODUCT_SLUG ||
+    isTabForgeSyncEntitlement(metadata.entitlement_slug) ||
+    parseCheckoutItems(metadata.checkout_items).some((item) =>
+      isTabForgeSyncEntitlement(item?.entitlementSlug || item?.slug)
+    )
+  );
+}
+
+function parseCheckoutItems(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(String(raw));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function findManageableStripeSyncSubscription(stripe, customerId) {
+  if (!stripe || !customerId) return null;
+  const subscriptions = await stripe.subscriptions.list({
+    customer: String(customerId),
+    status: "all",
+    limit: 100,
+  });
+  return (
+    (subscriptions?.data || []).find(
+      (subscription) =>
+        isManageableTabForgeSubscriptionStatus(subscription?.status) &&
+        subscriptionIsTabForgeSync(subscription)
+    ) || null
+  );
+}
+
+async function getOrCreateOpenCheckoutSession({
+  stripe,
+  userId,
+  productSlug,
+  selectionKey,
+  sessionConfig,
+  checkoutItems,
+}) {
+  return db.transaction(async (trx) => {
+    await trx.raw(
+      "select pg_advisory_xact_lock(hashtext(?), hashtext(?))",
+      [String(userId), normalizeSlug(productSlug)]
+    );
+
+    const now = new Date();
+    await trx("billing_checkout_attempts")
+      .where({
+        user_id: userId,
+        product_slug: normalizeSlug(productSlug),
+      })
+      .whereIn("status", ["open", "pending_payment"])
+      .andWhere("expires_at", "<=", now)
+      .update({ status: "expired", updated_at: trx.fn.now() });
+
+    const existing = await trx("billing_checkout_attempts")
+      .where({
+        user_id: userId,
+        product_slug: normalizeSlug(productSlug),
+        selection_key: selectionKey,
+      })
+      .whereIn("status", ["open", "pending_payment"])
+      .andWhere("expires_at", ">", now)
+      .orderBy("created_at", "desc")
+      .first();
+
+    if (existing?.stripe_checkout_session_id && existing?.checkout_url) {
+      return {
+        id: existing.stripe_checkout_session_id,
+        url: existing.checkout_url,
+        reused: true,
+      };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionConfig, {
+      idempotencyKey: checkoutIdempotencyKey({
+        userId,
+        productSlug,
+        selectionKey,
+      }),
+    });
+    const expiresAt = session.expires_at
+      ? new Date(Number(session.expires_at) * 1000)
+      : new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await trx("billing_checkout_attempts").insert({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      product_slug: normalizeSlug(productSlug),
+      selection_key: selectionKey,
+      stripe_checkout_session_id: String(session.id),
+      checkout_url: String(session.url),
+      status: "open",
+      expires_at: expiresAt,
+      metadata: {
+        mode: sessionConfig.mode,
+        checkout_items: checkoutItems,
+      },
+      updated_at: trx.fn.now(),
+    });
+
+    return session;
+  });
 }
 
 async function getUserOrFail(userId) {
@@ -323,37 +501,114 @@ async function userHasEntitlement(userId, productSlug) {
       product_slug: normalizeSlug(productSlug),
       status: "active",
     })
+    .andWhere((query) => {
+      query.whereNull("expires_at").orWhere(
+        "expires_at",
+        ">",
+        db.fn.now()
+      );
+    })
     .first();
 
   return Boolean(row);
 }
 
-function buildLineItems({ product, packs, skins, quantity }) {
+async function userHasTabForgeSyncSubscription(userId) {
+  const hasEntitlement = await hasAnyProductEntitlement(
+    userId,
+    TABFORGE_SYNC_ENTITLEMENT_ALIASES
+  );
+  if (hasEntitlement) return true;
+
+  // Keep checkout idempotent even if a Stripe subscription webhook is
+  // delayed and its entitlement row has not been materialized yet.
+  const existingSubscription = await db("subscriptions")
+    .where({
+      user_id: userId,
+      provider: "stripe",
+    })
+    .whereIn("status", [
+      "active",
+      "trialing",
+      "past_due",
+      "unpaid",
+      "incomplete",
+      "paused",
+    ])
+    .whereIn("plan", TABFORGE_SYNC_PLAN_ALIASES)
+    .first();
+
+  return Boolean(existingSubscription);
+}
+
+async function userHasPermanentTabForgePro(userId) {
+  return hasAnyProductEntitlement(userId, [
+    TABFORGE_PRO_PRODUCT_SLUG,
+    "tabforge-pro",
+  ]);
+}
+
+function buildLineItems({
+  product,
+  packs,
+  skins,
+  quantity,
+  proOnly = false,
+}) {
   const lineItems = [];
 
   if (product) {
-    const itemQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
+    if (product.slug === TABFORGE_PRO_PRODUCT_SLUG) {
+      if (proOnly) {
+        lineItems.push(
+          buildTabForgeProBundleLineItems({
+            proPriceId: env.stripePriceTabforge,
+          })[0]
+        );
+      } else {
+        lineItems.push(
+          ...buildTabForgeProBundleLineItems({
+            proPriceId: env.stripePriceTabforge,
+            syncPriceId: env.stripePriceTabforgeSync,
+          })
+        );
+      }
+    } else if (product.slug === TABFORGE_SYNC_PRODUCT_SLUG) {
+      lineItems.push(
+        buildTabForgeSyncLineItem({
+          syncPriceId: env.stripePriceTabforgeSync,
+        })
+      );
+    } else {
+      const itemQuantity =
+        Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
 
-    const priceData = {
-      currency: "usd",
-      unit_amount: product.unitAmountCents,
-      product_data: {
-        name: product.displayName,
-        metadata: {
-          kind: product.mode === "subscription" ? "subscription" : (product.slug === "tabforge-page" ? "page_quantity" : "product"),
-          slug: product.slug,
-          entitlement_slug: product.entitlementSlug || product.slug,
+      const priceData = {
+        currency: "usd",
+        unit_amount: product.unitAmountCents,
+        product_data: {
+          name: product.displayName,
+          metadata: {
+            kind:
+              product.mode === "subscription"
+                ? "subscription"
+                : product.slug === "tabforge-page"
+                  ? "page_quantity"
+                  : "product",
+            slug: product.slug,
+            entitlement_slug: product.entitlementSlug || product.slug,
+          },
         },
-      },
-    };
-    if (product.mode === "subscription") {
-      priceData.recurring = { interval: "month" };
-    }
+      };
+      if (product.mode === "subscription") {
+        priceData.recurring = { interval: "month" };
+      }
 
-    lineItems.push({
-      quantity: itemQuantity,
-      price_data: priceData,
-    });
+      lineItems.push({
+        quantity: itemQuantity,
+        price_data: priceData,
+      });
+    }
   }
 
   for (const pack of packs) {
@@ -395,21 +650,37 @@ function buildLineItems({ product, packs, skins, quantity }) {
   return lineItems;
 }
 
-function buildCheckoutSummary({ product, packs, skins, quantity }) {
+function buildCheckoutSummary({
+  product,
+  packs,
+  skins,
+  quantity,
+  proOnly = false,
+}) {
   const items = [];
 
   if (product) {
-    const itemQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
-    const kind = product.mode === "subscription" ? "subscription" : (product.slug === "tabforge-page" ? "page_quantity" : "product");
+    if (product.slug === TABFORGE_PRO_PRODUCT_SLUG && !proOnly) {
+      items.push(...buildTabForgeProBundleCheckoutItems());
+    } else {
+      const itemQuantity =
+        Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
+      const kind =
+        product.mode === "subscription"
+          ? "subscription"
+          : product.slug === "tabforge-page"
+            ? "page_quantity"
+            : "product";
 
-    items.push({
-      kind,
-      slug: product.slug,
-      displayName: product.displayName,
-      entitlementSlug: product.entitlementSlug || product.slug,
-      unitAmountCents: product.unitAmountCents ?? null,
-      quantity: itemQuantity,
-    });
+      items.push({
+        kind: proOnly ? "product" : kind,
+        slug: product.slug,
+        displayName: product.displayName,
+        entitlementSlug: product.entitlementSlug || product.slug,
+        unitAmountCents: product.unitAmountCents ?? null,
+        quantity: itemQuantity,
+      });
+    }
   }
 
   for (const pack of packs) {
@@ -438,7 +709,7 @@ function buildCheckoutSummary({ product, packs, skins, quantity }) {
 }
 
 async function upsertStripeSubscriptionFromWebhook(sub) {
-  const customerId = sub.customer ? String(sub.customer) : "";
+  const customerId = stripeResourceId(sub.customer);
   const userId =
     sub.metadata?.user_id ||
     (
@@ -467,18 +738,31 @@ async function upsertStripeSubscriptionFromWebhook(sub) {
       });
   }
 
+  const providerSubscriptionId = String(sub.id || "");
+  if (!providerSubscriptionId) return;
   const existing = await db("subscriptions")
+    .select("raw")
     .where({
       provider: "stripe",
-      provider_subscription_id: String(sub.id || ""),
+      provider_subscription_id: providerSubscriptionId,
     })
     .first();
+  const raw = { ...sub };
+  if (normalizeSlug(status) === "past_due") {
+    raw.past_due_since = new Date(
+      tabForgePastDueSince(existing || {}) ||
+        tabForgePastDueSince({ raw }) ||
+        Date.now()
+    ).toISOString();
+  } else {
+    delete raw.past_due_since;
+  }
 
   const payload = {
     user_id: userId,
     provider: "stripe",
     provider_customer_id: customerId,
-    provider_subscription_id: String(sub.id || ""),
+    provider_subscription_id: providerSubscriptionId,
     plan,
     status,
     current_period_start: sub.current_period_start
@@ -487,21 +771,18 @@ async function upsertStripeSubscriptionFromWebhook(sub) {
     current_period_end: sub.current_period_end
       ? new Date(sub.current_period_end * 1000)
       : null,
-    raw: sub,
+    raw,
     updated_at: db.fn.now(),
   };
 
-  if (existing) {
-    await db("subscriptions")
-      .where({ id: existing.id })
-      .update(payload);
-    return;
-  }
-
-  await db("subscriptions").insert({
-    id: crypto.randomUUID(),
-    ...payload,
-  });
+  await db("subscriptions")
+    .insert({ id: crypto.randomUUID(), ...payload })
+    .onConflict(
+      db.raw(
+        "(provider, provider_subscription_id) where provider_subscription_id <> ''"
+      )
+    )
+    .merge(payload);
 }
 
 async function cancelStripeSubscriptionFromWebhook(sub) {
@@ -565,37 +846,10 @@ billingRouter.get("/me", requireAuth, async (req, res) => {
  * POST /v1/billing/activate
  */
 billingRouter.post("/activate", requireAuth, async (req, res) => {
-  const plan = String(req.body.plan || "starter");
-  const status = "active";
-
-  try {
-    const now = new Date();
-    const end = new Date(now);
-    end.setMonth(end.getMonth() + 1);
-
-    const [sub] = await db("subscriptions")
-      .insert({
-        id: crypto.randomUUID(),
-        user_id: req.user.sub,
-        provider: "manual",
-        provider_customer_id: "",
-        provider_subscription_id: "",
-        plan,
-        status,
-        current_period_start: now,
-        current_period_end: end,
-        raw: { note: "manual activation" },
-        updated_at: db.fn.now(),
-      })
-      .returning("*");
-
-    return res.json({ ok: true, subscription: sub });
-  } catch (err) {
-    return res.status(500).json({
-      error: "server_error",
-      message: String(err?.message || err),
-    });
-  }
+  return res.status(410).json({
+    error: "manual_activation_retired",
+    message: "Use verified Stripe billing to activate a subscription.",
+  });
 });
 
 /**
@@ -622,6 +876,7 @@ billingRouter.post("/donations/checkout-session", async (req, res) => {
   try {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      payment_method_types: ["card"],
       submit_type: "donate",
       line_items: [
         {
@@ -673,7 +928,8 @@ billingRouter.post("/donations/checkout-session", async (req, res) => {
  * Supports:
  * - single product checkout
  * - retired extra-page requests return an explicit error
- * - Sync + Collections subscription checkout
+ * - TabForge Pro with an included 60-day Private Sync trial
+ * - account-only Private Sync re-subscription for existing Pro owners
  * - retired collection/skin direct checkout returns explicit errors
  */
 billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) => {
@@ -723,7 +979,8 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
   if (packs.length > 0) {
     return res.status(410).json({
       error: "individual_collections_retired",
-      message: "Individual collection purchases have been retired. Collections are included in the $5/month TabForge Sync + Collections subscription.",
+      message:
+        "Individual collection purchases have been retired. TabForge Pro is the only public TabForge offer.",
     });
   }
 
@@ -737,13 +994,50 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
   if (product?.slug === "tabforge-page") {
     return res.status(410).json({
       error: "product_retired",
-      message: "Extra page purchases have been retired. TabForge Pro now includes all 10 pages.",
+      message: "Extra page purchases have been retired. The TabForge workspace supports up to 50 pages.",
     });
   }
 
-  if (product?.singlePurchase || product?.slug === "tabforge" || product?.slug === "tabforge-collections-subscription") {
+  if (product && product.slug !== "tabforge-page" && quantity !== 1) {
+    return res.status(400).json({ error: "invalid_quantity" });
+  }
+
+  const hasTabForgeSyncSubscription =
+    product?.slug === TABFORGE_PRO_PRODUCT_SLUG ||
+    product?.slug === TABFORGE_SYNC_PRODUCT_SLUG
+      ? await userHasTabForgeSyncSubscription(req.user.sub)
+      : false;
+
+  if (product?.accountOnly) {
+    const hasRequiredEntitlement =
+      product.requiresEntitlement === TABFORGE_PRO_PRODUCT_SLUG
+        ? await userHasPermanentTabForgePro(req.user.sub)
+        : await userHasEntitlement(
+            req.user.sub,
+            product.requiresEntitlement
+          );
+    if (!hasRequiredEntitlement) {
+      return res.status(403).json({
+        error: "tabforge_pro_required",
+        message:
+          "Private Sync can be re-subscribed from the account of an existing TabForge Pro owner.",
+      });
+    }
+    if (hasTabForgeSyncSubscription) {
+      return res.status(409).json({
+        error: "subscription_already_active",
+        message:
+          "A TabForge Private Sync subscription already exists for this account. Manage it or update its payment method from Account.",
+      });
+    }
+  }
+
+  if (product?.singlePurchase || product?.slug === TABFORGE_PRO_PRODUCT_SLUG) {
     const entitlementSlug = product.entitlementSlug || product.slug;
-    const alreadyOwned = await userHasEntitlement(req.user.sub, entitlementSlug);
+    const alreadyOwned =
+      product.slug === TABFORGE_PRO_PRODUCT_SLUG
+        ? await userHasPermanentTabForgePro(req.user.sub)
+        : await userHasEntitlement(req.user.sub, entitlementSlug);
     if (alreadyOwned) {
       return res.status(409).json({
         error: "already_owned",
@@ -805,13 +1099,59 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
   try {
     const { user, customerId } = await getOrCreateStripeCustomerForUser(req.user.sub);
 
+    let reconciledTabForgeSyncSubscription =
+      hasTabForgeSyncSubscription;
+    if (
+      !reconciledTabForgeSyncSubscription &&
+      [TABFORGE_PRO_PRODUCT_SLUG, TABFORGE_SYNC_PRODUCT_SLUG].includes(
+        product?.slug
+      )
+    ) {
+      const stripeSubscription =
+        await findManageableStripeSyncSubscription(stripe, customerId);
+      if (stripeSubscription) {
+        reconciledTabForgeSyncSubscription = true;
+        await upsertStripeSubscriptionFromWebhook(stripeSubscription);
+      }
+    }
+
+    if (
+      product?.accountOnly &&
+      reconciledTabForgeSyncSubscription
+    ) {
+      return res.status(409).json({
+        error: "subscription_already_active",
+        message:
+          "A TabForge Private Sync subscription already exists for this account. Manage it or update its payment method from Account.",
+      });
+    }
+
     const defaultSuccessPath = product?.defaultSuccessPath || (skins.length ? "/products/tabforge/index.html#pricing" : "/products/tabforge/index.html");
     const defaultCancelPath = product?.defaultCancelPath || (skins.length ? "/store/index.html#tabforge" : "/products/tabforge/index.html");
     const successPath = sanitizeRelativePath(parsed.data.successPath, defaultSuccessPath);
     const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, defaultCancelPath);
 
-    const checkoutItems = buildCheckoutSummary({ product, packs, skins, quantity });
-    const lineItems = buildLineItems({ product, packs, skins, quantity });
+    // A legacy subscriber who buys permanent Pro must not receive a second
+    // subscription, including while payment recovery is pending. Everyone
+    // else buying Pro receives the bundled 60-day trial, while the
+    // account-only re-subscribe path has no new trial.
+    const proOnly =
+      product?.slug === TABFORGE_PRO_PRODUCT_SLUG &&
+      reconciledTabForgeSyncSubscription;
+    const checkoutItems = buildCheckoutSummary({
+      product,
+      packs,
+      skins,
+      quantity,
+      proOnly,
+    });
+    const lineItems = buildLineItems({
+      product,
+      packs,
+      skins,
+      quantity,
+      proOnly,
+    });
 
     const metadata =
       checkoutItems.length === 1 &&
@@ -829,8 +1169,13 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
             checkout_items: serializeCheckoutItems(checkoutItems),
           };
 
+    const sessionMode =
+      product?.mode === "subscription" && !proOnly
+        ? "subscription"
+        : "payment";
     const sessionConfig = {
-      mode: product?.mode === "subscription" ? "subscription" : "payment",
+      mode: sessionMode,
+      payment_method_types: ["card"],
       customer: customerId,
       client_reference_id: user.id,
       line_items: lineItems,
@@ -845,26 +1190,37 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
       metadata,
     };
     if (sessionConfig.mode === "subscription") {
-      sessionConfig.subscription_data = {
-        metadata: {
-          user_id: user.id,
-          product_slug: product?.slug || "",
-          entitlement_slug: product?.entitlementSlug || product?.slug || "",
-          plan: product?.subscriptionPlan || product?.slug || "subscription",
-          fulfillment_type: "subscription_entitlement",
-          cloud_provider_status: "stubbed_until_provider_except_admin",
-          cloud_storage_gb_limit: product?.slug === "tabforge-collections-subscription" ? "20" : "",
-          checkout_items: serializeCheckoutItems(checkoutItems),
-        },
-      };
+      const initialProPurchase =
+        product?.slug === TABFORGE_PRO_PRODUCT_SLUG;
+      Object.assign(
+        sessionConfig,
+        buildTabForgeSubscriptionCheckoutOptions({
+          userId: user.id,
+          checkoutItems,
+          initialProPurchase,
+        })
+      );
     }
 
-    const session = await stripe.checkout.sessions.create(sessionConfig);
+    const selectionKey = checkoutSelectionKey({
+      productSlug: product?.slug || "tabforge-cart",
+      mode: sessionMode,
+      checkoutItems,
+    });
+    const session = await getOrCreateOpenCheckoutSession({
+      stripe,
+      userId: user.id,
+      productSlug: product?.slug || "tabforge-cart",
+      selectionKey,
+      sessionConfig,
+      checkoutItems,
+    });
 
     return res.json({
       ok: true,
       url: session.url,
       sessionId: session.id,
+      reused: Boolean(session.reused),
       checkout: {
         items: checkoutItems,
       },
@@ -1034,72 +1390,20 @@ billingRouter.post("/stripe/portal-session", requireAuth, async (req, res) => {
  * POST /v1/billing/apple/ingest
  */
 billingRouter.post("/apple/ingest", requireAuth, async (req, res) => {
-  const raw = req.body || {};
-  const plan = String(raw.plan || "starter");
-
-  try {
-    const now = new Date();
-    const end = new Date(now);
-    end.setMonth(end.getMonth() + 1);
-
-    await db("subscriptions").insert({
-      id: crypto.randomUUID(),
-      user_id: req.user.sub,
-      provider: "apple",
-      provider_customer_id: "",
-      provider_subscription_id: String(
-        raw.originalTransactionId || raw.transactionId || ""
-      ),
-      plan,
-      status: "trialing",
-      current_period_start: now,
-      current_period_end: end,
-      raw,
-      updated_at: db.fn.now(),
-    });
-
-    return res.json({ ok: true });
-  } catch (err) {
-    return res.status(500).json({
-      error: "server_error",
-      message: String(err?.message || err),
-    });
-  }
+  return res.status(410).json({
+    error: "apple_receipt_ingest_unavailable",
+    message: "Apple purchases are unavailable until server-side receipt verification is enabled.",
+  });
 });
 
 /**
  * POST /v1/billing/google/ingest
  */
 billingRouter.post("/google/ingest", requireAuth, async (req, res) => {
-  const raw = req.body || {};
-  const plan = String(raw.plan || "starter");
-
-  try {
-    const now = new Date();
-    const end = new Date(now);
-    end.setMonth(end.getMonth() + 1);
-
-    await db("subscriptions").insert({
-      id: crypto.randomUUID(),
-      user_id: req.user.sub,
-      provider: "google",
-      provider_customer_id: "",
-      provider_subscription_id: String(raw.purchaseToken || ""),
-      plan,
-      status: "trialing",
-      current_period_start: now,
-      current_period_end: end,
-      raw,
-      updated_at: db.fn.now(),
-    });
-
-    return res.json({ ok: true });
-  } catch (err) {
-    return res.status(500).json({
-      error: "server_error",
-      message: String(err?.message || err),
-    });
-  }
+  return res.status(410).json({
+    error: "google_receipt_ingest_unavailable",
+    message: "Google Play purchases are unavailable until server-side receipt verification is enabled.",
+  });
 });
 
 /**

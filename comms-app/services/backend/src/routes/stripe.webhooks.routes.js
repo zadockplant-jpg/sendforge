@@ -5,9 +5,23 @@ import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import {
   grantProductEntitlement,
-  TABFORGE_CLOUD_ENTITLEMENTS,
 } from "../services/entitlement.service.js";
-import { recordReferralPurchase } from "../services/referrals/referral.service.js";
+import {
+  checkoutHasPositiveNetPayment,
+  checkoutNetPaidCents,
+  checkoutItemsForImmediateFulfillment,
+  isActiveTabForgeSubscriptionStatus,
+  isFulfillableCheckoutPaymentStatus,
+  isTabForgeSyncEntitlement,
+  tabForgePastDueSince,
+  TABFORGE_SUBSCRIPTION_REVOCABLE_ENTITLEMENTS,
+  TABFORGE_SYNC_ENTITLEMENT_SLUG,
+  TABFORGE_SYNC_PRODUCT_SLUG,
+} from "../services/tabforgeBilling.service.js";
+import {
+  disqualifyReferralPurchaseForStripe,
+  recordReferralPurchase,
+} from "../services/referrals/referral.service.js";
 import {
   markInmateRecordsOrderPaidFromStripe,
 } from "../services/inmate.records/orders.service.js";
@@ -31,19 +45,12 @@ function normalizeSlug(slug) {
 function isReferralQualifyingPurchase(entitlementSlug) {
   return normalizeSlug(entitlementSlug) === "tabforge";
 }
-const TABFORGE_COLLECTION_ENTITLEMENTS = [
-  ...TABFORGE_CLOUD_ENTITLEMENTS,
-  "tabforge-pack-builder",
-  "tabforge-pack-money",
-  "tabforge-pack-dev",
-  "tabforge-pack-media",
-  "tabforge-pack-research",
-];
 
-function isCollectionsEntitlement(entitlementSlug) {
-  return TABFORGE_COLLECTION_ENTITLEMENTS.includes(normalizeSlug(entitlementSlug));
+function tabForgeSubscriptionSourceRef(subscriptionId) {
+  // Keep the historical suffix so existing live subscription entitlements and
+  // new bundled-trial entitlements are revoked by the same webhook path.
+  return `subscription:${subscriptionId}:tabforge-sync-collections`;
 }
-
 
 function parseCheckoutItems(raw) {
   if (!raw) return [];
@@ -78,39 +85,49 @@ async function attachStripeCustomerToUser(userId, customerId) {
 }
 
 
-async function syncTabForgeCollectionsSubscriptionEntitlements({ userId, subscriptionId, status, sourceRef }) {
+async function syncTabForgeSubscriptionEntitlements({
+  userId,
+  subscriptionId,
+  status,
+  sourceRef,
+  pastDueSince = null,
+}) {
   if (!userId || !subscriptionId) return;
-  const active = ["active", "trialing"].includes(String(status || "").toLowerCase());
-  const ref = sourceRef || `subscription:${subscriptionId}:tabforge-sync-collections`;
+  const active = isActiveTabForgeSubscriptionStatus(status, {
+    pastDueSince,
+  });
+  const ref =
+    sourceRef || tabForgeSubscriptionSourceRef(subscriptionId);
 
   if (active) {
-    for (const productSlug of TABFORGE_COLLECTION_ENTITLEMENTS) {
-      await grantProductEntitlement({
-        userId,
-        productSlug,
-        source: "stripe_subscription",
-        sourceRef: ref,
-        metadata: {
-          subscription_id: String(subscriptionId),
-          collection_subscription: true,
-          tabforge_sync_collections: true,
-          cloud_storage_gb_limit: 20,
-          device_sync_limit: 5,
-          grants_tabforge_pro_while_active: true,
-          grants_all_current_collections: true,
-        },
-      });
-    }
+    await grantProductEntitlement({
+      userId,
+      productSlug: TABFORGE_SYNC_ENTITLEMENT_SLUG,
+      source: "stripe_subscription",
+      sourceRef: ref,
+      metadata: {
+        subscription_id: String(subscriptionId),
+        tabforge_private_sync: true,
+        sync_layouts: true,
+        sync_shortcuts: true,
+        sync_cloud_notes: true,
+        device_sync_limit: 5,
+        sync_storage_safety_ceiling_gb: 20,
+      },
+    });
     return;
   }
 
   await db("product_entitlements")
     .where({ user_id: userId, source_ref: ref })
-    .whereIn("product_slug", TABFORGE_COLLECTION_ENTITLEMENTS)
+    .whereIn(
+      "product_slug",
+      TABFORGE_SUBSCRIPTION_REVOCABLE_ENTITLEMENTS
+    )
     .update({
       status: "revoked",
       metadata: db.raw("coalesce(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-        collection_subscription_canceled_at: new Date().toISOString(),
+        private_sync_canceled_at: new Date().toISOString(),
         subscription_status: String(status || "canceled"),
       })]),
       updated_at: db.fn.now(),
@@ -118,7 +135,7 @@ async function syncTabForgeCollectionsSubscriptionEntitlements({ userId, subscri
 }
 
 async function upsertStripeSubscription(sub) {
-  const customerId = sub.customer ? String(sub.customer) : "";
+  const customerId = stripeObjectId(sub.customer);
   const explicitUserId = sub.metadata?.user_id
     ? String(sub.metadata.user_id)
     : null;
@@ -132,9 +149,30 @@ async function upsertStripeSubscription(sub) {
     await attachStripeCustomerToUser(userId, customerId);
   }
 
+  const providerSubscriptionId = String(sub.id || "");
+  if (!providerSubscriptionId) return;
+
+  const existing = await db("subscriptions")
+    .select("raw")
+    .where({
+      provider: "stripe",
+      provider_subscription_id: providerSubscriptionId,
+    })
+    .first();
+  const raw = { ...sub };
+  if (normalizeSlug(sub.status) === "past_due") {
+    const priorPastDueSince = tabForgePastDueSince(existing || {});
+    const providerPastDueSince = tabForgePastDueSince({ raw });
+    raw.past_due_since = new Date(
+      priorPastDueSince || providerPastDueSince || Date.now()
+    ).toISOString();
+  } else {
+    delete raw.past_due_since;
+  }
+
   const payload = {
     provider_customer_id: customerId,
-    provider_subscription_id: String(sub.id || ""),
+    provider_subscription_id: providerSubscriptionId,
     plan:
       sub.items?.data?.[0]?.price?.metadata?.plan ||
       sub.metadata?.plan ||
@@ -146,79 +184,225 @@ async function upsertStripeSubscription(sub) {
     current_period_end: sub.current_period_end
       ? new Date(sub.current_period_end * 1000)
       : null,
-    raw: sub,
+    raw,
     updated_at: db.fn.now(),
   };
 
-  const existing = await db("subscriptions")
-    .where({
-      provider: "stripe",
-      provider_subscription_id: payload.provider_subscription_id,
-    })
-    .first();
-
-  if (existing) {
-    await db("subscriptions")
-      .where({ id: existing.id })
-      .update(payload);
-  } else {
-    await db("subscriptions").insert({
+  await db("subscriptions")
+    .insert({
       id: crypto.randomUUID(),
       user_id: userId,
       provider: "stripe",
       ...payload,
+    })
+    .onConflict(
+      db.raw(
+        "(provider, provider_subscription_id) where provider_subscription_id <> ''"
+      )
+    )
+    .merge({
+      user_id: userId,
+      ...payload,
     });
-  }
 
   const productSlug = normalizeSlug(sub.metadata?.product_slug || sub.metadata?.entitlement_slug || "");
   const checkoutItems = parseCheckoutItems(sub.metadata?.checkout_items);
-  const includesCollections =
-    productSlug === "tabforge-collections-subscription" ||
-    productSlug === "tabforge-subscription" ||
-    productSlug === "tabforge-collections" ||
-    checkoutItems.some((item) => isCollectionsEntitlement(item?.entitlementSlug || item?.slug));
+  const includesTabForgeSync =
+    productSlug === TABFORGE_SYNC_PRODUCT_SLUG ||
+    isTabForgeSyncEntitlement(productSlug) ||
+    checkoutItems.some((item) =>
+      isTabForgeSyncEntitlement(
+        item?.entitlementSlug || item?.slug
+      )
+    );
 
-  if (includesCollections) {
-    await syncTabForgeCollectionsSubscriptionEntitlements({
+  const initialProPurchase =
+    String(sub.metadata?.initial_pro_purchase || "").toLowerCase() ===
+    "true";
+  const initialProReady = initialProPurchase
+    ? Boolean(
+        await db("product_entitlements")
+          .where({
+            user_id: userId,
+            product_slug: "tabforge",
+            status: "active",
+          })
+          .first()
+      )
+    : true;
+
+  const subscriptionActive = isActiveTabForgeSubscriptionStatus(
+    payload.status,
+    { pastDueSince: tabForgePastDueSince({ raw: payload.raw }) }
+  );
+  if (
+    includesTabForgeSync &&
+    (!subscriptionActive || initialProReady)
+  ) {
+    await syncTabForgeSubscriptionEntitlements({
       userId,
       subscriptionId: sub.id,
       status: payload.status,
-      sourceRef: `subscription:${sub.id}:tabforge-sync-collections`,
+      sourceRef: tabForgeSubscriptionSourceRef(sub.id),
+      pastDueSince: tabForgePastDueSince({ raw: payload.raw }),
     });
   }
 }
 
 async function markStripeSubscriptionCanceled(sub) {
-  const providerSubscriptionId = String(sub.id || "");
-  if (!providerSubscriptionId) return;
+  if (!sub?.id) return;
+  await upsertStripeSubscription({ ...sub, status: "canceled" });
+}
 
-  const existing = await db("subscriptions")
-    .where({
-      provider: "stripe",
-      provider_subscription_id: providerSubscriptionId,
-    })
-    .first();
-
-  await db("subscriptions")
-    .where({
-      provider: "stripe",
-      provider_subscription_id: providerSubscriptionId,
-    })
+async function updateCheckoutAttempt(sessionId, status) {
+  if (!sessionId || !status) return;
+  await db("billing_checkout_attempts")
+    .where({ stripe_checkout_session_id: String(sessionId) })
     .update({
-      status: "canceled",
-      raw: sub,
+      status: String(status),
       updated_at: db.fn.now(),
     });
+}
 
-  const userId = existing?.user_id || (await findUserIdFromStripeCustomer(sub.customer));
-  if (userId) {
-    await syncTabForgeCollectionsSubscriptionEntitlements({
-      userId,
-      subscriptionId: providerSubscriptionId,
+function checkoutEntitlementSourceRef(session) {
+  const checkoutItems = parseCheckoutItems(
+    session?.metadata?.checkout_items
+  );
+  const includesTabForgeSync = checkoutItems.some((item) =>
+    isTabForgeSyncEntitlement(item?.entitlementSlug || item?.slug)
+  );
+  const subscriptionId = stripeObjectId(session?.subscription);
+  if (subscriptionId && includesTabForgeSync) {
+    return tabForgeSubscriptionSourceRef(subscriptionId);
+  }
+  return String(
+    stripeObjectId(session?.payment_intent) ||
+      subscriptionId ||
+      session?.id ||
+      ""
+  );
+}
+
+async function revokeFailedCheckoutEntitlements(session) {
+  const sourceRef = checkoutEntitlementSourceRef(session);
+  if (sourceRef) {
+    await db("product_entitlements")
+      .where({ source_ref: sourceRef })
+      .where({ status: "active" })
+      .update({
+        status: "revoked",
+        metadata: db.raw(
+          "coalesce(metadata, '{}'::jsonb) || ?::jsonb",
+          [
+            JSON.stringify({
+              checkout_payment_failed_at: new Date().toISOString(),
+              checkout_session_id: String(session?.id || "") || null,
+            }),
+          ]
+        ),
+        updated_at: db.fn.now(),
+      });
+  }
+
+  await disqualifyReferralPurchaseForStripe({
+    paymentIntentId: stripeObjectId(session?.payment_intent),
+    invoiceId: stripeObjectId(session?.invoice),
+    reason: "payment_failed",
+    providerEventId: String(session?.id || ""),
+  });
+}
+
+async function cancelLocalStripeSubscription(subscriptionId, session = {}) {
+  const rows = await db("subscriptions")
+    .where({
+      provider: "stripe",
+      provider_subscription_id: String(subscriptionId),
+    });
+
+  for (const row of rows) {
+    await db("subscriptions")
+      .where({ id: row.id })
+      .update({
+        status: "canceled",
+        raw: {
+          ...(row.raw || {}),
+          async_payment_failed: true,
+          async_payment_failed_at: new Date().toISOString(),
+          checkout_session_id: String(session?.id || "") || null,
+        },
+        updated_at: db.fn.now(),
+      });
+    await syncTabForgeSubscriptionEntitlements({
+      userId: row.user_id,
+      subscriptionId,
       status: "canceled",
-      sourceRef: `subscription:${providerSubscriptionId}:tabforge-sync-collections`,
     });
   }
+
+  if (rows.length) return;
+  const userId =
+    session?.metadata?.user_id ||
+    session?.client_reference_id ||
+    (await findUserIdFromStripeCustomer(stripeObjectId(session?.customer)));
+  if (userId) {
+    await syncTabForgeSubscriptionEntitlements({
+      userId,
+      subscriptionId,
+      status: "canceled",
+    });
+  }
+}
+
+function invoiceIsSettled(invoice) {
+  if (!invoice || typeof invoice !== "object") return false;
+  if (normalizeSlug(invoice.status) === "paid") return true;
+  return (
+    Number(invoice.amount_paid || 0) > 0 &&
+    Number(invoice.amount_remaining || 0) === 0
+  );
+}
+
+function isStripeResourceMissing(error) {
+  return (
+    Number(error?.statusCode) === 404 ||
+    String(error?.code || "") === "resource_missing"
+  );
+}
+
+async function handleAsyncCheckoutPaymentFailed(session, stripe) {
+  await updateCheckoutAttempt(session?.id, "failed");
+  const subscriptionId = stripeObjectId(session?.subscription);
+
+  if (!subscriptionId) {
+    await revokeFailedCheckoutEntitlements(session);
+    return;
+  }
+
+  let current;
+  try {
+    current = await stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ["latest_invoice"],
+    });
+  } catch (error) {
+    if (!isStripeResourceMissing(error)) throw error;
+    await cancelLocalStripeSubscription(subscriptionId, session);
+    await revokeFailedCheckoutEntitlements(session);
+    return;
+  }
+
+  // Ignore a stale failure event after a later invoice has settled.
+  if (invoiceIsSettled(current.latest_invoice)) {
+    await upsertStripeSubscription(current);
+    await updateCheckoutAttempt(session?.id, "completed");
+    return;
+  }
+
+  const status = normalizeSlug(current.status);
+  const canceled = ["canceled", "incomplete_expired"].includes(status)
+    ? { ...current, status: "canceled" }
+    : await stripe.subscriptions.cancel(subscriptionId);
+  await upsertStripeSubscription(canceled);
+  await revokeFailedCheckoutEntitlements(session);
 }
 
 async function getExistingEntitlement(userId, productSlug) {
@@ -236,7 +420,10 @@ async function grantCheckoutEntitlements({
   checkoutSessionId,
   customerId,
   paymentIntent,
+  subscriptionId,
+  invoiceId,
   items,
+  referralNetPaidCents = 0,
 }) {
   for (const item of items) {
     const kind = String(item?.kind || "");
@@ -245,31 +432,10 @@ async function grantCheckoutEntitlements({
 
     if (!entitlementSlug) continue;
 
-    if (isCollectionsEntitlement(entitlementSlug)) {
-      for (const collectionSlug of TABFORGE_COLLECTION_ENTITLEMENTS) {
-        await grantProductEntitlement({
-          userId,
-          productSlug: collectionSlug,
-          source: "stripe_subscription",
-          sourceRef: sourceRef || `subscription:${checkoutSessionId}:tabforge-sync-collections`,
-          metadata: {
-            checkout_session_id: checkoutSessionId,
-            customer_id: customerId || null,
-            payment_intent: paymentIntent || null,
-            checkout_item_kind: kind || "subscription",
-            checkout_item_slug: slug || entitlementSlug,
-            checkout_item_display_name: item?.displayName || "TabForge Collections",
-            collection_subscription: true,
-            tabforge_sync_collections: true,
-            cloud_storage_gb_limit: 20,
-            device_sync_limit: 5,
-            grants_tabforge_pro_while_active: true,
-            grants_all_current_collections: true,
-          },
-        });
-      }
-      continue;
-    }
+    // Recurring access is never fulfilled from a Checkout event. Stripe can
+    // deliver events out of order, so only the subscription's current status
+    // is allowed to grant or revoke Private Sync.
+    if (isTabForgeSyncEntitlement(entitlementSlug)) continue;
 
     if (entitlementSlug === "tabforge-skin-bundle-all") {
       for (const skinEntitlementSlug of [
@@ -321,7 +487,10 @@ async function grantCheckoutEntitlements({
         },
       });
 
-      if (isReferralQualifyingPurchase(entitlementSlug)) {
+      if (
+        referralNetPaidCents > 0 &&
+        isReferralQualifyingPurchase(entitlementSlug)
+      ) {
         await recordReferralPurchase({
           referredUserId: userId,
           productSlug: entitlementSlug,
@@ -330,6 +499,10 @@ async function grantCheckoutEntitlements({
             checkout_session_id: checkoutSessionId,
             checkout_item_kind: kind,
             quantity: quantityPurchased,
+            payment_intent: paymentIntent || null,
+            subscription_id: subscriptionId || null,
+            invoice_id: invoiceId || null,
+            initial_net_paid_cents: referralNetPaidCents,
           },
         });
       }
@@ -352,10 +525,13 @@ async function grantCheckoutEntitlements({
       },
     });
 
-    // TabForge Pro now includes all 10 pages. Collections are a separate subscription,
-    // so new Pro purchases no longer grant an included collection credit.
+    // The permanent Pro entitlement is deliberately separate from Private Sync
+    // and is never revoked when the trial or subscription ends.
 
-    if (isReferralQualifyingPurchase(entitlementSlug)) {
+    if (
+      referralNetPaidCents > 0 &&
+      isReferralQualifyingPurchase(entitlementSlug)
+    ) {
       await recordReferralPurchase({
         referredUserId: userId,
         productSlug: entitlementSlug,
@@ -364,34 +540,54 @@ async function grantCheckoutEntitlements({
           checkout_session_id: checkoutSessionId,
           checkout_item_kind: kind || null,
           checkout_item_slug: slug || entitlementSlug,
+          payment_intent: paymentIntent || null,
+          subscription_id: subscriptionId || null,
+          invoice_id: invoiceId || null,
+          initial_net_paid_cents: referralNetPaidCents,
         },
       });
     }
   }
 }
 
-async function handleCheckoutSessionCompleted(session) {
+async function handleCheckoutSessionCompleted(session, stripe) {
+  const customerId = stripeObjectId(session.customer);
+  const subscriptionId = stripeObjectId(session.subscription);
+  const paymentIntentId = stripeObjectId(session.payment_intent);
+  const invoiceId = stripeObjectId(session.invoice);
   const userId =
     session.metadata?.user_id ||
     session.client_reference_id ||
-    (await findUserIdFromStripeCustomer(session.customer));
+    (await findUserIdFromStripeCustomer(customerId));
 
   if (!userId) {
     return;
   }
 
-  if (session.customer) {
-    await attachStripeCustomerToUser(userId, session.customer);
+  if (!isFulfillableCheckoutPaymentStatus(session.payment_status)) {
+    await updateCheckoutAttempt(session.id, "pending_payment");
+    return;
+  }
+
+  if (customerId) {
+    await attachStripeCustomerToUser(userId, customerId);
   }
 
   const fulfillmentType = String(session.metadata?.fulfillment_type || "");
   const checkoutItems = parseCheckoutItems(session.metadata?.checkout_items);
-  const checkoutIncludesCollections = checkoutItems.some((item) => isCollectionsEntitlement(item?.entitlementSlug || item?.slug));
-  const sourceRef = String(
-    session.subscription && checkoutIncludesCollections
-      ? `subscription:${session.subscription}:tabforge-sync-collections`
-      : (session.payment_intent || session.subscription || session.id || "")
+  const checkoutIncludesTabForgeSync = checkoutItems.some((item) =>
+    isTabForgeSyncEntitlement(
+      item?.entitlementSlug || item?.slug
+    )
   );
+  const sourceRef = String(
+    subscriptionId && checkoutIncludesTabForgeSync
+      ? tabForgeSubscriptionSourceRef(subscriptionId)
+      : paymentIntentId || subscriptionId || session.id || ""
+  );
+  const referralNetPaidCents = checkoutHasPositiveNetPayment(session)
+    ? checkoutNetPaidCents(session)
+    : 0;
 
   if (fulfillmentType === "inmate_records_merch_order") {
     const order = await markInmateRecordsOrderPaidFromStripe(session);
@@ -406,31 +602,98 @@ async function handleCheckoutSessionCompleted(session) {
       userId,
       sourceRef,
       checkoutSessionId: session.id,
-      customerId: session.customer || null,
-      paymentIntent: session.payment_intent || null,
-      items: checkoutItems,
+      customerId: customerId || null,
+      paymentIntent: paymentIntentId || null,
+      subscriptionId: subscriptionId || null,
+      invoiceId: invoiceId || null,
+      items: checkoutItemsForImmediateFulfillment(checkoutItems),
+      referralNetPaidCents,
     });
-    return;
+  } else {
+    const productSlug = normalizeSlug(
+      session.metadata?.product_slug || ""
+    );
+    if (fulfillmentType === "product_entitlement" && productSlug) {
+      await grantCheckoutEntitlements({
+        userId,
+        sourceRef,
+        checkoutSessionId: session.id,
+        customerId: customerId || null,
+        paymentIntent: paymentIntentId || null,
+        subscriptionId: subscriptionId || null,
+        invoiceId: invoiceId || null,
+        items: [
+          {
+            kind: "product",
+            slug: productSlug,
+            entitlementSlug: productSlug,
+            displayName: productSlug,
+            quantity: 1,
+          },
+        ],
+        referralNetPaidCents,
+      });
+    }
   }
 
-  const productSlug = normalizeSlug(session.metadata?.product_slug || "");
-  if (fulfillmentType === "product_entitlement" && productSlug) {
-    await grantCheckoutEntitlements({
-      userId,
-      sourceRef,
-      checkoutSessionId: session.id,
-      customerId: session.customer || null,
-      paymentIntent: session.payment_intent || null,
-      items: [
-        {
-          kind: "product",
-          slug: productSlug,
-          entitlementSlug: productSlug,
-          displayName: productSlug,
-          quantity: 1,
-        },
-      ],
-    });
+  // Retrieve the subscription after permanent entitlements are committed.
+  // This is authoritative even if checkout/subscription webhooks arrive out
+  // of order, and a replay can never resurrect a canceled subscription.
+  if (subscriptionId) {
+    const current = await stripe.subscriptions.retrieve(
+      subscriptionId
+    );
+    await upsertStripeSubscription(current);
+  }
+
+  await updateCheckoutAttempt(session.id, "completed");
+}
+
+function stripeObjectId(value) {
+  if (!value) return "";
+  return typeof value === "string" ? value : String(value.id || "");
+}
+
+async function handleReferralPaymentReversal({
+  stripe,
+  event,
+  disputed = false,
+}) {
+  const object = event.data.object || {};
+  let charge = null;
+  if (event.type === "charge.refunded") {
+    charge = object;
+  } else {
+    const chargeId = stripeObjectId(object.charge);
+    if (chargeId) charge = await stripe.charges.retrieve(chargeId);
+  }
+  if (!charge) return;
+
+  const fullyRefunded =
+    Boolean(charge.refunded) ||
+    (Number(charge.amount || 0) > 0 &&
+      Number(charge.amount_refunded || 0) >= Number(charge.amount || 0));
+  if (!disputed && !fullyRefunded) return;
+
+  await disqualifyReferralPurchaseForStripe({
+    paymentIntentId: stripeObjectId(charge.payment_intent),
+    invoiceId: stripeObjectId(charge.invoice),
+    chargeId: stripeObjectId(charge.id),
+    reason: disputed ? "disputed" : "refunded",
+    providerEventId: String(event.id || ""),
+  });
+}
+
+async function handleStripeSubscriptionEvent(stripe, sub, deleted = false) {
+  const subscriptionId = String(sub?.id || "");
+  if (!subscriptionId) return;
+
+  try {
+    const current = await stripe.subscriptions.retrieve(subscriptionId);
+    await upsertStripeSubscription(current);
+  } catch (error) {
+    if (!deleted) throw error;
+    await markStripeSubscriptionCanceled(sub);
   }
 }
 
@@ -461,7 +724,16 @@ async function handleInvoicePaid(invoice) {
   await db("users").where({ id: user.id }).update(updates);
 }
 
-async function handleInvoicePaymentFailed(invoice) {
+async function handleInvoicePaymentFailed(invoice, stripe) {
+  const subscriptionId = stripeObjectId(invoice.subscription);
+  if (subscriptionId) {
+    const subscription = await stripe.subscriptions.retrieve(
+      subscriptionId,
+      { expand: ["latest_invoice"] }
+    );
+    await upsertStripeSubscription(subscription);
+  }
+
   const customerId = invoice.customer ? String(invoice.customer) : "";
   if (!customerId) return;
 
@@ -504,16 +776,36 @@ export async function handleStripeWebhook(req, res) {
   try {
     switch (event.type) {
       case "checkout.session.completed":
-        await handleCheckoutSessionCompleted(event.data.object);
+      case "checkout.session.async_payment_succeeded":
+        await handleCheckoutSessionCompleted(event.data.object, stripe);
+        break;
+
+      case "checkout.session.async_payment_failed":
+        await handleAsyncCheckoutPaymentFailed(
+          event.data.object,
+          stripe
+        );
+        break;
+
+      case "checkout.session.expired":
+        await updateCheckoutAttempt(event.data.object?.id, "expired");
         break;
 
       case "customer.subscription.created":
       case "customer.subscription.updated":
-        await upsertStripeSubscription(event.data.object);
+        await handleStripeSubscriptionEvent(
+          stripe,
+          event.data.object,
+          false
+        );
         break;
 
       case "customer.subscription.deleted":
-        await markStripeSubscriptionCanceled(event.data.object);
+        await handleStripeSubscriptionEvent(
+          stripe,
+          event.data.object,
+          true
+        );
         break;
 
       case "invoice.paid":
@@ -521,7 +813,25 @@ export async function handleStripeWebhook(req, res) {
         break;
 
       case "invoice.payment_failed":
-        await handleInvoicePaymentFailed(event.data.object);
+        await handleInvoicePaymentFailed(event.data.object, stripe);
+        break;
+
+      case "charge.refunded":
+      case "refund.updated":
+        if (
+          event.type === "charge.refunded" ||
+          String(event.data.object?.status || "") === "succeeded"
+        ) {
+          await handleReferralPaymentReversal({ stripe, event });
+        }
+        break;
+
+      case "charge.dispute.created":
+        await handleReferralPaymentReversal({
+          stripe,
+          event,
+          disputed: true,
+        });
         break;
 
       default:

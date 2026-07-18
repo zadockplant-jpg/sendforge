@@ -20,9 +20,9 @@ export async function writeAdminAudit(req, {
   beforeValue = null,
   afterValue = null,
   metadata = {},
-}) {
+}, database = db) {
   try {
-    await db("admin_audit_log").insert({
+    await database("admin_audit_log").insert({
       id: crypto.randomUUID(),
       admin_user_id: req.admin?.sub || null,
       admin_email: req.admin?.email || null,

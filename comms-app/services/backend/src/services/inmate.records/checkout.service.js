@@ -137,6 +137,7 @@ export async function createInmateRecordsCheckoutSession(payload) {
 
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
+    payment_method_types: ["card"],
     customer_email: parsed.data.customerEmail || undefined,
     billing_address_collection: "auto",
     shipping_address_collection: {

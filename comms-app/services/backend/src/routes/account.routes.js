@@ -3,10 +3,13 @@ import { z } from "zod";
 import { db } from "../config/db.js";
 import { requireAuth } from "../middleware/auth.js";
 import {
-  currentAccountProductEntitlements,
   getActivePlan,
   listProductEntitlements,
 } from "../services/entitlement.service.js";
+import {
+  TABFORGE_SYNC_PLAN_ALIASES,
+  tabForgeAccountBillingStatus,
+} from "../services/tabforgeBilling.service.js";
 import {
   createReferralInvite,
   ensureReferralCodeForUser,
@@ -49,7 +52,7 @@ const CashAppSchema = z.object({
 });
 
 const ReferralInviteSchema = z.object({
-  toEmail: z.string().email(),
+  toEmail: z.string().email().max(320),
   productSlug: z.literal("tabforge").optional().default("tabforge"),
   recipientConsent: z.literal(true),
 });
@@ -96,15 +99,43 @@ async function prepareReferralInvite({
   productSlug,
   recipientConsentAttested,
 }) {
-  const lockKey =
-    `referral-invite:${productSlug}:${recipientEmail}`;
+  const senderWindowMs = 60 * 60 * 1000;
+  const senderLimit = 20;
+  const lockKeys = [
+    `referral-destination:${productSlug}:${recipientEmail}`,
+    `referral-sender:${productSlug}:${user.id}`,
+  ].sort();
 
   return db.transaction(async (trx) => {
-    // Serialize double-clicks and concurrent requests for this exact invite.
-    await trx.raw(
-      "select pg_advisory_xact_lock(hashtextextended(?::text, 0))",
-      [lockKey]
-    );
+    // These transaction-scoped locks make the durable sender and destination
+    // counts race-safe across every Render process. Sorting prevents deadlocks.
+    for (const lockKey of lockKeys) {
+      await trx.raw(
+        "select pg_advisory_xact_lock(hashtextextended(?::text, 0))",
+        [lockKey]
+      );
+    }
+
+    const senderRows = await trx("referral_events")
+      .select("created_at")
+      .where({
+        referrer_user_id: user.id,
+        product_slug: productSlug,
+        event_type: "invite",
+      })
+      .where("created_at", ">", new Date(Date.now() - senderWindowMs))
+      .orderBy("created_at", "asc");
+    if (senderRows.length >= senderLimit) {
+      const oldestAt = new Date(senderRows[0].created_at).getTime();
+      const remainingMs = Number.isFinite(oldestAt)
+        ? Math.max(1, oldestAt + senderWindowMs - Date.now())
+        : senderWindowMs;
+      return {
+        error: "too_many_referral_invites",
+        statusCode: 429,
+        retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000)),
+      };
+    }
 
     const recentRows = await trx("referral_events")
       .select("created_at", "status", "metadata")
@@ -150,6 +181,11 @@ async function prepareReferralInvite({
     );
     if (remainingMs > 0) {
       return {
+        error:
+          volumeCooldownRemainingMs > 0
+            ? "too_many_invites_to_recipient"
+            : "invite_recently_sent",
+        statusCode: volumeCooldownRemainingMs > 0 ? 429 : 409,
         retryAfterSeconds: Math.max(
           1,
           Math.ceil(remainingMs / 1000)
@@ -219,10 +255,22 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "user_not_found" });
     }
 
-    const activePlan = await getActivePlan(req.user.sub);
-    const entitlements = currentAccountProductEntitlements(
-      await listProductEntitlements(req.user.sub)
-    );
+    const [activePlan, entitlementRows, tabForgeSubscription] =
+      await Promise.all([
+        getActivePlan(req.user.sub),
+        listProductEntitlements(req.user.sub),
+        db("subscriptions")
+          .where({
+            user_id: req.user.sub,
+            provider: "stripe",
+          })
+          .whereIn("plan", TABFORGE_SYNC_PLAN_ALIASES)
+          .orderByRaw(
+            "case when status in ('active', 'trialing') then 0 else 1 end"
+          )
+          .orderBy("updated_at", "desc")
+          .first(),
+      ]);
     const referralCode = await ensureReferralCodeForUser(user);
 
     return res.json({
@@ -252,8 +300,15 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
               currentPeriodEnd: activePlan.subscription.current_period_end,
             }
           : null,
+        tabForge: tabForgeAccountBillingStatus({
+          entitlements: entitlementRows,
+          subscription: tabForgeSubscription,
+          hasStripeCustomer: Boolean(user.stripe_customer_id),
+        }),
       },
-      entitlements: entitlements.map((row) => ({
+      // Keep every active entitlement. The extension relies on legacy pack
+      // and skin slugs as well as the canonical Pro/Private Sync products.
+      entitlements: entitlementRows.map((row) => ({
         productSlug: row.product_slug,
         status: row.status,
         source: row.source,
@@ -275,9 +330,7 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
  */
 accountRouter.get("/entitlements", requireAuth, async (req, res) => {
   try {
-    const entitlements = currentAccountProductEntitlements(
-      await listProductEntitlements(req.user.sub)
-    );
+    const entitlements = await listProductEntitlements(req.user.sub);
     return res.json({
       items: entitlements.map((row) => ({
         productSlug: row.product_slug,
@@ -368,6 +421,7 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         .first(),
       db("referral_events")
         .where({ referrer_user_id: user.id, product_slug: "tabforge", event_type: "purchase", status: "verified" })
+        .whereRaw("metadata->>'initial_net_paid_cents' ~ '^[1-9][0-9]*$'")
         .countDistinct({ count: "referred_user_id" })
         .first(),
     ]);
@@ -545,8 +599,8 @@ accountRouter.post(
           "Retry-After",
           String(prepared.retryAfterSeconds)
         );
-        return res.status(409).json({
-          error: "invite_recently_sent",
+        return res.status(prepared.statusCode || 409).json({
+          error: prepared.error || "invite_recently_sent",
           retryAfterSeconds: prepared.retryAfterSeconds,
         });
       }

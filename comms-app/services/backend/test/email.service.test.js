@@ -12,6 +12,7 @@ const ENV_KEYS = [
   "SENDGRID_API_KEY",
   "SENDGRID_FROM_EMAIL",
   "SENDGRID_FROM_NAME",
+  "SENDGRID_REFERRAL_UNSUBSCRIBE_GROUP_ID",
   "VERIFY_FROM_EMAIL",
   "ACCOUNT_FROM_EMAIL",
   "ACCOUNT_FROM_NAME",
@@ -44,6 +45,7 @@ function configureProvider() {
   process.env.SENDGRID_API_KEY = "SG.test-only";
   process.env.REFERRAL_FROM_EMAIL = "referrals@sendforge.app";
   process.env.REFERRAL_FROM_NAME = "SendForge Rewards";
+  process.env.SENDGRID_REFERRAL_UNSUBSCRIBE_GROUP_ID = "4242";
   process.env.REFERRAL_BUSINESS_ADDRESS =
     "123 Test Street, Test City, NY 10001";
   process.env.PRIVACY_POLICY_URL =
@@ -163,7 +165,7 @@ describe("SendForge transactional SendGrid payloads", { concurrency: false }, ()
     });
   });
 
-  test("referral uses a neutral invitation with exact correlation", async () => {
+  test("referral clearly discloses promotion and keeps exact correlation", async () => {
     const calls = captureFetch();
     const referralUrl =
       "https://tabforge.app/referral/invite-token-456";
@@ -188,7 +190,10 @@ describe("SendForge transactional SendGrid payloads", { concurrency: false }, ()
       name: "SendForge Rewards",
     });
     assert.equal(body.reply_to, undefined);
-    assert.equal(body.subject, "A TabForge invitation");
+    assert.equal(
+      body.subject,
+      "Promotional: A TabForge referral invitation"
+    );
     assert.doesNotMatch(body.subject, /\$|earn|cash|reward/i);
 
     const text = contentValue(body, "text/plain");
@@ -207,9 +212,18 @@ describe("SendForge transactional SendGrid payloads", { concurrency: false }, ()
       "List-Unsubscribe": `<${unsubscribeUrl}>`,
       "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
     });
+    assert.deepEqual(body.asm, { group_id: 4242 });
 
     assert.match(text, /does not create an account or enroll you/i);
     assert.match(html, /does not create an account or enroll you/i);
+    assert.match(
+      text,
+      /This is a promotional referral message from SendForge\./
+    );
+    assert.match(
+      html,
+      /This is a promotional referral message from SendForge\./
+    );
     assert.doesNotMatch(
       `${text}\n${html}`,
       /cash app|real money|reward milestones|qualified purchases|\$17|\$35|\$40|\$150/i

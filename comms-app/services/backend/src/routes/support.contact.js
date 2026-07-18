@@ -1,6 +1,11 @@
 import crypto from "crypto";
 import { Router } from "express";
 import { z } from "zod";
+import {
+  createRateLimiter,
+  rateLimitByIp,
+  rateLimitByIpAndBodyEmail,
+} from "../middleware/rateLimit.js";
 import { sendContactFormEmail } from "../services/email.service.js";
 
 export const contactRouter = Router();
@@ -14,7 +19,23 @@ const ContactRequestSchema = z.object({
   website: z.string().trim().max(0).optional().default(""),
 });
 
-contactRouter.post("/", async (req, res) => {
+const contactIpRateLimiter = createRateLimiter({
+  name: "contact-ip",
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: rateLimitByIp,
+  message: "too_many_contact_requests",
+});
+
+const contactIdentityRateLimiter = createRateLimiter({
+  name: "contact-identity",
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: rateLimitByIpAndBodyEmail,
+  message: "too_many_contact_requests",
+});
+
+contactRouter.post("/", contactIpRateLimiter, contactIdentityRateLimiter, async (req, res) => {
   const requestId = req.headers["x-request-id"] || crypto.randomUUID();
 
   try {

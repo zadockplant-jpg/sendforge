@@ -77,7 +77,7 @@ app.use((err, _req, res, next) => {
     return res.status(413).json({
       error: "payload_too_large",
       message:
-        "A single TabForge cloud sync request is too large. Sync + Collections includes the 20GB cloud-storage profile, but external cloud hosting is staged and large note/image updates should be split or compressed.",
+        "That TabForge private-sync update is too large. The local copy is safe; split or compress large note and image updates before retrying.",
     });
   }
   return next(err);

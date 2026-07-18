@@ -1,7 +1,6 @@
 import { Router } from "express";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
-import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
@@ -14,6 +13,7 @@ import { cashAppTagKey, normalizeCashAppTag } from "../services/referrals/referr
 import { adminLiveTestingRouter } from "./admin.liveTesting.routes.js";
 import { liveTestingEnabledFor, liveTestingOwnerEmail } from "../services/adminLiveTesting.service.js";
 import { getRequestId, log, sanitizeEmail } from "../utils/logger.js";
+import { issueAdminAccessToken } from "../services/auth.service.js";
 
 export const adminRouter = Router();
 
@@ -78,11 +78,31 @@ function rewardPayoutHoldInfo(row, programMap = new Map()) {
 function enrichReward(row, programMap = new Map()) {
   return { ...row, ...rewardPayoutHoldInfo(row, programMap) };
 }
+function rewardRequiredPurchases(row, program = null) {
+  const metadata = rewardMetadata(row);
+  const explicit = Number(metadata.tier_required_purchases || 0);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+
+  for (const value of [metadata.tier_key, row?.reward_key]) {
+    const match = String(value || "").match(/:(\d+)$/);
+    const parsed = Number(match?.[1] || 0);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+
+  const fallback = Number(program?.required_purchases || 0);
+  return Number.isInteger(fallback) && fallback > 0 ? fallback : 0;
+}
+function rewardStatusError(statusCode, error, extra = {}) {
+  const err = new Error(error);
+  err.statusCode = statusCode;
+  err.responseBody = { error, ...extra };
+  return err;
+}
 function allowedAdminEmails() { return String(process.env.ADMIN_ALLOWED_EMAILS || process.env.ADMIN_EMAIL || "zadockplant@gmail.com").split(",").map(normalizeEmail).filter(Boolean); }
 function isAllowedAdmin(email) { return allowedAdminEmails().includes(normalizeEmail(email)); }
 function sha256(value) { return crypto.createHash("sha256").update(String(value)).digest("hex"); }
 function makeReferralCode(email = "") { const base = String(email).split("@")[0].replace(/[^a-z0-9]/gi, "").slice(0, 8).toUpperCase() || "FORGE"; return `${base}${crypto.randomInt(1000, 9999)}`; }
-function adminTokenFor(user) { return jwt.sign({ sub: user.id, email: user.email, admin: true, role: "owner" }, env.jwtSecret, { audience: "sendforge-admin", issuer: "sendforge-api" }); }
+function adminTokenFor(user) { return issueAdminAccessToken({ id: user.id, email: user.email, authVersion: user.auth_version || 0 }); }
 
 async function findUserByEmail(email) { return db("users").where({ email: normalizeEmail(email) }).first(); }
 async function requireTargetUserByEmail(email) { const user = await findUserByEmail(email); if (!user) { const err = new Error("user_not_found"); err.statusCode = 404; throw err; } return user; }
@@ -417,18 +437,7 @@ adminRouter.get("/rewards", async (_req, res) => {
 async function updateRewardStatus(req, res) {
   const parsed = RewardStatusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
-
-  const existing = await db("reward_queue").where({ id: req.params.id }).first();
-  if (!existing) return res.status(404).json({ error: "reward_not_found" });
-  if (existing.metadata?.admin_live_test === true) {
-    return res.status(409).json({ error: "use_live_test_lab_for_test_reward" });
-  }
-
   const target = parsed.data.status;
-  if (target === existing.status) {
-    return res.json({ item: existing, unchanged: true });
-  }
-
   const allowedTransitions = {
     pending: new Set(["approved", "paid", "rejected"]),
     approved: new Set(["pending", "paid", "rejected"]),
@@ -436,83 +445,186 @@ async function updateRewardStatus(req, res) {
     paid: new Set(),
   };
 
-  if (target !== existing.status && !allowedTransitions[existing.status]?.has(target)) {
-    return res.status(409).json({ error: "invalid_reward_transition", from: existing.status, to: target });
-  }
-
-  const adminNote = parsed.data.adminNote ?? parsed.data.note ?? existing.admin_note;
-  if (target === "rejected" && !String(adminNote || "").trim()) {
-    return res.status(400).json({ error: "rejection_note_required" });
-  }
-
-  let cashAppHandle = normalizeCashAppTag(parsed.data.cashappHandle ?? existing.cashapp_handle);
-  if (!cashAppHandle && existing.user_id) {
-    const owner = await db("users").select("cash_app_tag").where({ id: existing.user_id }).first();
-    cashAppHandle = normalizeCashAppTag(owner?.cash_app_tag);
-  }
-
-  if (target === "approved" || target === "paid") {
-    if (!cashAppHandle) return res.status(409).json({ error: "cash_app_tag_required" });
-    const claim = await db("cash_app_tag_claims")
-      .where({ user_id: existing.user_id, normalized_tag: cashAppTagKey(cashAppHandle), status: "active" })
-      .first();
-    if (!claim) return res.status(409).json({ error: "cash_app_tag_not_owned_by_reward_user" });
-
-    const program = await db("referral_programs").where({ product_slug: existing.product_slug }).first();
-    const holdInfo = rewardPayoutHoldInfo(existing, new Map([[normalizeSlug(existing.product_slug), program]]));
-    if (!holdInfo.payout_hold_complete) {
-      return res.status(409).json({
-        error: "payout_hold_not_complete",
-        message: `Payout is still in the ${holdInfo.payout_hold_days}-day verification window.`,
-        payoutReadyAt: holdInfo.payout_ready_at,
-        payoutHoldDays: holdInfo.payout_hold_days,
-      });
-    }
-  }
-
-  const payoutReference = String(parsed.data.payoutReference || "").trim()
-    || (target === "paid" ? `manual:${existing.id}` : "");
-
-  const update = {
-    status: target,
-    admin_note: adminNote,
-    cashapp_handle: cashAppHandle,
-    updated_at: db.fn.now(),
-  };
-
-  if (target === "approved") {
-    update.approved_by = req.admin.sub;
-    update.approved_at = db.fn.now();
-    update.paid_by = null;
-    update.paid_at = null;
-    update.payout_reference = null;
-  } else if (target === "paid") {
-    if (!existing.approved_at) {
-      update.approved_by = req.admin.sub;
-      update.approved_at = db.fn.now();
-    }
-    update.paid_by = req.admin.sub;
-    update.paid_at = db.fn.now();
-    update.payout_reference = payoutReference;
-  } else if (target === "pending") {
-    update.approved_by = null;
-    update.approved_at = null;
-    update.paid_by = null;
-    update.paid_at = null;
-    update.payout_reference = null;
-  }
-
   try {
-    const rows = await db("reward_queue").where({ id: existing.id }).update(update).returning("*");
-    await writeAdminAudit(req, { action: `reward.${target}`, resourceType: "reward_queue", resourceId: existing.id, beforeValue: existing, afterValue: rows[0] });
-    return res.json({ item: rows[0] });
+    const result = await db.transaction(async (trx) => {
+      // Read enough identity to lock qualifying purchase rows before the reward
+      // row. Refund/dispute handling uses the same event-then-reward order.
+      const snapshot = await trx("reward_queue")
+        .where({ id: req.params.id })
+        .first();
+      if (!snapshot) {
+        throw rewardStatusError(404, "reward_not_found");
+      }
+      if (snapshot.metadata?.admin_live_test === true) {
+        throw rewardStatusError(409, "use_live_test_lab_for_test_reward");
+      }
+
+      let verifiedPurchases = [];
+      if (target === "approved" || target === "paid") {
+        verifiedPurchases = await trx("referral_events")
+          .select("referred_user_id")
+          .where({
+            referrer_user_id: snapshot.user_id,
+            product_slug: snapshot.product_slug,
+            event_type: "purchase",
+            status: "verified",
+          })
+          .whereRaw(
+            "metadata->>'initial_net_paid_cents' ~ '^[1-9][0-9]*$'"
+          )
+          .forUpdate();
+      }
+
+      const existing = await trx("reward_queue")
+        .where({ id: snapshot.id })
+        .forUpdate()
+        .first();
+      if (!existing) {
+        throw rewardStatusError(404, "reward_not_found");
+      }
+      if (existing.metadata?.admin_live_test === true) {
+        throw rewardStatusError(409, "use_live_test_lab_for_test_reward");
+      }
+      if (target === existing.status) {
+        return { item: existing, unchanged: true };
+      }
+      if (!allowedTransitions[existing.status]?.has(target)) {
+        throw rewardStatusError(409, "invalid_reward_transition", {
+          from: existing.status,
+          to: target,
+        });
+      }
+
+      const adminNote =
+        parsed.data.adminNote ??
+        parsed.data.note ??
+        existing.admin_note;
+      if (target === "rejected" && !String(adminNote || "").trim()) {
+        throw rewardStatusError(400, "rejection_note_required");
+      }
+
+      let cashAppHandle = normalizeCashAppTag(
+        parsed.data.cashappHandle ?? existing.cashapp_handle
+      );
+      if (!cashAppHandle && existing.user_id) {
+        const owner = await trx("users")
+          .select("cash_app_tag")
+          .where({ id: existing.user_id })
+          .first();
+        cashAppHandle = normalizeCashAppTag(owner?.cash_app_tag);
+      }
+
+      if (target === "approved" || target === "paid") {
+        if (!cashAppHandle) {
+          throw rewardStatusError(409, "cash_app_tag_required");
+        }
+        const claim = await trx("cash_app_tag_claims")
+          .where({
+            user_id: existing.user_id,
+            normalized_tag: cashAppTagKey(cashAppHandle),
+            status: "active",
+          })
+          .first();
+        if (!claim) {
+          throw rewardStatusError(
+            409,
+            "cash_app_tag_not_owned_by_reward_user"
+          );
+        }
+
+        const program = await trx("referral_programs")
+          .where({ product_slug: existing.product_slug })
+          .first();
+        const holdInfo = rewardPayoutHoldInfo(
+          existing,
+          new Map([[normalizeSlug(existing.product_slug), program]])
+        );
+        if (!holdInfo.payout_hold_complete) {
+          throw rewardStatusError(409, "payout_hold_not_complete", {
+            message: `Payout is still in the ${holdInfo.payout_hold_days}-day verification window.`,
+            payoutReadyAt: holdInfo.payout_ready_at,
+            payoutHoldDays: holdInfo.payout_hold_days,
+          });
+        }
+
+        const verifiedCount = new Set(
+          verifiedPurchases
+            .map((row) => row.referred_user_id)
+            .filter(Boolean)
+        ).size;
+        const requiredPurchases = rewardRequiredPurchases(
+          existing,
+          program
+        );
+        if (!requiredPurchases || verifiedCount < requiredPurchases) {
+          throw rewardStatusError(
+            409,
+            "referral_qualification_no_longer_met",
+            { verifiedCount, requiredPurchases }
+          );
+        }
+      }
+
+      const payoutReference =
+        String(parsed.data.payoutReference || "").trim() ||
+        (target === "paid" ? `manual:${existing.id}` : "");
+      const update = {
+        status: target,
+        admin_note: adminNote,
+        cashapp_handle: cashAppHandle,
+        updated_at: trx.fn.now(),
+      };
+
+      if (target === "approved") {
+        update.approved_by = req.admin.sub;
+        update.approved_at = trx.fn.now();
+        update.paid_by = null;
+        update.paid_at = null;
+        update.payout_reference = null;
+      } else if (target === "paid") {
+        if (!existing.approved_at) {
+          update.approved_by = req.admin.sub;
+          update.approved_at = trx.fn.now();
+        }
+        update.paid_by = req.admin.sub;
+        update.paid_at = trx.fn.now();
+        update.payout_reference = payoutReference;
+      } else if (target === "pending") {
+        update.approved_by = null;
+        update.approved_at = null;
+        update.paid_by = null;
+        update.paid_at = null;
+        update.payout_reference = null;
+      }
+
+      const rows = await trx("reward_queue")
+        .where({ id: existing.id })
+        .update(update)
+        .returning("*");
+      await writeAdminAudit(
+        req,
+        {
+          action: `reward.${target}`,
+          resourceType: "reward_queue",
+          resourceId: existing.id,
+          beforeValue: existing,
+          afterValue: rows[0],
+        },
+        trx
+      );
+      return { item: rows[0] };
+    });
+    return res.json(result);
   } catch (err) {
+    if (err?.statusCode && err?.responseBody) {
+      return res.status(err.statusCode).json(err.responseBody);
+    }
     if (err?.code === "23505") {
       return res.status(409).json({ error: "payout_reference_already_used" });
     }
     log("error", "admin_reward_update_failed", {
       requestId: getRequestId(req),
-      rewardId: existing.id,
+      rewardId: req.params.id,
       target,
       code: err?.code,
       message: String(err?.message || err),

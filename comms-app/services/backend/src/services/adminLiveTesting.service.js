@@ -7,7 +7,7 @@ const DEFAULT_OWNER_EMAIL = "zadockplant@gmail.com";
 const TABFORGE_CLOUD_OWNER_EMAIL = normalizeEmail(
   process.env.TABFORGE_CLOUD_OWNER_EMAIL || process.env.ADMIN_LIVE_TEST_OWNER_EMAIL || DEFAULT_OWNER_EMAIL
 );
-const TABFORGE_CLOUD_PROVIDER_STATUS = String(process.env.TABFORGE_CLOUD_PROVIDER_STATUS || "stubbed_until_provider").trim().toLowerCase();
+const TABFORGE_CLOUD_PROVIDER_STATUS = String(process.env.TABFORGE_CLOUD_PROVIDER_STATUS || "cloudflare_private_sync").trim().toLowerCase();
 const TABFORGE_CLOUD_STORAGE_LIMIT_GB = 20;
 const PRODUCT_SLUG = "tabforge";
 const MAX_LIVE_TEST_COUNT = 10000;
@@ -15,17 +15,18 @@ const TEST_SOURCE = "admin_live_test";
 const OWNER_ENTITLEMENT_SOURCE = "admin_owner_grant";
 const TEST_ENTITLEMENT_PRESETS = [
   // Product features that are purchasable/account-visible in the current model.
-  { slug: "tabforge", label: "TabForge Pro", category: "product_features", description: "$10 one-time local Pro unlock for one device." },
-  { slug: "tabforge-subscription", label: "Sync + Collections", category: "product_features", description: "$5/month subscription profile: Pro while active, current collections, 20GB cloud-storage profile, and sync across up to 5 devices once cloud hosting is live. Cloud provider is admin-only/stubbed until wired." },
-  { slug: "tabforge-sync-collections", label: "Sync + Collections Alias", category: "product_features", description: "Compatibility alias for the current subscription entitlement." },
-  { slug: "tabforge-collections", label: "Collections Access", category: "product_features", description: "Legacy compatibility entitlement included with the Sync + Collections subscription." },
+  { slug: "tabforge", label: "TabForge Pro", category: "product_features", description: "$10 permanent Pro unlock with current collections and intermittent layout recovery backup." },
+  { slug: "tabforge-subscription", label: "TabForge Private Sync", category: "product_features", description: "$5/month cross-device sync for layouts, shortcuts, and cloud notes on up to five devices. New Pro purchases include the first 60 days." },
+  { slug: "tabforge-sync-collections", label: "Private Sync Alias", category: "product_features", description: "Compatibility alias for the current Private Sync entitlement." },
+  { slug: "tabforge-collections", label: "Legacy Collections Alias", category: "product_features", description: "Compatibility alias retained for existing accounts." },
 
-  // Shortcut pack entitlements are now included with the subscription tier.
-  { slug: "tabforge-pack-builder", label: "Builder Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
-  { slug: "tabforge-pack-money", label: "Money Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
-  { slug: "tabforge-pack-dev", label: "Developer Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
-  { slug: "tabforge-pack-media", label: "Media Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
-  { slug: "tabforge-pack-research", label: "Research Collection", category: "shortcut_packs", description: "Included with Sync + Collections." },
+  // Legacy per-pack entitlements remain visible for compatibility. Current
+  // collections unlock permanently through the TabForge Pro entitlement.
+  { slug: "tabforge-pack-builder", label: "Builder Collection", category: "shortcut_packs", description: "Legacy compatibility entitlement; current collection access is included with Pro." },
+  { slug: "tabforge-pack-money", label: "Money Collection", category: "shortcut_packs", description: "Legacy compatibility entitlement; current collection access is included with Pro." },
+  { slug: "tabforge-pack-dev", label: "Developer Collection", category: "shortcut_packs", description: "Legacy compatibility entitlement; current collection access is included with Pro." },
+  { slug: "tabforge-pack-media", label: "Media Collection", category: "shortcut_packs", description: "Legacy compatibility entitlement; current collection access is included with Pro." },
+  { slug: "tabforge-pack-research", label: "Research Collection", category: "shortcut_packs", description: "Legacy compatibility entitlement; current collection access is included with Pro." },
 
   // Skin/icon add-ons are delayed. Keep these available only for legacy/admin checks.
   { slug: "tabforge-skin-bundle-command-center", label: "Star Base", category: "future_visual_addons", description: "Delayed future one-time visual add-on." },
@@ -138,17 +139,17 @@ function tabforgeCloudStatus(ownerEmail = liveTestingOwnerEmail()) {
   const normalizedOwner = normalizeEmail(ownerEmail);
   const adminCloudEnabled = normalizedOwner === TABFORGE_CLOUD_OWNER_EMAIL;
   return {
-    enabled: adminCloudEnabled,
-    ownerOnly: true,
+    enabled: true,
+    ownerOnly: false,
     ownerEmail: TABFORGE_CLOUD_OWNER_EMAIL,
     providerStatus: TABFORGE_CLOUD_PROVIDER_STATUS,
     cloudStorageLimitGb: TABFORGE_CLOUD_STORAGE_LIMIT_GB,
     noteAutosaveRecord: "TabForge Notes Cloud Autosave",
     shortcutAutosaveRecord: "TabForge Cloud Autosave",
-    nonOwnerCloudHosting: "stubbed_until_provider",
+    nonOwnerCloudHosting: "cloudflare_private_sync",
     message: adminCloudEnabled
-      ? "Admin-only TabForge cloud saving is enabled for this owner account while the external cloud provider is staged."
-      : "TabForge cloud hosting is stubbed for non-owner accounts until the cloud provider is wired in.",
+      ? "Owner access uses the live Cloudflare private-sync data plane."
+      : "Eligible TabForge accounts use Cloudflare for content; Render handles authentication, billing, and entitlement metadata only.",
   };
 }
 
@@ -157,13 +158,13 @@ export function ownerEntitlementCatalog() {
     {
       key: "product_features",
       title: "Product features",
-      description: "Account-level TabForge purchases and the active Sync + Collections subscription tier.",
+      description: "Permanent TabForge Pro purchases and the active Private Sync subscription tier.",
       items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "product_features"),
     },
     {
       key: "shortcut_packs",
-      title: "Included collection entitlements",
-      description: "Collections are no longer sold individually; these are granted through Sync + Collections.",
+      title: "Legacy collection entitlements",
+      description: "Collections are no longer sold individually; current collections unlock permanently with Pro.",
       items: TEST_ENTITLEMENT_PRESETS.filter((item) => item.category === "shortcut_packs"),
     },
     {
@@ -899,4 +900,3 @@ export async function resetLiveTestState({ restoreCashAppTag = true } = {}) {
     return liveStateFromTransaction(trx, owner, nextSession);
   });
 }
-

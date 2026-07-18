@@ -14,7 +14,7 @@ const TABFORGE_CLOUD_AUTOSAVE_NAMES = new Set([CLOUD_AUTOSAVE_NAME, CLOUD_NOTES_
 const TABFORGE_CLOUD_OWNER_EMAIL = String(
   process.env.TABFORGE_CLOUD_OWNER_EMAIL || process.env.ADMIN_LIVE_TEST_OWNER_EMAIL || "zadockplant@gmail.com"
 ).trim().toLowerCase();
-const TABFORGE_CLOUD_PROVIDER_STATUS = String(process.env.TABFORGE_CLOUD_PROVIDER_STATUS || "stubbed_until_provider").trim().toLowerCase();
+const TABFORGE_CLOUD_PROVIDER_STATUS = "legacy_render_read_only";
 
 const tabforgeConfigWriteLimiter = createRateLimiter({
   name: "tabforge-config-write",
@@ -65,21 +65,23 @@ function isTabForgeCloudOwnerRequest(req) {
 function cloudStatusForRequest(req) {
   const owner = isTabForgeCloudOwnerRequest(req);
   return {
-    enabled: owner,
-    ownerOnly: true,
-    stubbedForNonOwner: !owner,
+    enabled: false,
+    ownerOnly: false,
+    stubbedForNonOwner: false,
+    retired: true,
+    legacyReadAvailable: owner,
     providerStatus: TABFORGE_CLOUD_PROVIDER_STATUS,
-    cloudStorageLimitGb: owner ? TABFORGE_CLOUD_STORAGE_LIMIT_GB : 0,
+    cloudStorageLimitGb: 0,
     message: owner
-      ? "Admin-only TabForge cloud saving is enabled for this account while the external cloud provider is staged."
-      : "TabForge cloud hosting is stubbed for non-admin accounts until the cloud provider is wired in.",
+      ? "Legacy Render records are temporarily readable for owner migration; all current content uses Cloudflare."
+      : "This legacy Render content route has been retired; current TabForge content uses Cloudflare.",
   };
 }
 
-function sendCloudStubbed(res, req, statusCode = 501) {
+function sendCloudStubbed(res, req, statusCode = 410) {
   return res.status(statusCode).json({
-    error: "tabforge_cloud_hosting_stubbed",
-    message: "TabForge cloud hosting is currently enabled only for the admin account while the cloud provider is being wired in.",
+    error: "legacy_render_storage_retired",
+    message: "This legacy Render content route has been retired; current TabForge content uses Cloudflare.",
     cloud: cloudStatusForRequest(req),
   });
 }
@@ -170,6 +172,16 @@ async function getOwnedConfigOr404(userId, configId) {
 
 tabforgeConfigsRouter.use(requireAuth);
 tabforgeConfigsRouter.use((req, res, next) => {
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
+    return res.status(410).json({
+      error: "legacy_render_storage_retired",
+      message:
+        "This legacy Render storage route is read-only. Current TabForge content sync uses the private Cloudflare data plane.",
+    });
+  }
+  return next();
+});
+tabforgeConfigsRouter.use((req, res, next) => {
   if (req.method === "POST" && TABFORGE_CLOUD_AUTOSAVE_NAMES.has(normalizeName(req.body?.name))) {
     return tabforgeCloudAutosaveWriteLimiter(req, res, next);
   }
@@ -213,8 +225,8 @@ tabforgeConfigsRouter.get("/", async (req, res) => {
         ? "tabforge_subscription_required"
         : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error")),
       message: err?.message === "tabforge_subscription_required"
-        ? "TabForge cloud sync requires the $5/month Sync + Collections subscription."
-        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err))),
+        ? "TabForge Private Sync is required for cross-device sync."
+        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "The TabForge private-sync safety limit was reached." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "This legacy Render storage route has been retired." : String(err?.message || err))),
     });
   }
 });
@@ -238,7 +250,7 @@ tabforgeConfigsRouter.get("/:id", async (req, res) => {
         : (err?.message === "tabforge_subscription_required" ? "tabforge_subscription_required" : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error"))),
       message: statusCode === 404
         ? undefined
-        : (err?.message === "tabforge_subscription_required" ? "TabForge cloud sync requires the $5/month Sync + Collections subscription." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err)))),
+        : (err?.message === "tabforge_subscription_required" ? "TabForge Private Sync is required for cross-device sync." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "The TabForge private-sync safety limit was reached." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "This legacy Render storage route has been retired." : String(err?.message || err)))),
     });
   }
 });
@@ -316,8 +328,8 @@ tabforgeConfigsRouter.post("/", async (req, res) => {
         ? "tabforge_subscription_required"
         : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error")),
       message: err?.message === "tabforge_subscription_required"
-        ? "TabForge cloud sync requires the $5/month Sync + Collections subscription."
-        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err))),
+        ? "TabForge Private Sync is required for cross-device sync."
+        : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "The TabForge private-sync safety limit was reached." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "This legacy Render storage route has been retired." : String(err?.message || err))),
     });
   }
 });
@@ -383,7 +395,7 @@ tabforgeConfigsRouter.put("/:id", async (req, res) => {
         : (err?.message === "tabforge_subscription_required" ? "tabforge_subscription_required" : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error"))),
       message: statusCode === 404
         ? undefined
-        : (err?.message === "tabforge_subscription_required" ? "TabForge cloud sync requires the $5/month Sync + Collections subscription." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err)))),
+        : (err?.message === "tabforge_subscription_required" ? "TabForge Private Sync is required for cross-device sync." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "The TabForge private-sync safety limit was reached." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "This legacy Render storage route has been retired." : String(err?.message || err)))),
     });
   }
 });
@@ -409,7 +421,7 @@ tabforgeConfigsRouter.delete("/:id", async (req, res) => {
         : (err?.message === "tabforge_subscription_required" ? "tabforge_subscription_required" : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "tabforge_cloud_storage_limit_exceeded" : (err?.message === "tabforge_cloud_hosting_stubbed" ? "tabforge_cloud_hosting_stubbed" : "server_error"))),
       message: statusCode === 404
         ? undefined
-        : (err?.message === "tabforge_subscription_required" ? "TabForge cloud sync requires the $5/month Sync + Collections subscription." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "TabForge cloud storage is limited to 20GB." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "TabForge cloud hosting is currently admin-only while the provider is staged." : String(err?.message || err)))),
+        : (err?.message === "tabforge_subscription_required" ? "TabForge Private Sync is required for cross-device sync." : (err?.message === "tabforge_cloud_storage_limit_exceeded" ? "The TabForge private-sync safety limit was reached." : (err?.message === "tabforge_cloud_hosting_stubbed" ? "This legacy Render storage route has been retired." : String(err?.message || err)))),
     });
   }
 });

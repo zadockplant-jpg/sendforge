@@ -115,6 +115,7 @@ async function sendEmailViaSendGrid({
   messageCategory = "sendforge-transactional",
   disableSubscriptionTracking = true,
   unsubscribeUrl = null,
+  unsubscribeGroupId = null,
 }) {
   const senderEmail = fromEmail || accountFromEmail();
   const senderName = fromName || accountFromName();
@@ -184,6 +185,10 @@ async function sendEmailViaSendGrid({
 
   if (replyTo) {
     body.reply_to = { email: replyTo };
+  }
+  const groupId = Number(unsubscribeGroupId);
+  if (Number.isInteger(groupId) && groupId > 0) {
+    body.asm = { group_id: groupId };
   }
 
   let res = null;
@@ -538,9 +543,11 @@ export async function sendReferralInviteEmail({
   const safeProduct = escapeHtml(productName);
   const safeFrom = escapeHtml(referrerEmail || "a TabForge user");
   const safeUrl = escapeHtml(referralUrl);
-  const subject = `A ${productName} invitation`;
+  const subject = `Promotional: A ${productName} referral invitation`;
 
-  const text = `${referrerEmail || "Someone you know"} invited you to ${productName} Pro.
+  const text = `This is a promotional referral message from SendForge.
+
+${referrerEmail || "Someone you know"} invited you to ${productName} Pro.
 
 Open the private invitation:
 ${referralUrl}
@@ -560,6 +567,7 @@ Need help? Contact ${supportEmail()}.`;
       <div style="max-width:600px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
         <p style="margin:0 0 8px;color:#52627a;font-size:13px;font-weight:700;">SENDFORGE</p>
         <h1 style="margin:0 0 12px;font-size:27px;line-height:1.15;color:#172033;">A ${safeProduct} invitation</h1>
+        <p style="margin:0 0 12px;color:#66758c;font-size:13px;font-weight:700;">This is a promotional referral message from SendForge.</p>
         <p style="margin:0 0 22px;color:#52627a;"><strong>${safeFrom}</strong> invited you to ${safeProduct} Pro.</p>
         <p style="margin:0 0 22px;">
           <a href="${safeUrl}" style="display:inline-block;padding:12px 18px;border-radius:10px;background:#1e6fe8;color:#ffffff;text-decoration:none;font-weight:700;">Open invitation</a>
@@ -585,6 +593,7 @@ Need help? Contact ${supportEmail()}.`;
     messageRef: referralEventId || requestId,
     messageCategory: "sendforge-referral",
     unsubscribeUrl,
+    unsubscribeGroupId: process.env.SENDGRID_REFERRAL_UNSUBSCRIBE_GROUP_ID,
     // Referral mail has a per-sender app unsubscribe, so global provider
     // suppression must not interfere with security/account messages.
     disableSubscriptionTracking: true,

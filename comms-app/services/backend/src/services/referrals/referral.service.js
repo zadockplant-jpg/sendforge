@@ -701,6 +701,9 @@ async function queuePurchaseRewardsForReferrer({ trx, referrer, referralCode, pr
       event_type: "purchase",
       status: "verified",
     })
+    .whereRaw(
+      "metadata->>'initial_net_paid_cents' ~ '^[1-9][0-9]*$'"
+    )
     .countDistinct({ count: "referred_user_id" })
     .first();
   const verifiedCount = Number(verifiedCountResult?.count || 0);
@@ -826,6 +829,10 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
   // Only a qualifying TabForge Pro purchase earns referral credit. Add-ons, pages,
   // collections, and skin bundles remain normal purchases but never advance payout tiers.
   if (slug !== "tabforge") return { recorded: false, reason: "not_qualifying_product" };
+  const initialNetPaidCents = Number(metadata?.initial_net_paid_cents || 0);
+  if (!Number.isFinite(initialNetPaidCents) || initialNetPaidCents <= 0) {
+    return { recorded: false, reason: "no_positive_initial_payment" };
+  }
 
   return db.transaction(async (trx) => {
     const referredUser = await trx("users").where({ id: referredUserId }).first();
@@ -897,5 +904,138 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
     });
 
     return { recorded: true, event, rewards, verifiedCount };
+  });
+}
+
+export async function disqualifyReferralPurchaseForStripe({
+  paymentIntentId = "",
+  invoiceId = "",
+  chargeId = "",
+  reason = "refunded",
+  providerEventId = "",
+} = {}) {
+  const identifiers = {
+    paymentIntentId: normalizeReferralValue(paymentIntentId),
+    invoiceId: normalizeReferralValue(invoiceId),
+    chargeId: normalizeReferralValue(chargeId),
+  };
+  if (!Object.values(identifiers).some(Boolean)) {
+    return { updated: 0, reason: "missing_stripe_identifiers" };
+  }
+
+  return db.transaction(async (trx) => {
+    const query = trx("referral_events")
+      .where({
+        product_slug: "tabforge",
+        event_type: "purchase",
+      })
+      .whereIn("status", ["pending", "verified"])
+      .andWhere((builder) => {
+        let hasCondition = false;
+        if (identifiers.paymentIntentId) {
+          builder.whereRaw("metadata->>'payment_intent' = ?", [
+            identifiers.paymentIntentId,
+          ]);
+          hasCondition = true;
+        }
+        if (identifiers.invoiceId) {
+          const method = hasCondition ? "orWhereRaw" : "whereRaw";
+          builder[method]("metadata->>'invoice_id' = ?", [
+            identifiers.invoiceId,
+          ]);
+          hasCondition = true;
+        }
+        if (identifiers.chargeId) {
+          const method = hasCondition ? "orWhereRaw" : "whereRaw";
+          builder[method]("metadata->>'charge_id' = ?", [
+            identifiers.chargeId,
+          ]);
+        }
+      });
+
+    const events = await query.forUpdate();
+    if (!events.length) return { updated: 0, reason: "not_found" };
+
+    const status =
+      reason === "disputed"
+        ? "disputed"
+        : reason === "payment_failed"
+          ? "payment_failed"
+          : "refunded";
+    for (const event of events) {
+      await trx("referral_events")
+        .where({ id: event.id })
+        .update({
+          status,
+          metadata: {
+            ...(event.metadata || {}),
+            counts_toward_payout: false,
+            disqualified_at: new Date().toISOString(),
+            disqualification_reason: status,
+            provider_event_id: providerEventId || null,
+            stripe_charge_id:
+              identifiers.chargeId ||
+              event.metadata?.stripe_charge_id ||
+              null,
+          },
+          updated_at: trx.fn.now(),
+        });
+    }
+
+    const referrerIds = [
+      ...new Set(events.map((event) => event.referrer_user_id).filter(Boolean)),
+    ];
+    for (const referrerId of referrerIds) {
+      const countRow = await trx("referral_events")
+        .where({
+          referrer_user_id: referrerId,
+          product_slug: "tabforge",
+          event_type: "purchase",
+          status: "verified",
+        })
+        .whereRaw(
+          "metadata->>'initial_net_paid_cents' ~ '^[1-9][0-9]*$'"
+        )
+        .countDistinct({ count: "referred_user_id" })
+        .first();
+      const verifiedCount = Number(countRow?.count || 0);
+      const unpaidRewards = await trx("reward_queue")
+        .where({
+          user_id: referrerId,
+          product_slug: "tabforge",
+        })
+        .whereIn("status", ["pending", "approved"])
+        .forUpdate();
+      for (const reward of unpaidRewards) {
+        const explicitRequired = Number(
+          reward.metadata?.tier_required_purchases || 0
+        );
+        const rewardKeyRequired = Number(
+          String(
+            reward.metadata?.tier_key || reward.reward_key || ""
+          ).match(/:(\d+)$/)?.[1] || 0
+        );
+        const required = explicitRequired || rewardKeyRequired;
+        if (required > 0 && required <= verifiedCount) continue;
+        await trx("reward_queue")
+          .where({ id: reward.id })
+          .whereIn("status", ["pending", "approved"])
+          .update({
+            status: "canceled",
+            admin_note:
+              "Automatically canceled because a qualifying purchase was refunded or disputed.",
+            metadata: {
+              ...(reward.metadata || {}),
+              canceled_at: new Date().toISOString(),
+              cancellation_reason: status,
+              verified_purchase_count_after: verifiedCount,
+              provider_event_id: providerEventId || null,
+            },
+            updated_at: trx.fn.now(),
+          });
+      }
+    }
+
+    return { updated: events.length, status };
   });
 }

@@ -36,6 +36,8 @@ export const env = {
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || "",
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "",
   stripePriceTabforge: process.env.STRIPE_PRICE_TABFORGE || "",
+  stripePriceTabforgeSync:
+    process.env.STRIPE_PRICE_TABFORGE_SYNC || "",
 
   // Inmate Records merch fulfillment (backend only)
   printfulApiKey: process.env.PRINTFUL_API_KEY || "",

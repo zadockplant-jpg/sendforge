@@ -1,12 +1,9 @@
 import crypto from "crypto";
 import { db } from "../config/db.js";
+import { TABFORGE_SYNC_ENTITLEMENT_ALIASES } from "./tabforgeBilling.service.js";
 
-export const TABFORGE_CLOUD_ENTITLEMENTS = Object.freeze([
-  "tabforge-subscription",
-  "tabforge-collections",
-  "tabforge-collections-subscription",
-  "tabforge-sync-collections",
-]);
+export const TABFORGE_CLOUD_ENTITLEMENTS =
+  TABFORGE_SYNC_ENTITLEMENT_ALIASES;
 
 const ACCOUNT_PRODUCT_ALIASES = Object.freeze({
   tabforge: "tabforge",

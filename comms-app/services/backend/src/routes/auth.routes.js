@@ -1,7 +1,6 @@
 // src/routes/auth.routes.js
 import { Router } from "express";
 import bcrypt from "bcrypt";
-import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { z } from "zod";
 import { db } from "../config/db.js";
@@ -23,6 +22,13 @@ import {
   claimReferralInviteToken,
   resolveReferralInviteToken,
 } from "../services/referrals/referral.service.js";
+import {
+  clearCustomerAuthStateCache,
+  customerTokenMatchesUser,
+  getCurrentCustomerAuthState,
+  issueCustomerAccessToken,
+  verifyCustomerAccessToken,
+} from "../services/auth.service.js";
 
 export const authRouter = Router();
 
@@ -62,6 +68,22 @@ const loginRateLimiter = createRateLimiter({
   max: 5,
   keyGenerator: rateLimitByIpAndBodyEmail,
   message: "too_many_login_attempts",
+});
+
+const refreshRateLimiter = createRateLimiter({
+  name: "auth-refresh",
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: rateLimitByIp,
+  message: "too_many_refresh_attempts",
+});
+
+const resetPasswordRateLimiter = createRateLimiter({
+  name: "auth-reset-password",
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: rateLimitByIp,
+  message: "too_many_password_reset_attempts",
 });
 
 const registerRateLimiter = createRateLimiter({
@@ -656,7 +678,7 @@ authRouter.post("/forgot-password", accountEmailIpRateLimiter, accountEmailRateL
  *
  * Uses the shared token columns for verified users.
  */
-authRouter.post("/reset-password", async (req, res) => {
+authRouter.post("/reset-password", resetPasswordRateLimiter, async (req, res) => {
   const requestId = getRequestId(req);
 
   const parsed = ResetPassword.safeParse(req.body);
@@ -669,48 +691,57 @@ authRouter.post("/reset-password", async (req, res) => {
   const tokenHash = sha256(token);
 
   try {
-    const user = await db("users")
-      .where({ verification_token_hash: tokenHash })
-      .first();
+    const hash = await bcrypt.hash(password, 12);
+    const result = await db.transaction(async (trx) => {
+      const user = await trx("users")
+        .where({ verification_token_hash: tokenHash })
+        .forUpdate()
+        .first();
 
-    if (!user) {
-      log("warn", "reset_password_invalid_token", { requestId });
-      return res.status(400).json({ error: "invalid_or_used_token" });
-    }
+      if (!user || !user.email_verified) {
+        return { error: "invalid_or_used_token", userId: user?.id || null };
+      }
 
-    if (!user.email_verified) {
-      log("warn", "reset_password_unverified_user", {
-        requestId,
-        userId: user.id,
-      });
-      return res.status(400).json({ error: "invalid_or_used_token" });
-    }
-
-    if (user.verification_sent_at) {
       const sentAt = new Date(user.verification_sent_at).getTime();
       const ttlMs = TOKEN_TTL_HOURS * 60 * 60 * 1000;
-      if (Date.now() - sentAt > ttlMs) {
-        log("warn", "reset_password_token_expired", {
-          requestId,
-          userId: user.id,
-        });
-        return res.status(400).json({ error: "token_expired" });
+      if (
+        !Number.isFinite(sentAt) ||
+        sentAt > Date.now() + 5 * 60 * 1000 ||
+        Date.now() - sentAt > ttlMs
+      ) {
+        return { error: "token_expired", userId: user.id };
       }
+
+      const updated = await trx("users")
+        .where({
+          id: user.id,
+          verification_token_hash: tokenHash,
+        })
+        .update({
+          password_hash: hash,
+          verification_token_hash: null,
+          verification_sent_at: null,
+          auth_version: trx.raw("COALESCE(auth_version, 0) + 1"),
+        });
+
+      return updated
+        ? { ok: true, userId: user.id }
+        : { error: "invalid_or_used_token", userId: user.id };
+    });
+
+    if (!result.ok) {
+      log("warn", `reset_password_${result.error}`, {
+        requestId,
+        userId: result.userId,
+      });
+      return res.status(400).json({ error: result.error });
     }
 
-    const hash = await bcrypt.hash(password, 12);
-
-    await db("users")
-      .where({ id: user.id })
-      .update({
-        password_hash: hash,
-        verification_token_hash: null,
-        verification_sent_at: null,
-      });
+    clearCustomerAuthStateCache(result.userId);
 
     log("info", "reset_password_success", {
       requestId,
-      userId: user.id,
+      userId: result.userId,
     });
 
     return res.json({ ok: true });
@@ -721,6 +752,57 @@ authRouter.post("/reset-password", async (req, res) => {
       message: String(err?.message || err),
     });
     return res.status(500).json({ error: "server_error" });
+  }
+});
+
+/**
+ * POST /v1/auth/refresh
+ *
+ * Renews a signed customer access token for at most 30 days from the original
+ * login. The original session_started_at and current auth_version are carried
+ * forward; password reset invalidates the entire chain.
+ */
+authRouter.post("/refresh", refreshRateLimiter, async (req, res) => {
+  const requestId = getRequestId(req);
+  const header = String(req.headers.authorization || "");
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (!token) return res.status(401).json({ error: "missing_token" });
+
+  let payload;
+  try {
+    payload = verifyCustomerAccessToken(token, { allowExpired: true });
+  } catch {
+    return res.status(401).json({ error: "invalid_token" });
+  }
+
+  try {
+    const user = await getCurrentCustomerAuthState(payload.sub);
+    if (!customerTokenMatchesUser(payload, user)) {
+      return res.status(401).json({ error: "invalid_token" });
+    }
+
+    const refreshedToken = issueCustomerAccessToken({
+      id: user.id,
+      email: user.email,
+      authVersion: user.auth_version,
+      sessionStartedAt: payload.session_started_at,
+    });
+
+    return res.json({
+      token: refreshedToken,
+      email: user.email,
+    });
+  } catch (error) {
+    if (error?.code === "customer_session_expired") {
+      return res.status(401).json({ error: "session_expired" });
+    }
+    log("error", "auth_refresh_failed", {
+      requestId,
+      userId: payload.sub,
+      code: error?.code,
+      message: String(error?.message || error),
+    });
+    return res.status(503).json({ error: "auth_temporarily_unavailable" });
   }
 });
 
@@ -822,7 +904,11 @@ authRouter.post("/login", loginRateLimiter, async (req, res) => {
       return res.status(403).json({ error: "email_not_verified", expired });
     }
 
-    const token = jwt.sign({ sub: user.id, email }, env.jwtSecret);
+    const token = issueCustomerAccessToken({
+      id: user.id,
+      email,
+      authVersion: user.auth_version || 0,
+    });
 
     return res.json({ token });
   } catch (err) {
