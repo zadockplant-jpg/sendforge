@@ -49,12 +49,15 @@ export function createRateLimiter({
   max,
   keyGenerator,
   message = "rate_limited",
+  skip,
 }) {
   if (!name || !Number.isFinite(windowMs) || !Number.isFinite(max)) {
     throw new Error("invalid_rate_limiter_config");
   }
 
   return function rateLimit(req, res, next) {
+    if (skip?.(req)) return next();
+
     const currentTime = nowMs();
     cleanOldBuckets(currentTime);
 

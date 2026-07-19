@@ -59,12 +59,34 @@ const ReferralInviteSchema = z.object({
   recipientConsent: z.literal(true),
 });
 
+const REFERRAL_INVITE_HOURLY_LIMIT = 100;
+const REFERRAL_UNLIMITED_TEST_EMAILS = new Set(
+  String(
+    process.env.REFERRAL_UNLIMITED_TEST_EMAILS ||
+      "zadockplant@gmail.com"
+  )
+    .split(/[\s,]+/)
+    .map((email) => normalizeRateLimitEmail(email))
+    .filter((email) => email !== "unknown-email")
+);
+
+function isUnlimitedReferralTestEmail(email) {
+  return REFERRAL_UNLIMITED_TEST_EMAILS.has(
+    normalizeRateLimitEmail(email)
+  );
+}
+
+function referralInviteLimitsBypassedForRequest(req) {
+  return isUnlimitedReferralTestEmail(req.user?.email);
+}
+
 const referralInviteUserRateLimiter = createRateLimiter({
   name: "referral-invite-user",
   windowMs: 60 * 60 * 1000,
-  max: 20,
+  max: REFERRAL_INVITE_HOURLY_LIMIT,
   keyGenerator: rateLimitByUserOrIp,
   message: "too_many_referral_invites",
+  skip: referralInviteLimitsBypassedForRequest,
 });
 
 const referralInviteRecipientRateLimiter = createRateLimiter({
@@ -77,6 +99,7 @@ const referralInviteRecipientRateLimiter = createRateLimiter({
     return `${userId}:${recipient}`;
   },
   message: "too_many_invites_to_recipient",
+  skip: referralInviteLimitsBypassedForRequest,
 });
 
 const referralInviteDestinationRateLimiter = createRateLimiter({
@@ -85,6 +108,7 @@ const referralInviteDestinationRateLimiter = createRateLimiter({
   max: 5,
   keyGenerator: (req) => normalizeRateLimitEmail(req.body?.toEmail),
   message: "too_many_invites_to_recipient",
+  skip: referralInviteLimitsBypassedForRequest,
 });
 
 function normalizeProductSlug(value) {
@@ -100,9 +124,10 @@ async function prepareReferralInvite({
   recipientEmail,
   productSlug,
   recipientConsentAttested,
+  bypassLimits = false,
 }) {
   const senderWindowMs = 60 * 60 * 1000;
-  const senderLimit = 20;
+  const senderLimit = REFERRAL_INVITE_HOURLY_LIMIT;
   const lockKeys = [
     `referral-destination:${productSlug}:${recipientEmail}`,
     `referral-sender:${productSlug}:${user.id}`,
@@ -122,90 +147,92 @@ async function prepareReferralInvite({
       };
     }
 
-    // These transaction-scoped locks make the durable sender and destination
-    // counts race-safe across every Render process. Sorting prevents deadlocks.
-    for (const lockKey of lockKeys) {
-      await trx.raw(
-        "select pg_advisory_xact_lock(hashtextextended(?::text, 0))",
-        [lockKey]
-      );
-    }
+    if (!bypassLimits) {
+      // These transaction-scoped locks make the durable sender and destination
+      // counts race-safe across every Render process. Sorting prevents deadlocks.
+      for (const lockKey of lockKeys) {
+        await trx.raw(
+          "select pg_advisory_xact_lock(hashtextextended(?::text, 0))",
+          [lockKey]
+        );
+      }
 
-    const senderRows = await trx("referral_events")
-      .select("created_at")
-      .where({
-        referrer_user_id: user.id,
-        product_slug: productSlug,
-        event_type: "invite",
-      })
-      .where("created_at", ">", new Date(Date.now() - senderWindowMs))
-      .orderBy("created_at", "asc");
-    if (senderRows.length >= senderLimit) {
-      const oldestAt = new Date(senderRows[0].created_at).getTime();
-      const remainingMs = Number.isFinite(oldestAt)
-        ? Math.max(1, oldestAt + senderWindowMs - Date.now())
-        : senderWindowMs;
-      return {
-        error: "too_many_referral_invites",
-        statusCode: 429,
-        retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000)),
-      };
-    }
+      const senderRows = await trx("referral_events")
+        .select("created_at")
+        .where({
+          referrer_user_id: user.id,
+          product_slug: productSlug,
+          event_type: "invite",
+        })
+        .where("created_at", ">", new Date(Date.now() - senderWindowMs))
+        .orderBy("created_at", "asc");
+      if (senderRows.length >= senderLimit) {
+        const oldestAt = new Date(senderRows[0].created_at).getTime();
+        const remainingMs = Number.isFinite(oldestAt)
+          ? Math.max(1, oldestAt + senderWindowMs - Date.now())
+          : senderWindowMs;
+        return {
+          error: "too_many_referral_invites",
+          statusCode: 429,
+          retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000)),
+        };
+      }
 
-    const recentRows = await trx("referral_events")
-      .select("created_at", "status", "metadata")
-      .where({
-        product_slug: productSlug,
-        event_type: "invite",
-      })
-      .where(
-        "created_at",
-        ">",
-        new Date(
-          Date.now() - REFERRAL_INVITE_DELIVERY_COOLDOWN_MS
-        )
-      )
-      .whereRaw("metadata ->> 'recipient_email' = ?", [recipientEmail])
-      .orderBy("created_at", "desc")
-      .limit(50);
-
-    const stateCooldownRemainingMs = recentRows.reduce(
-      (max, row) =>
-        Math.max(max, referralInviteCooldownRemainingMs(row)),
-      0
-    );
-    const oldestLimitedRow =
-      recentRows.length >= 5
-        ? recentRows[4]
-        : null;
-    const oldestLimitedAt = oldestLimitedRow
-      ? new Date(oldestLimitedRow.created_at).getTime()
-      : Number.NaN;
-    const volumeCooldownRemainingMs =
-      Number.isFinite(oldestLimitedAt)
-        ? Math.max(
-            0,
-            oldestLimitedAt +
-              REFERRAL_INVITE_DELIVERY_COOLDOWN_MS -
-              Date.now()
+      const recentRows = await trx("referral_events")
+        .select("created_at", "status", "metadata")
+        .where({
+          product_slug: productSlug,
+          event_type: "invite",
+        })
+        .where(
+          "created_at",
+          ">",
+          new Date(
+            Date.now() - REFERRAL_INVITE_DELIVERY_COOLDOWN_MS
           )
-        : 0;
-    const remainingMs = Math.max(
-      stateCooldownRemainingMs,
-      volumeCooldownRemainingMs
-    );
-    if (remainingMs > 0) {
-      return {
-        error:
-          volumeCooldownRemainingMs > 0
-            ? "too_many_invites_to_recipient"
-            : "invite_recently_sent",
-        statusCode: volumeCooldownRemainingMs > 0 ? 429 : 409,
-        retryAfterSeconds: Math.max(
-          1,
-          Math.ceil(remainingMs / 1000)
-        ),
-      };
+        )
+        .whereRaw("metadata ->> 'recipient_email' = ?", [recipientEmail])
+        .orderBy("created_at", "desc")
+        .limit(50);
+
+      const stateCooldownRemainingMs = recentRows.reduce(
+        (max, row) =>
+          Math.max(max, referralInviteCooldownRemainingMs(row)),
+        0
+      );
+      const oldestLimitedRow =
+        recentRows.length >= 5
+          ? recentRows[4]
+          : null;
+      const oldestLimitedAt = oldestLimitedRow
+        ? new Date(oldestLimitedRow.created_at).getTime()
+        : Number.NaN;
+      const volumeCooldownRemainingMs =
+        Number.isFinite(oldestLimitedAt)
+          ? Math.max(
+              0,
+              oldestLimitedAt +
+                REFERRAL_INVITE_DELIVERY_COOLDOWN_MS -
+                Date.now()
+            )
+          : 0;
+      const remainingMs = Math.max(
+        stateCooldownRemainingMs,
+        volumeCooldownRemainingMs
+      );
+      if (remainingMs > 0) {
+        return {
+          error:
+            volumeCooldownRemainingMs > 0
+              ? "too_many_invites_to_recipient"
+              : "invite_recently_sent",
+          statusCode: volumeCooldownRemainingMs > 0 ? 429 : 409,
+          retryAfterSeconds: Math.max(
+            1,
+            Math.ceil(remainingMs / 1000)
+          ),
+        };
+      }
     }
 
     const code = await ensureReferralCodeForUser(user, trx);
@@ -387,6 +414,7 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
     if (!user) return res.status(404).json({ error: "user_not_found" });
 
     const eligible = await hasReferralProgramEligibility(user.id);
+    const unlimitedTesting = isUnlimitedReferralTestEmail(user.email);
     const code = eligible ? await ensureReferralCodeForUser(user) : null;
 
     const [
@@ -491,6 +519,15 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         eligible,
         reason: eligible ? null : "tabforge_pro_required",
         requiredProductSlug: REFERRAL_REQUIRED_PRODUCT_SLUG,
+      },
+      invitePolicy: {
+        hourlyLimit: unlimitedTesting
+          ? null
+          : REFERRAL_INVITE_HOURLY_LIMIT,
+        unlimitedTesting,
+        duplicateRecipientCooldownHours: unlimitedTesting ? 0 : 24,
+        supportsBulkPaste: true,
+        supportsCsvImport: true,
       },
       code: code
         ? {
@@ -626,12 +663,14 @@ accountRouter.post(
       }
 
       const productSlug = normalizeProductSlug(parsed.data.productSlug);
+      const bypassLimits = isUnlimitedReferralTestEmail(user.email);
       const prepared = await prepareReferralInvite({
         user,
         recipientEmail,
         productSlug,
         recipientConsentAttested:
           parsed.data.recipientConsent,
+        bypassLimits,
       });
       if (prepared.retryAfterSeconds) {
         res.set(

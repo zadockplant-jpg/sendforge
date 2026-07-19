@@ -45,10 +45,11 @@ test("legacy asynchronous payment failure cancels stale subscriptions and entitl
 });
 
 test("referral invite and payout controls are durable and revalidated", async () => {
-  const [account, referrals, admin, indexes, eligibilityMigration] = await Promise.all([
+  const [account, referrals, admin, rateLimit, indexes, eligibilityMigration] = await Promise.all([
     source("src/routes/account.routes.js"),
     source("src/services/referrals/referral.service.js"),
     source("src/routes/admin.routes.js"),
+    source("src/middleware/rateLimit.js"),
     source(
       "src/db/migrations/20260718_referral_invite_rate_limit_indexes_1_2_1.js"
     ),
@@ -61,6 +62,10 @@ test("referral invite and payout controls are durable and revalidated", async ()
   assert.match(account, /referral-sender:/);
   assert.match(account, /referral-destination:/);
   assert.match(account, /pg_advisory_xact_lock/);
+  assert.match(account, /REFERRAL_INVITE_HOURLY_LIMIT\s*=\s*100/);
+  assert.match(account, /zadockplant@gmail\.com/);
+  assert.match(account, /skip:\s*referralInviteLimitsBypassedForRequest/);
+  assert.match(account, /if \(!bypassLimits\)/);
   assert.match(account, /tabforge_pro_required/);
   assert.match(account, /referrerPurchaseRequired:\s*true/);
   assert.match(referrals, /whereIn\("status", \["pending", "approved"\]\)/);
@@ -70,6 +75,7 @@ test("referral invite and payout controls are durable and revalidated", async ()
   assert.match(admin, /referrer_tabforge_pro_required/);
   assert.match(admin, /initial_net_paid_cents/);
   assert.match(admin, /writeAdminAudit\([\s\S]*?trx\s*\)/);
+  assert.match(rateLimit, /if \(skip\?\.\(req\)\) return next\(\)/);
   assert.match(indexes, /referral_events_invite_sender_window_idx/);
   assert.match(indexes, /referral_events_invite_destination_window_idx/);
   assert.match(eligibilityMigration, /referrer_purchase_required:\s*true/);

@@ -117,3 +117,32 @@ test("limiter hashes custom identities before storing bucket keys", () => {
   assert.equal(secondNextCalls, 0);
   assert.equal(secondResponse.statusCode, 429);
 });
+
+test("a limiter skip predicate bypasses counting and rejection", () => {
+  const limiter = createRateLimiter({
+    name: `test-skip-${crypto.randomUUID()}`,
+    windowMs: 60_000,
+    max: 1,
+    keyGenerator: (req) => req.user.sub,
+    skip: (req) => req.user?.email === "owner@example.com",
+  });
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const response = responseRecorder();
+    let nextCalls = 0;
+    limiter(
+      {
+        user: {
+          sub: "owner-id",
+          email: "owner@example.com",
+        },
+      },
+      response,
+      () => {
+        nextCalls += 1;
+      }
+    );
+    assert.equal(nextCalls, 1);
+    assert.equal(response.statusCode, 200);
+  }
+});
