@@ -13,6 +13,8 @@ import {
 import {
   createReferralInvite,
   ensureReferralCodeForUser,
+  hasReferralProgramEligibility,
+  REFERRAL_REQUIRED_PRODUCT_SLUG,
   resolveReferralInviteToken,
   tiersForVerifiedCount,
   updateUserCashAppTag,
@@ -107,6 +109,19 @@ async function prepareReferralInvite({
   ].sort();
 
   return db.transaction(async (trx) => {
+    if (
+      !(await hasReferralProgramEligibility(
+        user.id,
+        productSlug,
+        trx
+      ))
+    ) {
+      return {
+        error: "tabforge_pro_required",
+        statusCode: 403,
+      };
+    }
+
     // These transaction-scoped locks make the durable sender and destination
     // counts race-safe across every Render process. Sorting prevents deadlocks.
     for (const lockKey of lockKeys) {
@@ -271,7 +286,10 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
           .orderBy("updated_at", "desc")
           .first(),
       ]);
-    const referralCode = await ensureReferralCodeForUser(user);
+    const referralEligible = await hasReferralProgramEligibility(user.id);
+    const referralCode = referralEligible
+      ? await ensureReferralCodeForUser(user)
+      : null;
 
     return res.json({
       user: {
@@ -286,7 +304,13 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
         stripePaymentMethodAttached: Boolean(user.stripe_payment_method_attached),
         cashAppTag: user.cash_app_tag || null,
         referralCode: referralCode?.code || null,
+        referralEligible,
         referredByUserId: user.referred_by_user_id || null,
+      },
+      referralEligibility: {
+        eligible: referralEligible,
+        reason: referralEligible ? null : "tabforge_pro_required",
+        requiredProductSlug: REFERRAL_REQUIRED_PRODUCT_SLUG,
       },
       billing: {
         activePlan: activePlan.plan,
@@ -362,7 +386,8 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
 
     if (!user) return res.status(404).json({ error: "user_not_found" });
 
-    const code = await ensureReferralCodeForUser(user);
+    const eligible = await hasReferralProgramEligibility(user.id);
+    const code = eligible ? await ensureReferralCodeForUser(user) : null;
 
     const [
       programRows,
@@ -444,7 +469,8 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         status: program.status,
         rewardType: program.reward_type,
         qualification: "verified_purchase",
-        referrerPurchaseRequired: false,
+        referrerPurchaseRequired: true,
+        requiredReferrerProductSlug: REFERRAL_REQUIRED_PRODUCT_SLUG,
         referredPurchaseRequired: true,
         verifiedReferrals,
         verifiedPurchases,
@@ -460,6 +486,12 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
     ];
 
     return res.json({
+      eligible,
+      eligibility: {
+        eligible,
+        reason: eligible ? null : "tabforge_pro_required",
+        requiredProductSlug: REFERRAL_REQUIRED_PRODUCT_SLUG,
+      },
       code: code
         ? {
             id: code.id,
@@ -476,7 +508,8 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         requiredPurchases: 5,
         rewardAmountCents: 1700,
         qualification: "verified_purchase",
-        referrerPurchaseRequired: false,
+        referrerPurchaseRequired: true,
+        requiredReferrerProductSlug: REFERRAL_REQUIRED_PRODUCT_SLUG,
         referredPurchaseRequired: true,
         tiers: programs[0]?.tiers || fallbackTiers,
       },
@@ -569,6 +602,12 @@ accountRouter.post(
         .where({ id: req.user.sub })
         .first();
       if (!user) return res.status(404).json({ error: "user_not_found" });
+      if (!(await hasReferralProgramEligibility(user.id))) {
+        return res.status(403).json({
+          error: "tabforge_pro_required",
+          requiredProductSlug: REFERRAL_REQUIRED_PRODUCT_SLUG,
+        });
+      }
 
       const recipientEmail = parsed.data.toEmail.toLowerCase().trim();
       if (recipientEmail === String(user.email || "").toLowerCase().trim()) {
@@ -602,6 +641,11 @@ accountRouter.post(
         return res.status(prepared.statusCode || 409).json({
           error: prepared.error || "invite_recently_sent",
           retryAfterSeconds: prepared.retryAfterSeconds,
+        });
+      }
+      if (prepared.error) {
+        return res.status(prepared.statusCode || 409).json({
+          error: prepared.error,
         });
       }
 

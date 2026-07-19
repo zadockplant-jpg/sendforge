@@ -45,12 +45,15 @@ test("legacy asynchronous payment failure cancels stale subscriptions and entitl
 });
 
 test("referral invite and payout controls are durable and revalidated", async () => {
-  const [account, referrals, admin, indexes] = await Promise.all([
+  const [account, referrals, admin, indexes, eligibilityMigration] = await Promise.all([
     source("src/routes/account.routes.js"),
     source("src/services/referrals/referral.service.js"),
     source("src/routes/admin.routes.js"),
     source(
       "src/db/migrations/20260718_referral_invite_rate_limit_indexes_1_2_1.js"
+    ),
+    source(
+      "src/db/migrations/20260718_tabforge_referrer_pro_eligibility_1_3_0.js"
     ),
   ]);
 
@@ -58,12 +61,19 @@ test("referral invite and payout controls are durable and revalidated", async ()
   assert.match(account, /referral-sender:/);
   assert.match(account, /referral-destination:/);
   assert.match(account, /pg_advisory_xact_lock/);
+  assert.match(account, /tabforge_pro_required/);
+  assert.match(account, /referrerPurchaseRequired:\s*true/);
   assert.match(referrals, /whereIn\("status", \["pending", "approved"\]\)/);
+  assert.match(referrals, /hasReferralProgramEligibility/);
+  assert.match(referrals, /referrer_tabforge_pro_required/);
   assert.match(admin, /referral_qualification_no_longer_met/);
+  assert.match(admin, /referrer_tabforge_pro_required/);
   assert.match(admin, /initial_net_paid_cents/);
   assert.match(admin, /writeAdminAudit\([\s\S]*?trx\s*\)/);
   assert.match(indexes, /referral_events_invite_sender_window_idx/);
   assert.match(indexes, /referral_events_invite_destination_window_idx/);
+  assert.match(eligibilityMigration, /referrer_purchase_required:\s*true/);
+  assert.match(eligibilityMigration, /required_referrer_product_slug:\s*"tabforge"/);
 });
 
 test("a non-positive payment cannot enter the referral purchase ledger", async () => {

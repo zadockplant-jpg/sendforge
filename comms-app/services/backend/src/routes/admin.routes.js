@@ -9,7 +9,11 @@ import { requireAdminAuth, requireAdminWritesEnabled } from "../middleware/admin
 import { sendAdminMfaCodeEmail } from "../services/email.service.js";
 import { writeAdminAudit } from "../services/adminAudit.service.js";
 import { grantProductEntitlement, revokeProductEntitlement } from "../services/entitlement.service.js";
-import { cashAppTagKey, normalizeCashAppTag } from "../services/referrals/referral.service.js";
+import {
+  cashAppTagKey,
+  hasReferralProgramEligibility,
+  normalizeCashAppTag,
+} from "../services/referrals/referral.service.js";
 import { adminLiveTestingRouter } from "./admin.liveTesting.routes.js";
 import { liveTestingEnabledFor, liveTestingOwnerEmail } from "../services/adminLiveTesting.service.js";
 import { getRequestId, log, sanitizeEmail } from "../utils/logger.js";
@@ -515,6 +519,18 @@ async function updateRewardStatus(req, res) {
       }
 
       if (target === "approved" || target === "paid") {
+        if (
+          !(await hasReferralProgramEligibility(
+            existing.user_id,
+            existing.product_slug,
+            trx
+          ))
+        ) {
+          throw rewardStatusError(
+            409,
+            "referrer_tabforge_pro_required"
+          );
+        }
         if (!cashAppHandle) {
           throw rewardStatusError(409, "cash_app_tag_required");
         }

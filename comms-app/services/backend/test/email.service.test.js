@@ -226,7 +226,10 @@ describe("SendForge transactional SendGrid payloads", { concurrency: false }, ()
     );
     assert.match(html, /Cash App rewards/);
     assert.match(html, /Simple rewards\. Real money\./);
-    assert.match(html, /Earn \$17 when 5 friends buy TabForge Pro\./);
+    assert.match(html, /Own TabForge Pro\. Earn \$17 when 5 friends buy\./);
+    assert.match(text, /Referral rewards are available only to TabForge Pro owners\./);
+    assert.match(html, /The referrer must own TabForge Pro\./);
+    assert.doesNotMatch(html, /do not have to buy|does not need to purchase/i);
     assert.match(html, /Open My Private Invitation/);
     assert.match(html, /\$150/);
 

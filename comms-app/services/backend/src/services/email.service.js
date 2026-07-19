@@ -556,6 +556,8 @@ ${referrerEmail || "Someone you know"} invited you to ${productName} Pro.
 Open the private invitation:
 ${referralUrl}
 
+Referral rewards are available only to ${productName} Pro owners.
+
 This invitation does not create an account or enroll you in anything. If you were not expecting it, you can ignore this message.
 
 Stop future SendForge referral invitations:
@@ -577,17 +579,17 @@ Need help? Contact ${supportEmail()}.`;
               Cash App rewards
             </div>
             <h1 style="margin:18px 0 10px;color:#ffffff;font-size:40px;line-height:1.04;letter-spacing:-.035em;">
-              Earn $17 when 5 friends buy ${safeProduct} Pro.
+              Own ${safeProduct} Pro. Earn $17 when 5 friends buy.
             </h1>
             <p style="max-width:570px;margin:0 auto;color:#c7d3ee;font-size:18px;">
-              Create a SendForge account, get your personal referral link, and start sharing. You do not have to buy ${safeProduct} to participate.
+              ${safeProduct} Pro owners can get a personal referral link from their SendForge account and start sharing.
             </p>
           </div>
 
           <div style="padding:0 28px 22px;">
             <div style="padding:20px;border:1px solid rgba(44,224,183,.30);border-radius:20px;background:linear-gradient(135deg,rgba(44,224,183,.14),rgba(77,143,255,.08));">
               <h2 style="margin:0 0 12px;color:#ffffff;font-size:23px;text-align:center;">Simple rewards. Real money.</h2>
-              <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">1.</strong> Create your SendForge account and get your referral link.</div>
+              <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">1.</strong> Own ${safeProduct} Pro and open your SendForge referral dashboard.</div>
               <div style="margin-top:9px;border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">2.</strong> Share your referral link with people who may want ${safeProduct} Pro.</div>
               <div style="margin-top:9px;border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">3.</strong> Their completed Pro purchases count toward your Cash App payouts.</div>
 
@@ -599,7 +601,7 @@ Need help? Contact ${supportEmail()}.`;
                   <td style="width:25%;border:1px solid rgba(255,176,50,.30);border-radius:14px;padding:12px 8px;background:rgba(255,176,50,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">50</strong><span style="font-size:12px;color:#ffe4b5;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$150</strong></td>
                 </tr>
               </table>
-              <p style="margin:14px 0 0;color:#ffffff;font-size:15px;font-weight:800;text-align:center;">The referrer does not need to purchase. A referral qualifies only when the referred person buys ${safeProduct} Pro.</p>
+              <p style="margin:14px 0 0;color:#ffffff;font-size:15px;font-weight:800;text-align:center;">The referrer must own ${safeProduct} Pro. A referral qualifies only when the referred person also buys ${safeProduct} Pro.</p>
             </div>
           </div>
 
@@ -626,7 +628,7 @@ Need help? Contact ${supportEmail()}.`;
         </div>
 
         <div style="padding:18px 4px 0;color:#7381a1;font-size:12px;">
-          <p style="margin:0 0 10px;">This invitation does not create an account or enroll you in anything. A signup alone does not earn a payout. Only completed ${safeProduct} Pro purchases made through a valid referral count. If you were not expecting this invitation, you can ignore it. Need help? Contact ${safeSupportEmail}.</p>
+          <p style="margin:0 0 10px;">This invitation does not create an account or enroll you in anything. A signup alone does not earn a payout. Referral rewards are available only to ${safeProduct} Pro owners, and only completed ${safeProduct} Pro purchases made through a valid referral count. If you were not expecting this invitation, you can ignore it. Need help? Contact ${safeSupportEmail}.</p>
           <p style="margin:0 0 10px;"><a href="${safeUnsubscribeUrl}" style="color:#9fb8e7;font-weight:700;text-decoration:underline;">Stop future SendForge referral invitations</a></p>
           <p style="margin:0;">SendForge · ${safeBusinessAddress} · <a href="${safePrivacyPolicyUrl}" style="color:#9fb8e7;">Privacy policy</a></p>
         </div>

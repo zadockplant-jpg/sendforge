@@ -23,6 +23,11 @@ const TABFORGE_RECURRING_PURCHASE_TIER = {
 };
 
 const INVITE_TTL_DAYS = 30;
+export const REFERRAL_REQUIRED_PRODUCT_SLUG = "tabforge";
+const REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS = [
+  REFERRAL_REQUIRED_PRODUCT_SLUG,
+  "tabforge-pro",
+];
 
 export function normalizeReferralValue(value) {
   return String(value || "").trim();
@@ -56,6 +61,28 @@ export function normalizeProductSlug(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+export async function hasReferralProgramEligibility(
+  userId,
+  productSlug = REFERRAL_REQUIRED_PRODUCT_SLUG,
+  trx = db
+) {
+  const slug = normalizeProductSlug(productSlug);
+  if (!userId || slug !== REFERRAL_REQUIRED_PRODUCT_SLUG) return false;
+
+  const entitlement = await trx("product_entitlements")
+    .where({
+      user_id: userId,
+      status: "active",
+    })
+    .whereIn("product_slug", REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS)
+    .andWhere((query) => {
+      query.whereNull("expires_at").orWhere("expires_at", ">", trx.fn.now());
+    })
+    .first();
+
+  return Boolean(entitlement);
+}
+
 function hashInviteToken(token) {
   return crypto.createHash("sha256").update(String(token || "")).digest("hex");
 }
@@ -84,6 +111,9 @@ async function createUniqueReferralCode(knex, email) {
 
 export async function ensureReferralCodeForUser(user, trx = db) {
   if (!user?.id || !user?.email) return null;
+  if (!(await hasReferralProgramEligibility(user.id, REFERRAL_REQUIRED_PRODUCT_SLUG, trx))) {
+    return null;
+  }
 
   const existing = await trx("referral_codes")
     .where({ user_id: user.id, status: "active" })
@@ -118,6 +148,7 @@ export async function resolveReferralIdentifier(identifier, trx = db) {
     const user = await trx("users").where({ email }).first();
     if (!user) return null;
     const code = await ensureReferralCodeForUser(user, trx);
+    if (!code) return null;
     return { referrerUser: user, referralCode: code, inputType: "email" };
   }
 
@@ -131,6 +162,16 @@ export async function resolveReferralIdentifier(identifier, trx = db) {
   const user = code.user_id
     ? await trx("users").where({ id: code.user_id }).first()
     : null;
+  if (
+    !user ||
+    !(await hasReferralProgramEligibility(
+      user.id,
+      REFERRAL_REQUIRED_PRODUCT_SLUG,
+      trx
+    ))
+  ) {
+    return null;
+  }
 
   return { referrerUser: user, referralCode: code, inputType: "code" };
 }
@@ -225,6 +266,15 @@ export async function resolveReferralInviteToken(token, trx = db) {
     : null;
 
   if (!referralCode || !referrerUser) return null;
+  if (
+    !(await hasReferralProgramEligibility(
+      referrerUser.id,
+      event.product_slug,
+      trx
+    ))
+  ) {
+    return null;
+  }
 
   return {
     event,
@@ -616,8 +666,13 @@ export async function getReferralProgram(productSlug, trx = db) {
           qualification: "verified_purchase",
           tiers,
           recurringTier: isTabForge ? TABFORGE_RECURRING_PURCHASE_TIER : null,
+          referrer_purchase_required: isTabForge,
+          required_referrer_product_slug: isTabForge
+            ? REFERRAL_REQUIRED_PRODUCT_SLUG
+            : null,
+          referred_purchase_required: true,
           description: isTabForge
-            ? "The referrer may participate without purchasing. Only completed TabForge Pro purchases made through the referral link count: $17 at 5, $35 at 15, $40 at 25, $150 at 50, then $150 for each additional 25 qualified purchases."
+            ? "The referrer must own TabForge Pro. Only completed TabForge Pro purchases made through the referral link count: $17 at 5, $35 at 15, $40 at 25, $150 at 50, then $150 for each additional 25 qualified purchases."
             : "Default manual Cash App purchase referral tiers.",
         },
         updated_at: trx.fn.now(),
@@ -694,6 +749,15 @@ async function queueRewardsForVerifiedCount({
 }
 
 async function queuePurchaseRewardsForReferrer({ trx, referrer, referralCode, productSlug, qualificationRef }) {
+  const eligible = await hasReferralProgramEligibility(
+    referrer?.id,
+    productSlug,
+    trx
+  );
+  if (!eligible) {
+    return { verifiedCount: 0, rewards: [], eligible: false };
+  }
+
   const verifiedCountResult = await trx("referral_events")
     .where({
       referrer_user_id: referrer.id,
@@ -723,7 +787,7 @@ async function queuePurchaseRewardsForReferrer({ trx, referrer, referralCode, pr
       })
     : [];
 
-  return { verifiedCount, rewards };
+  return { verifiedCount, rewards, eligible: true };
 }
 
 export async function recordVerifiedReferralSignup({ referredUserId, productSlug = "tabforge" }) {
@@ -740,6 +804,9 @@ export async function recordVerifiedReferralSignup({ referredUserId, productSlug
 
     const referrer = await trx("users").where({ id: referredUser.referred_by_user_id }).first();
     if (!referrer) return { recorded: false, reason: "referrer_missing" };
+    if (!(await hasReferralProgramEligibility(referrer.id, slug, trx))) {
+      return { recorded: false, reason: "referrer_tabforge_pro_required" };
+    }
 
     const referralCode = referredUser.referral_code_id
       ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
@@ -843,6 +910,9 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
 
     const referrer = await trx("users").where({ id: referredUser.referred_by_user_id }).first();
     if (!referrer) return { recorded: false, reason: "referrer_missing" };
+    if (!(await hasReferralProgramEligibility(referrer.id, slug, trx))) {
+      return { recorded: false, reason: "referrer_tabforge_pro_required" };
+    }
 
     const referralCode = referredUser.referral_code_id
       ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
