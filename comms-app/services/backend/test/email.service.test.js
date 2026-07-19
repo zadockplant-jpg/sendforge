@@ -230,6 +230,14 @@ describe("SendForge transactional SendGrid payloads", { concurrency: false }, ()
     assert.match(text, /Referral rewards are available only to TabForge Pro owners\./);
     assert.match(html, /The referrer must own TabForge Pro\./);
     assert.doesNotMatch(html, /do not have to buy|does not need to purchase/i);
+    assert.match(html, /2 themed visual layouts to choose from\./);
+    assert.match(html, /Intuitive, powerful built-in notepad\./);
+    assert.match(html, /Easily store your bookmarks on customizable pages\./);
+    assert.match(
+      html,
+      /2 months of cross-device syncing keeps notes accessible everywhere\./
+    );
+    assert.doesNotMatch(html, /36 shortcuts|included collection adds 36/i);
     assert.match(html, /Open My Private Invitation/);
     assert.match(html, /\$150/);
 

@@ -609,10 +609,10 @@ Need help? Contact ${supportEmail()}.`;
             <div style="padding:20px;border:1px solid rgba(77,143,255,.24);border-radius:20px;background:rgba(77,143,255,.12);">
               <h2 style="margin:0 0 8px;color:#ffffff;font-size:22px;">A product people will fall in love with</h2>
               <p style="margin:0 0 14px;color:#c7d3ee;">${safeProduct} Pro turns the new-tab page into a clean, visual workspace for the sites people use every day.</p>
-              <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ 36 shortcuts.</div>
-              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ One included collection adds 36 more shortcuts.</div>
-              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ Works as is, then customizes around the way they use the web.</div>
-              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ TabForge Pro is a one-time purchase. Private Sync is optional.</div>
+              <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ 2 themed visual layouts to choose from.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ Intuitive, powerful built-in notepad.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ Easily store your bookmarks on customizable pages.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ 2 months of cross-device syncing keeps notes accessible everywhere.</div>
               <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ Your browsing data stays private.</div>
             </div>
           </div>
