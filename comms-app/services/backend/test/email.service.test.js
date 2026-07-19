@@ -224,10 +224,11 @@ describe("SendForge transactional SendGrid payloads", { concurrency: false }, ()
       html,
       /This is a promotional referral message from SendForge\./
     );
-    assert.doesNotMatch(
-      `${text}\n${html}`,
-      /cash app|real money|reward milestones|qualified purchases|\$17|\$35|\$40|\$150/i
-    );
+    assert.match(html, /Cash App rewards/);
+    assert.match(html, /Simple rewards\. Real money\./);
+    assert.match(html, /Earn \$17 when 5 friends buy TabForge Pro\./);
+    assert.match(html, /Open My Private Invitation/);
+    assert.match(html, /\$150/);
 
     assert.deepEqual(body.personalizations[0].custom_args, {
       sf_message_kind: "referral-invite",

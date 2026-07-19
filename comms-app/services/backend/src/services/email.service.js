@@ -543,6 +543,10 @@ export async function sendReferralInviteEmail({
   const safeProduct = escapeHtml(productName);
   const safeFrom = escapeHtml(referrerEmail || "a TabForge user");
   const safeUrl = escapeHtml(referralUrl);
+  const safeUnsubscribeUrl = escapeHtml(unsubscribeUrl);
+  const safeBusinessAddress = escapeHtml(businessAddress);
+  const safePrivacyPolicyUrl = escapeHtml(privacyPolicyUrl);
+  const safeSupportEmail = escapeHtml(supportEmail());
   const subject = `Promotional: A ${productName} referral invitation`;
 
   const text = `This is a promotional referral message from SendForge.
@@ -563,20 +567,69 @@ Privacy policy: ${privacyPolicyUrl}
 Need help? Contact ${supportEmail()}.`;
 
   const html = `
-    <div style="margin:0;padding:24px;background:#f5f7fb;color:#172033;font-family:Arial,sans-serif;line-height:1.55;">
-      <div style="max-width:600px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
-        <p style="margin:0 0 8px;color:#52627a;font-size:13px;font-weight:700;">SENDFORGE</p>
-        <h1 style="margin:0 0 12px;font-size:27px;line-height:1.15;color:#172033;">A ${safeProduct} invitation</h1>
-        <p style="margin:0 0 12px;color:#66758c;font-size:13px;font-weight:700;">This is a promotional referral message from SendForge.</p>
-        <p style="margin:0 0 22px;color:#52627a;"><strong>${safeFrom}</strong> invited you to ${safeProduct} Pro.</p>
-        <p style="margin:0 0 22px;">
-          <a href="${safeUrl}" style="display:inline-block;padding:12px 18px;border-radius:10px;background:#1e6fe8;color:#ffffff;text-decoration:none;font-weight:700;">Open invitation</a>
-        </p>
-        <p style="margin:0 0 8px;color:#66758c;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${safeUrl}</p>
-        <hr style="margin:24px 0;border:0;border-top:1px solid #e3e8f0;">
-        <p style="margin:0 0 8px;color:#7b8799;font-size:12px;">This invitation does not create an account or enroll you in anything. If you were not expecting it, you can ignore it. Need help? Contact ${escapeHtml(supportEmail())}.</p>
-        <p style="margin:0 0 10px;color:#52627a;font-size:14px;"><a href="${escapeHtml(unsubscribeUrl)}" style="color:#36506f;font-weight:700;text-decoration:underline;">Stop future SendForge referral invitations</a></p>
-        <p style="margin:0;color:#7b8799;font-size:12px;">SendForge · ${escapeHtml(businessAddress)} · <a href="${escapeHtml(privacyPolicyUrl)}" style="color:#52627a;">Privacy policy</a></p>
+    <div style="margin:0;padding:0;background:#05070d;color:#eef3ff;font-family:Inter,Arial,sans-serif;line-height:1.55;">
+      <div style="max-width:680px;margin:0 auto;padding:28px 18px;">
+        <p style="margin:0 0 12px;color:#8ea0c4;font-size:12px;font-weight:800;letter-spacing:.08em;text-align:center;text-transform:uppercase;">This is a promotional referral message from SendForge.</p>
+
+        <div style="overflow:hidden;border:1px solid rgba(44,224,183,.36);border-radius:28px;background-color:#0b1220;background-image:radial-gradient(circle at top left,rgba(44,224,183,.22),transparent 36%),radial-gradient(circle at top right,rgba(77,143,255,.20),transparent 38%),linear-gradient(135deg,#0b1220,#081019 58%,#07120f);box-shadow:0 30px 90px rgba(0,0,0,.45);">
+          <div style="padding:34px 28px 22px;text-align:center;">
+            <div style="display:inline-block;padding:8px 13px;border:1px solid rgba(44,224,183,.38);border-radius:999px;background:rgba(44,224,183,.14);color:#8ff7df;font-size:12px;font-weight:900;letter-spacing:.10em;text-transform:uppercase;">
+              Cash App rewards
+            </div>
+            <h1 style="margin:18px 0 10px;color:#ffffff;font-size:40px;line-height:1.04;letter-spacing:-.035em;">
+              Earn $17 when 5 friends buy ${safeProduct} Pro.
+            </h1>
+            <p style="max-width:570px;margin:0 auto;color:#c7d3ee;font-size:18px;">
+              Create a SendForge account, get your personal referral link, and start sharing. You do not have to buy ${safeProduct} to participate.
+            </p>
+          </div>
+
+          <div style="padding:0 28px 22px;">
+            <div style="padding:20px;border:1px solid rgba(44,224,183,.30);border-radius:20px;background:linear-gradient(135deg,rgba(44,224,183,.14),rgba(77,143,255,.08));">
+              <h2 style="margin:0 0 12px;color:#ffffff;font-size:23px;text-align:center;">Simple rewards. Real money.</h2>
+              <div style="border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">1.</strong> Create your SendForge account and get your referral link.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">2.</strong> Share your referral link with people who may want ${safeProduct} Pro.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,.04);color:#dce6ff;"><strong style="color:#8ff7df;">3.</strong> Their completed Pro purchases count toward your Cash App payouts.</div>
+
+              <table role="presentation" width="100%" cellspacing="8" cellpadding="0" style="margin-top:14px;border-collapse:separate;">
+                <tr>
+                  <td style="width:25%;border:1px solid rgba(44,224,183,.30);border-radius:14px;padding:12px 8px;background:rgba(44,224,183,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">5</strong><span style="font-size:12px;color:#aeeedc;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$17</strong></td>
+                  <td style="width:25%;border:1px solid rgba(77,143,255,.30);border-radius:14px;padding:12px 8px;background:rgba(77,143,255,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">15</strong><span style="font-size:12px;color:#b9ccff;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$35</strong></td>
+                  <td style="width:25%;border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:12px 8px;background:rgba(255,255,255,.06);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">25</strong><span style="font-size:12px;color:#dce6ff;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$40</strong></td>
+                  <td style="width:25%;border:1px solid rgba(255,176,50,.30);border-radius:14px;padding:12px 8px;background:rgba(255,176,50,.10);text-align:center;color:#ffffff;"><strong style="display:block;font-size:20px;">50</strong><span style="font-size:12px;color:#ffe4b5;">Pro purchases</span><strong style="display:block;margin-top:4px;font-size:18px;">$150</strong></td>
+                </tr>
+              </table>
+              <p style="margin:14px 0 0;color:#ffffff;font-size:15px;font-weight:800;text-align:center;">The referrer does not need to purchase. A referral qualifies only when the referred person buys ${safeProduct} Pro.</p>
+            </div>
+          </div>
+
+          <div style="padding:0 28px 22px;">
+            <div style="padding:20px;border:1px solid rgba(77,143,255,.24);border-radius:20px;background:rgba(77,143,255,.12);">
+              <h2 style="margin:0 0 8px;color:#ffffff;font-size:22px;">A product people will fall in love with</h2>
+              <p style="margin:0 0 14px;color:#c7d3ee;">${safeProduct} Pro turns the new-tab page into a clean, visual workspace for the sites people use every day.</p>
+              <div style="border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ 36 shortcuts.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ One included collection adds 36 more shortcuts.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ Works as is, then customizes around the way they use the web.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ TabForge Pro is a one-time purchase. Private Sync is optional.</div>
+              <div style="margin-top:9px;border:1px solid rgba(255,255,255,.12);border-radius:13px;padding:11px 13px;background:rgba(0,0,0,.18);color:#f2f7ff;">✓ Your browsing data stays private.</div>
+            </div>
+          </div>
+
+          <div style="padding:0 28px 32px;text-align:center;">
+            <p style="display:inline-block;margin:0 0 18px;padding:8px 13px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(255,255,255,.08);color:#f5f9ff;font-size:14px;font-weight:800;">Invited by <span style="color:#ffffff;font-weight:950;">${safeFrom}</span></p>
+            <br>
+            <a href="${safeUrl}" style="display:inline-block;padding:24px 36px;border:2px solid #bfffea;border-radius:18px;background:linear-gradient(135deg,#4d8fff,#2ce0b7);box-shadow:0 0 0 4px rgba(44,224,183,.20),0 18px 48px rgba(44,224,183,.42),0 0 30px rgba(77,143,255,.34);color:#061019;font-size:18px;font-weight:950;text-decoration:none;">
+              Open My Private Invitation
+            </a>
+            <p style="margin:14px 0 0;color:#98a7c7;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${safeUrl}</p>
+          </div>
+        </div>
+
+        <div style="padding:18px 4px 0;color:#7381a1;font-size:12px;">
+          <p style="margin:0 0 10px;">This invitation does not create an account or enroll you in anything. A signup alone does not earn a payout. Only completed ${safeProduct} Pro purchases made through a valid referral count. If you were not expecting this invitation, you can ignore it. Need help? Contact ${safeSupportEmail}.</p>
+          <p style="margin:0 0 10px;"><a href="${safeUnsubscribeUrl}" style="color:#9fb8e7;font-weight:700;text-decoration:underline;">Stop future SendForge referral invitations</a></p>
+          <p style="margin:0;">SendForge · ${safeBusinessAddress} · <a href="${safePrivacyPolicyUrl}" style="color:#9fb8e7;">Privacy policy</a></p>
+        </div>
       </div>
     </div>
   `;
