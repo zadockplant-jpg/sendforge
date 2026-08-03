@@ -47,7 +47,7 @@ function configureProvider() {
   process.env.REFERRAL_FROM_NAME = "SendForge Rewards";
   process.env.SENDGRID_REFERRAL_UNSUBSCRIBE_GROUP_ID = "4242";
   process.env.REFERRAL_BUSINESS_ADDRESS =
-    "123 Test Street, Test City, NY 10001";
+    "SendForge LLC, 6749 Fulton St E, Ste A #2333, Ada, MI 49301";
   process.env.PRIVACY_POLICY_URL =
     "https://sendforge.app/privacy.html";
   process.env.ACCOUNT_FROM_NAME = "SendForge";
@@ -204,8 +204,14 @@ describe("SendForge transactional SendGrid payloads", { concurrency: false }, ()
     assert.ok(html.includes(referralUrl), "HTML keeps the exact URL");
     assert.ok(text.includes(unsubscribeUrl));
     assert.ok(html.includes(unsubscribeUrl.replaceAll("&", "&amp;")));
-    assert.match(text, /123 Test Street, Test City, NY 10001/);
-    assert.match(html, /123 Test Street, Test City, NY 10001/);
+    assert.match(
+      text,
+      /SendForge LLC, 6749 Fulton St E, Ste A #2333, Ada, MI 49301/
+    );
+    assert.match(
+      html,
+      /SendForge LLC, 6749 Fulton St E, Ste A #2333, Ada, MI 49301/
+    );
     assert.match(text, /https:\/\/sendforge\.app\/privacy\.html/);
     assert.match(html, /https:\/\/sendforge\.app\/privacy\.html/);
     assert.deepEqual(body.personalizations[0].headers, {

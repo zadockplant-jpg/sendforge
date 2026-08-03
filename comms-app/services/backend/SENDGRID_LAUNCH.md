@@ -75,7 +75,7 @@ ACCOUNT_FROM_EMAIL=referrals@sendforge.app
 ACCOUNT_FROM_NAME=SendForge
 REFERRAL_FROM_EMAIL=referrals@sendforge.app
 REFERRAL_FROM_NAME=SendForge Rewards
-REFERRAL_BUSINESS_ADDRESS=<complete legal postal address>
+REFERRAL_BUSINESS_ADDRESS=SendForge LLC, 6749 Fulton St E, Ste A #2333, Ada, MI 49301
 PRIVACY_POLICY_URL=https://sendforge.app/privacy.html
 SUPPORT_EMAIL=support@sendforge.app
 
