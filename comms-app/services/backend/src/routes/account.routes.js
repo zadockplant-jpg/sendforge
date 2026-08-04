@@ -42,6 +42,11 @@ import {
 } from "../services/suppression.service.js";
 import { env } from "../config/env.js";
 import {
+  clearCustomerAuthStateCache,
+  issueCustomerAccessToken,
+} from "../services/auth.service.js";
+import { preparePasswordChange } from "../services/passwordChange.service.js";
+import {
   getRequestId,
   log,
   sanitizeEmail,
@@ -57,6 +62,11 @@ const ReferralInviteSchema = z.object({
   toEmail: z.string().email().max(320),
   productSlug: z.literal("tabforge").optional().default("tabforge"),
   recipientConsent: z.literal(true),
+});
+
+const ChangePasswordSchema = z.object({
+  currentPassword: z.string().min(8).max(1024),
+  newPassword: z.string().min(8).max(72),
 });
 
 const REFERRAL_INVITE_HOURLY_LIMIT = 100;
@@ -87,6 +97,14 @@ const referralInviteUserRateLimiter = createRateLimiter({
   keyGenerator: rateLimitByUserOrIp,
   message: "too_many_referral_invites",
   skip: referralInviteLimitsBypassedForRequest,
+});
+
+const passwordChangeRateLimiter = createRateLimiter({
+  name: "account-password-change",
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: rateLimitByUserOrIp,
+  message: "too_many_password_change_attempts",
 });
 
 const referralInviteRecipientRateLimiter = createRateLimiter({
@@ -374,6 +392,84 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
     });
   }
 });
+
+/**
+ * PATCH /v1/account/password
+ * Changes the signed-in customer's password and revokes every older token.
+ * A replacement token keeps only this browser signed in.
+ */
+accountRouter.patch(
+  "/password",
+  requireAuth,
+  passwordChangeRateLimiter,
+  async (req, res) => {
+    const requestId = getRequestId(req);
+    const parsed = ChangePasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid_input" });
+    }
+
+    try {
+      const user = await db("users")
+        .select("id", "email", "password_hash", "auth_version")
+        .where({ id: req.user.sub })
+        .first();
+      if (!user) return res.status(404).json({ error: "user_not_found" });
+
+      const replacement = await preparePasswordChange({
+        currentPassword: parsed.data.currentPassword,
+        newPassword: parsed.data.newPassword,
+        passwordHash: user.password_hash,
+      });
+      if (replacement.error === "current_password_incorrect") {
+        return res.status(403).json({ error: replacement.error });
+      }
+      if (replacement.error) {
+        return res.status(400).json({ error: replacement.error });
+      }
+
+      const currentAuthVersion = Number(user.auth_version || 0);
+      const nextAuthVersion = currentAuthVersion + 1;
+      const token = issueCustomerAccessToken({
+        id: user.id,
+        email: user.email,
+        authVersion: nextAuthVersion,
+        sessionStartedAt: req.user.session_started_at,
+      });
+      const updated = await db("users")
+        .where({
+          id: user.id,
+          password_hash: user.password_hash,
+          auth_version: currentAuthVersion,
+        })
+        .update({
+          password_hash: replacement.passwordHash,
+          verification_token_hash: null,
+          verification_sent_at: null,
+          auth_version: nextAuthVersion,
+        });
+
+      if (!updated) {
+        return res.status(409).json({ error: "password_changed_elsewhere" });
+      }
+
+      clearCustomerAuthStateCache(user.id);
+      log("info", "account_password_change_success", {
+        requestId,
+        userId: user.id,
+      });
+      return res.json({ ok: true, token, email: user.email });
+    } catch (error) {
+      log("error", "account_password_change_failed", {
+        requestId,
+        userId: req.user?.sub,
+        code: error?.code,
+        message: String(error?.message || error),
+      });
+      return res.status(500).json({ error: "server_error" });
+    }
+  }
+);
 
 /**
  * GET /v1/account/entitlements
