@@ -1,3 +1,5 @@
+import { buildWebAuthnConfig } from "./webauthn.js";
+
 const nodeEnv = process.env.NODE_ENV || "development";
 const port = Number(process.env.PORT || 3000);
 
@@ -22,12 +24,21 @@ if (nodeEnv === "production") {
   publicSiteUrl = publicSiteUrl || "http://localhost:8080";
 }
 
+const webAuthn = buildWebAuthnConfig({ nodeEnv, port });
+
 export const env = {
   nodeEnv,
   port,
 
   publicBaseUrl,
   publicSiteUrl,
+
+  webAuthnRpName: webAuthn.rpName,
+  webAuthnRpId: webAuthn.rpId,
+  webAuthnOrigins: webAuthn.origins,
+  webAuthnTimeoutMs: webAuthn.timeoutMs,
+  webAuthnChallengeTtlMs: webAuthn.challengeTtlMs,
+  webAuthnAllowedAaguids: webAuthn.allowedAaguids,
 
   jwtSecret: process.env.JWT_SECRET || "",
   databaseUrl: process.env.DATABASE_URL || "",
