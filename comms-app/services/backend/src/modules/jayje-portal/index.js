@@ -4,7 +4,6 @@ import { isIP } from 'node:net';
 import Stripe from 'stripe';
 import { z } from 'zod';
 import { db } from '../../config/db.js';
-import { redis } from '../../config/redis.js';
 import { authRouter } from '../../routes/auth.routes.js';
 import { adminRouter } from '../../routes/admin.routes.js';
 import { verifyCustomerAccessToken,verifyAdminAccessToken,getCurrentCustomerAuthState,customerTokenMatchesUser,adminTokenMatchesUser } from '../../services/auth.service.js';
@@ -14,10 +13,12 @@ import { createPortalService,fail } from './service.js';
 import { createPortalBilling } from './billing.js';
 import { createGoogleAuth,googleReady,allowedAdmin } from './google.js';
 import { documentPdf } from './pdf.js';
+import { createPortalState } from './state.js';
 
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
 const service=createPortalService(db);
-const google=createGoogleAuth({db,redis});
+const stateStore=createPortalState(db);
+const google=createGoogleAuth({db,stateStore});
 let stripe;
 function billing() {
   if(!process.env.STRIPE_SECRET_KEY || !process.env.JAYJE_STRIPE_WEBHOOK_SECRET)throw fail(503,'billing_unavailable');
@@ -50,10 +51,9 @@ jayjePortalRouter.use(wrap(async(req,res,next)=>{
   const secret=process.env.JAYJE_PROXY_SECRET,origin=req.get('X-Jayje-Origin'),ip=req.get('X-Jayje-Client-Ip');
   const origins=(process.env.JAYJE_ALLOWED_ORIGINS||'https://jayje.com,https://www.jayje.com').split(',').map(s=>s.trim());
   if(!secret || secret.length<32 || !secureEqual(req.get('X-Jayje-Proxy-Key'),secret) || !origins.includes(origin) || !isIP(ip||''))throw fail(403,'forbidden');
-  if(redis.status!=='ready')throw fail(503,'portal_unavailable');
   const authRequest=req.path.startsWith('/auth/')||req.path.startsWith('/admin/auth/')||req.path.startsWith('/google/');
-  const key=createHash('sha256').update(`${secret}:${ip}`).digest('hex');
-  const count=await redis.eval("local n = redis.call('INCR', KEYS[1]); if n == 1 then redis.call('EXPIRE', KEYS[1], 60) end; return n",1,`jayje:portal:${authRequest?'auth':'api'}:${key}`);
+  const key=createHash('sha256').update(`${secret}:${authRequest?'auth':'api'}:${ip}`).digest('hex');
+  const count=await stateStore.rate(key);
   if(Number(count)>(authRequest?20:180))throw fail(429,'too_many_requests');
   // Existing login limiters receive the trusted visitor IP, never a browser header.
   Object.defineProperty(req,'ip',{value:ip,configurable:true});next();

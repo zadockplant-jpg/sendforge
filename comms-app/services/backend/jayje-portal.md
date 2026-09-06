@@ -82,7 +82,7 @@ replace the unrelated `GOOGLE_CLIENT_*` credentials used for contact integration
 The UI displays Google sign-in only when both JayJe settings are present.
 
 The server uses state, nonce, PKCE, Google-issued ID-token validation and a
-ten-minute single-use Redis transaction. An existing shared account must first
+ten-minute single-use PostgreSQL transaction. An existing shared account must first
 sign in and select **Link Google** with the same email. Matching an email alone
 never silently links an existing account. Admin Google sign-in still requires the
 shared email-code challenge. Essential session cookies are Secure, HttpOnly and
@@ -91,7 +91,7 @@ accepts a browser-provided Authorization header.
 
 ## Verification and rollback
 
-Run `npm test` in this backend directory with isolated test database/Redis URLs.
+Run `npm test` in this backend directory with isolated test database/Redis URLs. The portal itself uses PostgreSQL for rate limits and OAuth state; it does not depend on Redis availability.
 The JayJe tests execute the production migration and queries in an in-memory
 PostgreSQL instance (PGlite), plus HTTP boundary, JWT role, raw webhook-signature,
 concurrent checkout, duplicate-event, amount, client-isolation, and PDF tests.

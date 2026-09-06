@@ -7,7 +7,6 @@ process.env.JWT_SECRET ||= 'unit-test-secret-jayje-portal-only';
 process.env.JAYJE_PORTAL_ENABLED='true';process.env.JAYJE_PROXY_SECRET='unit-test-only-secret'.repeat(3);
 process.env.JAYJE_ALLOWED_ORIGINS='https://jayje.com';
 process.env.STRIPE_SECRET_KEY='sk_test_not_real';process.env.JAYJE_STRIPE_WEBHOOK_SECRET='whsec_test_not_real';
-const {redis}=await import('../src/config/redis.js');redis.disconnect();Object.defineProperty(redis,'status',{get:()=> 'ready',set(){},configurable:true});redis.eval=async()=>1;
 const {db}=await import('../src/config/db.js');
 const {issueCustomerAccessToken,issueAdminAccessToken,clearCustomerAuthStateCache}=await import('../src/services/auth.service.js');
 const {validateGoogleIdentity}=await import('../src/modules/jayje-portal/google.js');
@@ -16,9 +15,12 @@ const app=express();app.use('/portal',jayjePortalRouter);const server=app.listen
 const base=`http://127.0.0.1:${server.address().port}/portal`;
 const user={id:'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',email:'client@example.com',email_verified:true,auth_version:0};
 const connection={};db.client.acquireConnection=async()=>connection;db.client.releaseConnection=async()=>{};
-db.client.query=async(_connection,query)=>{assert.match(query.sql,/from "users"/);return {...query,response:{rows:[user],command:'SELECT'}};};
+db.client.query=async(_connection,query)=>{
+  if(query.sql.includes('jayje_portal_limits')||query.sql.includes('jayje_oauth_states'))return {...query,response:{rows:[{attempts:1}],command:'SELECT'}};
+  assert.match(query.sql,/from "users"/);return {...query,response:{rows:[user],command:'SELECT'}};
+};
 const request=(path,{token,body,headers={},method=body===undefined?'GET':'POST'}={})=>fetch(base+path,{method,headers:{'Content-Type':'application/json','X-Jayje-Proxy-Key':process.env.JAYJE_PROXY_SECRET,'X-Jayje-Origin':'https://jayje.com','X-Jayje-Client-Ip':'203.0.113.7',...(token?{Authorization:`Bearer ${token}`}:{ }),...headers},body:body===undefined?undefined:JSON.stringify(body)});
-after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));redis.disconnect();await db.destroy();});
+after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));await db.destroy();});
 test('portal requires proxy secret, allowed origin and a validated visitor IP',async()=>{
   for(const headers of [{'X-Jayje-Proxy-Key':'wrong'},{'X-Jayje-Origin':'https://evil.example'},{'X-Jayje-Client-Ip':'spoofed'}])assert.equal((await request('/config',{headers})).status,403);
   assert.equal((await request('/config')).status,200);

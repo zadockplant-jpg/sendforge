@@ -7,6 +7,8 @@ import { up,down } from '../src/db/migrations/20260907_create_jayje_portal.js';
 import { createPortalService,documentSchema,totals } from '../src/modules/jayje-portal/service.js';
 import { createPortalBilling,assertSessionMatches } from '../src/modules/jayje-portal/billing.js';
 import { documentPdf } from '../src/modules/jayje-portal/pdf.js';
+import { createPortalState } from '../src/modules/jayje-portal/state.js';
+import { up as stateUp, down as stateDown } from '../src/db/migrations/20260908_create_jayje_portal_state.js';
 
 let pg,db,service,admin,alice,bob,client,other,stripe,billing;
 const sessions=new Map(),keys=new Map();let calls=0;
@@ -21,7 +23,7 @@ before(async()=>{
   db.client.destroyRawConnection=async()=>{};
   await db.schema.createTable('users',t=>{t.uuid('id').primary();t.text('email').unique();});
   await db.schema.createTable('admin_audit_log',t=>{t.uuid('id').primary();t.uuid('admin_user_id');t.text('admin_email');t.text('action');t.text('resource_type');t.text('resource_id');t.jsonb('metadata');});
-  await up(db);service=createPortalService(db);
+  await up(db);await stateUp(db);service=createPortalService(db);
   admin={sub:randomUUID(),email:'owner@example.com',role:'admin'};alice={sub:randomUUID(),email:'alice@example.com',role:'client'};bob={sub:randomUUID(),email:'bob@example.com',role:'client'};
   await db('users').insert([admin,alice,bob].map(a=>({id:a.sub,email:a.email})));
   client=await service.createClient(admin,{name:'Alice Example',email:'ALICE@example.com'});
@@ -33,7 +35,7 @@ before(async()=>{
   }}};
   billing=createPortalBilling({db,stripe,service,siteUrl:'https://jayje.com'});
 });
-after(async()=>{if(db){await down(db);await db.destroy();}await pg?.close();});
+after(async()=>{if(db){await stateDown(db);await down(db);await db.destroy();}await pg?.close();});
 const input=(overrides={})=>({client_id:client.id,kind:'invoice',title:'Lighting installation',items:[{description:'Install fixtures',quantity_milli:1500,unit_cents:12345}],tax_bps:600,notes:'Discuss placement before work.',...overrides});
 async function invoice(){const d=await service.createDocument(admin,input());return service.action(admin,d.id,'issue');}
 
@@ -132,4 +134,19 @@ test('later refund events do not reopen a dispute that was won',async()=>{
   await billing.event({type:'charge.dispute.closed',data:{object:{id:'dp_won',charge:'ch_won'}}});
   await billing.event({type:'charge.refunded',data:{object:{id:'ch_won'}}});
   assert.equal((await db('jayje_payments').where({invoice_id:d.id}).first()).status,'partially_refunded');
+});
+test('PostgreSQL rate windows count atomically and reset after expiry',async()=>{
+  const store=createPortalState(db),key='a'.repeat(64);
+  const counts=await Promise.all(Array.from({length:21},()=>store.rate(key)));
+  assert.deepEqual(counts.sort((a,b)=>a-b),Array.from({length:21},(_,i)=>i+1));
+  await db('jayje_portal_limits').where({key_hash:key}).update({window_started:new Date(Date.now()-61000)});
+  assert.equal(await store.rate(key),1);
+});
+test('OAuth state is single-use across concurrent callbacks and expires after ten minutes',async()=>{
+  const store=createPortalState(db),state='single-use-state';await store.saveGoogleState(state,{nonce:'nonce',verifier:'private-verifier'});
+  const records=await db('jayje_oauth_states');assert.notEqual(records[0].state_hash,state);
+  const results=await Promise.all([store.consumeGoogleState(state),store.consumeGoogleState(state)]);
+  assert.equal(results.filter(Boolean).length,1);
+  await store.saveGoogleState('expired',{nonce:'no'});await db('jayje_oauth_states').update({expires_at:new Date(Date.now()-1000)});
+  assert.equal(await store.consumeGoogleState('expired'),null);
 });

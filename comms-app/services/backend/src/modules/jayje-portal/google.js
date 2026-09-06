@@ -11,7 +11,7 @@ export function validateGoogleIdentity(payload,nonce) {
   if(!payload?.sub || !payload.email || payload.email_verified!==true || payload.nonce!==nonce || !['accounts.google.com','https://accounts.google.com'].includes(payload.iss))throw fail(401,'google_identity_invalid');
   return {subject:payload.sub,email:payload.email.toLowerCase()};
 }
-export function createGoogleAuth({db,redis}) {
+export function createGoogleAuth({db,stateStore}) {
   return {
     async start({origin,mode,actor}) {
       if(!googleReady())throw fail(503,'google_not_configured');
@@ -19,7 +19,7 @@ export function createGoogleAuth({db,redis}) {
       if(mode==='link' && !actor)throw fail(401,'sign_in_required');
       const state=randomBytes(32).toString('base64url'), nonce=randomBytes(32).toString('base64url'),verifier=randomBytes(48).toString('base64url');
       const redirectUri=`${origin}/api/account/google/callback`;
-      await redis.set(`jayje:google:${state}`,JSON.stringify({nonce,verifier,redirectUri,mode,userId:mode==='link'?actor.sub:null}),'EX',600,'NX');
+      await stateStore.saveGoogleState(state,{nonce,verifier,redirectUri,mode,userId:mode==='link'?actor.sub:null});
       const url=new URL('https://accounts.google.com/o/oauth2/v2/auth');
       for(const [k,v]of Object.entries({client_id:process.env.JAYJE_GOOGLE_CLIENT_ID,redirect_uri:redirectUri,response_type:'code',scope:'openid email profile',state,nonce,
         code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256',prompt:'select_account'}))url.searchParams.set(k,v);
@@ -28,9 +28,8 @@ export function createGoogleAuth({db,redis}) {
     async callback({state,code,actor,origin}) {
       if(!googleReady())throw fail(503,'google_not_configured');
       if(!/^[A-Za-z0-9_-]{43}$/.test(state||'') || typeof code!=='string' || code.length>4096)throw fail(400,'google_state_invalid');
-      const stored=await redis.eval("local v = redis.call('GET', KEYS[1]); if v then redis.call('DEL', KEYS[1]) end; return v",1,`jayje:google:${state}`);
-      if(!stored)throw fail(400,'google_state_expired');
-      const data=JSON.parse(stored);
+      const data=await stateStore.consumeGoogleState(state);
+      if(!data)throw fail(400,'google_state_expired');
       if(data.redirectUri!==`${origin}/api/account/google/callback` || (data.mode==='link' && data.userId!==actor?.sub))throw fail(403,'google_state_invalid');
       const oauth=new OAuth2Client(process.env.JAYJE_GOOGLE_CLIENT_ID,process.env.JAYJE_GOOGLE_CLIENT_SECRET,data.redirectUri);
       const {tokens}=await oauth.getToken({code,codeVerifier:data.verifier,redirect_uri:data.redirectUri});
