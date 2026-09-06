@@ -23,9 +23,14 @@ import { inmateRecordsStoreRouter } from "./routes/inmate.records.store.routes.j
 import { adminRouter } from "./routes/admin.routes.js";
 import { unsubscribeRouter } from "./routes/unsubscribe.routes.js";
 
+import { jayjeRouter } from "./modules/jayje/index.js";
+
 export const app = express();
 
 app.set("trust proxy", 1);
+
+// JayJe owns its parser, proxy boundary and error handling. Existing routes stay unchanged.
+app.use("/v1/jayje", jayjeRouter);
 
 app.use(express.urlencoded({ extended: false }));
 
