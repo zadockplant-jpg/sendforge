@@ -1,8 +1,10 @@
 import express from "express";
 import cors from "cors";
+import { fileURLToPath } from "node:url";
 import { env } from "./config/env.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
+import { passkeyRouter } from "./routes/passkey.routes.js";
 import { verificationRouter } from "./routes/verification.routes.js";
 import { accountRouter } from "./routes/account.routes.js";
 import { groupsRouter } from "./routes/groups.routes.js";
@@ -26,6 +28,10 @@ import { unsubscribeRouter } from "./routes/unsubscribe.routes.js";
 import { jayjeRouter } from "./modules/jayje/index.js";
 
 export const app = express();
+
+const forgePassUiDirectory = fileURLToPath(
+  new URL("./public/forgepass/", import.meta.url)
+);
 
 app.set("trust proxy", 1);
 
@@ -53,6 +59,7 @@ app.use(
 // ----- CORE ROUTES -----
 app.use("/health", healthRouter);
 app.use("/v1/auth", authRouter);
+app.use("/v1/auth/passkeys", passkeyRouter);
 app.use("/v1/auth", verificationRouter);
 app.use("/v1/account", accountRouter);
 app.use("/v1/contacts", contactsRoutes);
@@ -68,6 +75,47 @@ app.use("/v1/tabforge/cloud", tabforgeCloudRouter);
 app.use("/v1/inmate-records/store", inmateRecordsStoreRouter);
 app.use("/v1/admin", adminRouter);
 app.use("/v1/unsubscribe", unsubscribeRouter);
+
+app.use("/forgepass", (_req, res, next) => {
+  res.set({
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": [
+      "default-src 'self'",
+      "base-uri 'none'",
+      "connect-src 'self'",
+      "font-src 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "img-src 'self' data:",
+      "object-src 'none'",
+      "script-src 'self'",
+      "style-src 'self'",
+    ].join("; "),
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": [
+      "camera=()",
+      "geolocation=()",
+      "microphone=()",
+      "payment=()",
+      "publickey-credentials-create=(self)",
+      "publickey-credentials-get=(self)",
+    ].join(", "),
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  });
+  next();
+});
+
+app.use(
+  "/forgepass",
+  express.static(forgePassUiDirectory, {
+    cacheControl: false,
+    dotfiles: "deny",
+    etag: true,
+    index: "index.html",
+  })
+);
 
 // ----- BLAST QUOTE / SEND -----
 app.use("/v1/blasts/quote", blastsQuoteRouter);

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0B1020" />
+    <link rel="icon" href="data:," />
+    <meta
+      name="description"
+      content="Enroll and test a ForgePass hardware-backed passkey against the SendForge authentication server."
+    />
+    <title>ForgePass · Live authentication test</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header" aria-label="ForgePass header">
+        <a class="brand" href="./" aria-label="ForgePass live test home">
+          <span class="brand-mark" aria-hidden="true">
+            <span class="brand-keyhole"></span>
+          </span>
+          <span class="brand-name">ForgePass</span>
+        </a>
+
+        <div class="header-actions">
+          <span class="connection-pill" id="connection-pill">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label">Checking browser</span>
+          </span>
+          <button class="text-button" id="sign-out-button" type="button" hidden>Sign out</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="page-title">
+          <div class="hero-copy">
+            <p class="eyebrow">Your server · Your hardware · Your identity</p>
+            <h1 id="page-title">ForgePass authentication, end to end.</h1>
+            <p class="hero-intro">
+              Enroll this authenticator with SendForge, then prove the complete sign-in path without
+              sending a password or private key to another service.
+            </p>
+            <div class="privacy-note">
+              <span class="privacy-icon" aria-hidden="true"></span>
+              <p>Your private key stays inside ForgePass. This page sends only signed WebAuthn responses.</p>
+            </div>
+          </div>
+
+          <aside class="readiness-card" aria-labelledby="readiness-title">
+            <div class="readiness-heading">
+              <p class="card-kicker">Live readiness</p>
+              <h2 id="readiness-title">Browser &amp; session</h2>
+            </div>
+            <dl class="readiness-list">
+              <div>
+                <dt>Secure context</dt>
+                <dd class="readiness-value" id="secure-context-status">Checking</dd>
+              </div>
+              <div>
+                <dt>WebAuthn</dt>
+                <dd class="readiness-value" id="webauthn-status">Checking</dd>
+              </div>
+              <div>
+                <dt>SendForge session</dt>
+                <dd class="readiness-value" id="session-status">Signed out</dd>
+              </div>
+            </dl>
+            <p class="session-identity" id="session-identity" hidden></p>
+          </aside>
+        </section>
+
+        <div class="status-message" id="status-message" role="status" aria-live="polite" hidden></div>
+
+        <section class="flow-section" aria-labelledby="flow-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow eyebrow-dark">Three-step live test</p>
+              <h2 id="flow-title">Connect ForgePass to your account</h2>
+            </div>
+            <p>Complete the steps in order the first time. After enrollment, step three stands on its own.</p>
+          </div>
+
+          <div class="step-grid">
+            <article class="step-card" id="step-sign-in">
+              <div class="step-topline">
+                <span class="step-number" aria-hidden="true">01</span>
+                <span class="step-state" data-step-state>Start here</span>
+              </div>
+              <h3>Password sign in</h3>
+              <p class="step-description">
+                Use your existing SendForge account once to authorize a new ForgePass credential.
+              </p>
+
+              <form id="password-form" class="auth-form">
+                <div class="field-group">
+                  <label for="email">Email address</label>
+                  <input
+                    id="email"
+                    name="email"
+                    type="email"
+                    autocomplete="username"
+                    inputmode="email"
+                    required
+                  />
+                </div>
+                <div class="field-group">
+                  <label for="password">Password</label>
+                  <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    autocomplete="current-password"
+                    required
+                  />
+                </div>
+                <button class="primary-button" id="password-submit" type="submit">Sign in to SendForge</button>
+              </form>
+            </article>
+
+            <article class="step-card" id="step-enroll">
+              <div class="step-topline">
+                <span class="step-number" aria-hidden="true">02</span>
+                <span class="step-state" data-step-state>Needs a session</span>
+              </div>
+              <h3>Enroll ForgePass</h3>
+              <p class="step-description">
+                Create a discoverable credential backed by the ForgePass authenticator connected to this machine.
+              </p>
+
+              <div class="field-group enrollment-confirmation">
+                <label for="enrollment-password">Confirm SendForge password</label>
+                <input
+                  id="enrollment-password"
+                  name="enrollment-password"
+                  type="password"
+                  autocomplete="current-password"
+                  minlength="8"
+                  required
+                  aria-describedby="enrollment-password-help"
+                  disabled
+                />
+                <p class="field-help" id="enrollment-password-help">
+                  Required again to prevent a stolen session from enrolling a permanent credential.
+                </p>
+              </div>
+
+              <button class="primary-button" id="enroll-button" type="button" disabled>
+                <span data-button-label>Enroll this ForgePass</span>
+              </button>
+              <p class="field-help attestation-help">
+                If the browser asks to share authenticator information, allow it so SendForge can
+                confirm the ForgePass device identifier.
+              </p>
+
+              <div class="credential-panel" aria-labelledby="credentials-title">
+                <div class="credential-heading">
+                  <h4 id="credentials-title">Enrolled credentials</h4>
+                  <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh enrolled credentials" disabled>
+                    <span aria-hidden="true">↻</span>
+                  </button>
+                </div>
+                <div id="credential-list" class="credential-list">
+                  <p class="empty-state">Sign in to view your enrolled credentials.</p>
+                </div>
+              </div>
+            </article>
+
+            <article class="step-card step-card-accent" id="step-passkey">
+              <div class="step-topline">
+                <span class="step-number" aria-hidden="true">03</span>
+                <span class="step-state" data-step-state>Ready after enrollment</span>
+              </div>
+              <h3>Sign in with ForgePass</h3>
+              <p class="step-description">
+                Sign out, then authenticate with the passkey alone. No email or password is required.
+              </p>
+
+              <button class="passkey-button" id="passkey-login-button" type="button" disabled>
+                <span class="button-mark" aria-hidden="true">
+                  <span></span>
+                </span>
+                <span data-button-label>Sign in with ForgePass</span>
+              </button>
+
+              <div class="proof-strip">
+                <span aria-hidden="true">✓</span>
+                <p>Challenge-bound · Origin-checked · Replay-resistant</p>
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <p>ForgePass live test · Served by your SendForge backend</p>
+      </footer>
+    </div>
+
+    <noscript>
+      <div class="noscript-message">JavaScript is required to use the browser WebAuthn API.</div>
+    </noscript>
+  </body>
+</html>
