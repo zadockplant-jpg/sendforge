@@ -3,6 +3,7 @@ import { Router } from "express";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 import { z } from "zod";
+import { OAuth2Client } from "google-auth-library";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import {
@@ -47,6 +48,30 @@ const Login = z.object({
   password: z.string().min(8),
 });
 
+// Exported for tests: the whole trust decision for a Google identity lives
+// here. An address Google has not itself verified must never be accepted,
+// because accepting it would let anyone claim an email they do not own.
+export function googleIdentityFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.email_verified !== true) return null;
+  const email = String(payload.email || "").toLowerCase().trim();
+  if (!email || !email.includes("@")) return null;
+  return { email };
+}
+
+const GoogleSignIn = z.object({
+  idToken: z.string().min(16).max(8192),
+});
+
+// Built once and reused so the library can cache Google's signing keys.
+let googleOAuthClient = null;
+function getGoogleOAuthClient() {
+  if (!googleOAuthClient) {
+    googleOAuthClient = new OAuth2Client(env.googleClientId);
+  }
+  return googleOAuthClient;
+}
+
 const ForgotPassword = z.object({
   email: z.string().email(),
 });
@@ -67,6 +92,14 @@ const loginRateLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   max: 5,
   keyGenerator: rateLimitByIpAndBodyEmail,
+  message: "too_many_login_attempts",
+});
+
+const googleSignInRateLimiter = createRateLimiter({
+  name: "auth-google",
+  windowMs: 60 * 1000,
+  max: 10,
+  keyGenerator: rateLimitByIp,
   message: "too_many_login_attempts",
 });
 
@@ -913,6 +946,103 @@ authRouter.post("/login", loginRateLimiter, async (req, res) => {
     return res.json({ token });
   } catch (err) {
     log("error", "login_server_error", {
+      requestId,
+      email: sanitizeEmail(email),
+      code: err?.code,
+      message: String(err?.message || err),
+    });
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Google sign-in
+//
+// Reuses the Google OAuth client already configured for contacts import.
+// The response is byte-identical to /login ({ token }), so the website, the
+// TabForge extension, the Cloudflare worker, and the investor service all keep
+// working without changes.
+// ---------------------------------------------------------------------------
+authRouter.post("/google", googleSignInRateLimiter, async (req, res) => {
+  const requestId = getRequestId(req);
+
+  if (!env.jwtSecret) {
+    log("error", "google_signin_missing_jwt_secret", { requestId });
+    return res.status(500).json({ error: "server_misconfigured" });
+  }
+  if (!env.googleClientId) {
+    log("error", "google_signin_missing_client_id", { requestId });
+    return res.status(503).json({ error: "google_signin_unavailable" });
+  }
+
+  const parsed = GoogleSignIn.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_input" });
+  }
+
+  let payload;
+  try {
+    const ticket = await getGoogleOAuthClient().verifyIdToken({
+      idToken: parsed.data.idToken,
+      audience: env.googleClientId,
+    });
+    payload = ticket.getPayload();
+  } catch (err) {
+    log("warn", "google_signin_bad_token", {
+      requestId,
+      message: String(err?.message || err),
+    });
+    return res.status(401).json({ error: "bad_google_token" });
+  }
+
+  const identity = googleIdentityFromPayload(payload);
+  if (!identity) {
+    return res.status(403).json({ error: "google_email_not_verified" });
+  }
+  const { email } = identity;
+
+  try {
+    let user = await db("users").where({ email }).first();
+
+    if (!user) {
+      const id = crypto.randomUUID();
+      // password_hash is NOT NULL, so a Google-created account stores a random
+      // unusable hash. No password can ever match it; the user can set a real
+      // one later through the existing forgot-password flow.
+      const unusableHash = await bcrypt.hash(
+        crypto.randomBytes(32).toString("hex"),
+        12,
+      );
+      await db("users").insert({
+        id,
+        email,
+        password_hash: unusableHash,
+        email_verified: true,
+        verified_at: new Date(),
+      });
+      user = await db("users").where({ id }).first();
+      log("info", "google_signin_created_account", {
+        requestId,
+        email: sanitizeEmail(email),
+      });
+    } else if (!user.email_verified) {
+      // Google has proven ownership of this address, so adopt that rather than
+      // stranding the account behind our own verification email.
+      await db("users")
+        .where({ id: user.id })
+        .update({ email_verified: true, verified_at: new Date() });
+      user = await db("users").where({ id: user.id }).first();
+    }
+
+    const token = issueCustomerAccessToken({
+      id: user.id,
+      email,
+      authVersion: user.auth_version || 0,
+    });
+
+    return res.json({ token });
+  } catch (err) {
+    log("error", "google_signin_server_error", {
       requestId,
       email: sanitizeEmail(email),
       code: err?.code,
