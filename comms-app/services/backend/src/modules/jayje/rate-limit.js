@@ -1,24 +1,29 @@
 import { createHmac } from 'node:crypto';
-// The one Redis command sets both counters and TTLs atomically. Keys are
-// JayJe-prefixed and contain no raw IP address or email address.
-export const RATE_SCRIPT = `
-local ip = redis.call('INCR', KEYS[1])
-if ip == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
-local email = redis.call('INCR', KEYS[2])
-if email == 1 then redis.call('EXPIRE', KEYS[2], ARGV[1]) end
-return {ip, email}
-`;
-export function createJayjeLimiter(redis, secret) {
+// Intake counters live in the shared PostgreSQL database, in the same
+// jayje_portal_limits table the account portal uses. Keys are HMAC digests of a
+// JayJe-prefixed value, so no raw IP address or email address is stored. Redis
+// is not required: the separately managed SendForge Redis service may stay
+// suspended without disabling public service requests.
+export const WINDOW_SECONDS = 3600;
+export const LIMITS = Object.freeze({ ip: 10, email: 4 });
+export const RATE_SQL = `INSERT INTO jayje_portal_limits (key_hash, attempts, window_started)
+  VALUES (?, 1, now()) ON CONFLICT (key_hash) DO UPDATE SET
+  attempts = CASE WHEN jayje_portal_limits.window_started < now() - (? * interval '1 second')
+    THEN 1 ELSE jayje_portal_limits.attempts + 1 END,
+  window_started = CASE WHEN jayje_portal_limits.window_started < now() - (? * interval '1 second')
+    THEN now() ELSE jayje_portal_limits.window_started END
+  RETURNING attempts`;
+export function createJayjeLimiter(db, secret) {
   const hash = value=>createHmac('sha256',secret).update(value).digest('hex');
+  async function count(key) {
+    const result = await db.raw(RATE_SQL,[key,WINDOW_SECONDS,WINDOW_SECONDS]).timeout(2500);
+    return Number(result.rows[0].attempts);
+  }
+  // A database failure rejects, and the router fails closed with 503. There is
+  // no unbounded in-memory fallback.
   return async ({ip,email}) => {
-    if (redis.status && redis.status !== 'ready') throw new Error('jayje_rate_limit_unavailable');
-    let timer;
-    const deadline = new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('jayje_rate_limit_timeout')),2500);});
-    let counts;
-    try { counts = await Promise.race([redis.eval(RATE_SCRIPT,2,
-      `jayje:intake:ip:${hash(ip)}`,`jayje:intake:email:${hash(email.toLowerCase())}`,3600),deadline]); }
-    finally { clearTimeout(timer); }
-    const [ipCount,emailCount] = counts;
-    return Number(ipCount)<=10 && Number(emailCount)<=4;
+    const ipCount = await count(hash(`jayje:intake:ip:${ip}`));
+    const emailCount = await count(hash(`jayje:intake:email:${email.toLowerCase()}`));
+    return ipCount<=LIMITS.ip && emailCount<=LIMITS.email;
   };
 }

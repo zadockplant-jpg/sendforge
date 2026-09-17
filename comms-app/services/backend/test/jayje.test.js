@@ -9,7 +9,9 @@ import { getJayjeConfig, configReady, SERVICE_NAMES } from '../src/modules/jayje
 import { requestSchema, fieldErrors } from '../src/modules/jayje/validation.js';
 import { acceptJayjeRequest, requestRecord } from '../src/modules/jayje/service.js';
 import { notificationBody, sendJayjeNotification, JayjeMailError } from '../src/modules/jayje/notification.js';
-import { createJayjeLimiter } from '../src/modules/jayje/rate-limit.js';
+import { createJayjeLimiter, WINDOW_SECONDS } from '../src/modules/jayje/rate-limit.js';
+import { up as stateUp, down as stateDown } from '../src/db/migrations/20260908_create_jayje_portal_state.js';
+import { PGlite } from '@electric-sql/pglite';
 import { createJayjeRouter, secureEqual } from '../src/modules/jayje/router.js';
 import { up } from '../src/db/migrations/20260906_create_jayje_service_requests.js';
 const secret = 'unit-test-secret-'.repeat(4);
@@ -83,11 +85,36 @@ test('SendGrid 202 means accepted; HTTP and network ambiguity are classified',as
  await assert.rejects(sendJayjeNotification(row,config,async()=>new Response('{}',{status:503})),e=>e.deliveryUnknown);
  await assert.rejects(sendJayjeNotification(row,config,async()=>{throw new Error('network');}),e=>e.deliveryUnknown);
 });
-test('limiter uses atomic Redis counters, hashes PII and enforces both limits',async()=>{
- let args;let counts=[10,4];const limiter=createJayjeLimiter({status:'ready',eval:async(...a)=>{args=a;return counts;}},secret);assert.equal(await limiter({ip:'203.0.113.7',email:'CUSTOMER@example.com'}),true);assert.equal(args[1],2);assert.equal(args[4],3600);assert.match(args[2],/^jayje:intake:ip:[0-9a-f]{64}$/);assert.ok(!args.join(' ').includes('203.0.113.7'));assert.ok(!args.join(' ').includes('CUSTOMER'));counts=[11,2];assert.equal(await limiter({ip:'203.0.113.7',email:'customer@example.com'}),false);counts=[2,5];assert.equal(await limiter({ip:'203.0.113.8',email:'customer@example.com'}),false);
+test('limiter counts in PostgreSQL, hashes PII and enforces both limits',async()=>{
+ const calls=[];const counts=new Map();
+ const db={raw(sql,bindings){calls.push({sql,bindings});const key=bindings[0];counts.set(key,(counts.get(key)||0)+1);return {timeout:async()=>({rows:[{attempts:counts.get(key)}]})};}};
+ const limiter=createJayjeLimiter(db,secret);
+ for(let i=0;i<10;i++)assert.equal(await limiter({ip:'203.0.113.7',email:`customer${i}@example.com`}),true,`ip attempt ${i+1}`);
+ assert.equal(await limiter({ip:'203.0.113.7',email:'customer-eleven@example.com'}),false);
+ for(let i=0;i<4;i++)assert.equal(await limiter({ip:`203.0.113.${20+i}`,email:'Shared@Example.com'}),true,`email attempt ${i+1}`);
+ assert.equal(await limiter({ip:'203.0.113.99',email:'shared@example.com'}),false);
+ for(const call of calls){assert.match(call.sql,/jayje_portal_limits/);assert.deepEqual(call.bindings.slice(1),[3600,3600]);assert.match(call.bindings[0],/^[0-9a-f]{64}$/);assert.ok(!call.bindings[0].includes('203.0.113'));assert.ok(!call.bindings[0].toLowerCase().includes('example'));}
+ const emailKeys=calls.filter((_,index)=>index%2===1).map(c=>c.bindings[0]);
+ assert.equal(new Set(emailKeys.slice(-5)).size,1,'email keys are case-insensitive');
 });
-test('limiter refuses disconnected Redis instead of queueing requests',async()=>{
- let called=false;await assert.rejects(createJayjeLimiter({status:'reconnecting',eval(){called=true;}},secret)({ip:'203.0.113.7',email:'a@example.com'}));assert.equal(called,false);
+test('limiter fails closed when the database is unavailable',async()=>{
+ await assert.rejects(createJayjeLimiter({raw(){throw new Error('database unavailable');}},secret)({ip:'203.0.113.7',email:'a@example.com'}));
+ await assert.rejects(createJayjeLimiter({raw(){return {timeout:async()=>{throw new Error('timeout');}};}},secret)({ip:'203.0.113.7',email:'a@example.com'}));
+});
+test('limiter SQL runs against PostgreSQL, counts per window and resets after expiry',async()=>{
+ const pg=new PGlite();await pg.waitReady;
+ const db=knex({client:'pg',connection:{},pool:{min:0,max:1}});
+ db.client.acquireRawConnection=async()=>({query(config,callback){pg.query(config.text,config.values).then(result=>callback(null,{rows:result.rows,rowCount:result.affectedRows,command:config.text.trim().split(/\s/)[0].toUpperCase()}),callback);}});
+ db.client.destroyRawConnection=async()=>{};
+ try {
+  await stateUp(db);
+  const limiter=createJayjeLimiter(db,secret);
+  for(let i=0;i<4;i++)assert.equal(await limiter({ip:'203.0.113.7',email:'customer@example.com'}),true);
+  assert.equal(await limiter({ip:'203.0.113.7',email:'customer@example.com'}),false);
+  await db('jayje_portal_limits').update({window_started:new Date(Date.now()-WINDOW_SECONDS*1000-1000)});
+  assert.equal(await limiter({ip:'203.0.113.7',email:'customer@example.com'}),true);
+  const rows=await db('jayje_portal_limits');assert.ok(rows.every(row=>/^[0-9a-f]{64}$/.test(row.key_hash)));
+ } finally { await stateDown(db);await db.destroy();await pg.close(); }
 });
 test('timing-safe proxy secret comparison handles missing and unequal lengths',()=>{assert.equal(secureEqual(secret,secret),true);assert.equal(secureEqual('',secret),false);assert.equal(secureEqual('a',secret),false);assert.equal(secureEqual(undefined,secret),false);});
 

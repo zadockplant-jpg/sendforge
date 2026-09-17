@@ -6,13 +6,13 @@ This is an additive module inside the existing SendForge service. Existing backe
 
 The single mount is `/v1/jayje`, before the shared body parsers. JayJe owns its own 24 KiB JSON limit, proxy authentication and error responses. Existing SendForge parsers, raw-body verification, CORS, auth, accounts, messaging, billing, TabForge, ForgePass and webhook route mounts are not modified.
 
-The module is disabled unless `JAYJE_ENABLED=true` and all required settings are present. It lazily reuses the existing Knex and Redis instances. It uses the existing SendGrid API credential but a separate business inbox, sender name, email template and category. It never adds requesters to SendForge users, contacts, referral lists or marketing groups.
+The module is disabled unless `JAYJE_ENABLED=true` and all required settings are present. It lazily reuses the existing Knex instance and does not use Redis. It uses the existing SendGrid API credential but a separate business inbox, sender name, email template and category. It never adds requesters to SendForge users, contacts, referral lists or marketing groups.
 
 | Component | Responsibility |
 |---|---|
 | `config.js` | Scoped environment settings, service contract and explicit enablement |
 | `validation.js` | Strict normalized request schema; contact consent and honeypot |
-| `rate-limit.js` | Atomic Redis counters with JayJe-prefixed HMAC identifiers |
+| `rate-limit.js` | PostgreSQL counter windows (`jayje_portal_limits`) with JayJe-prefixed HMAC identifiers |
 | `repository.js` | Queries only `jayje_service_requests`; request and notification claims |
 | `notification.js` | Escaped business-inbox email and provider-state handling |
 | `service.js` | Durable intake, payload fingerprint and duplicate protection |
@@ -54,9 +54,9 @@ A newly stored request returns **202** and `{ "ok": true, "reference": "JJ-XXXXX
 
 Other responses: 400 invalid input, 403 forbidden proxy, 405 wrong method, 413 oversized body, 415 wrong content type, 429 intake limit, 503 disabled/missing settings or unavailable storage/limiter. Error responses contain no project contents or credentials.
 
-The limit is 10 attempts per IP and 4 per normalized email over one-hour counter windows. Retries also count toward that limit. Counter keys use HMAC with the server secret and expire after one hour. Raw IP/email values are not used as Redis keys. Disconnected Redis fails closed; there is no unsafe unbounded in-memory fallback.
+The limit is 10 attempts per IP and 4 per normalized email over one-hour counter windows. Retries also count toward that limit. Counter keys use HMAC with the server secret and reset after one hour. Raw IP/email values are never stored. Counters live in the shared PostgreSQL `jayje_portal_limits` table, so intake works while the separately managed Redis service is suspended. A database failure fails closed; there is no unsafe unbounded in-memory fallback.
 
-`GET /v1/jayje/health` is authenticated with the same secret and origin, and checks table availability plus Redis. It is not a public readiness endpoint and does not test email delivery.
+`GET /v1/jayje/health` is authenticated with the same secret and origin, and checks that the request table and the limits table exist. It is not a public readiness endpoint and does not test email delivery.
 
 ## Storage and email semantics
 
@@ -81,7 +81,7 @@ node src/modules/jayje/inbox.js status REQUEST_UUID contacted
 node src/modules/jayje/inbox.js retry REQUEST_UUID
 ```
 
-The tests inject fake storage/mail/Redis and compile migration SQL without executing it. The inbox commands are for the existing secured Render Shell with its deployed environment. Do not point local tests at production database URLs.
+The tests inject fake storage/mail, run the limiter SQL against in-memory PostgreSQL (PGlite) and compile the intake migration SQL without executing it. The inbox commands are for the existing secured Render Shell with its deployed environment. Do not point local tests at production database URLs.
 
 The operator can explicitly use `retry REQUEST_UUID --force` after checking provider activity. That bypasses the ordinary notification-state guard and can send an additional email. A normal retry is limited to pending/failed records and fewer than five attempts.
 
