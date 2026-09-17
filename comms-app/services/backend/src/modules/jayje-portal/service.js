@@ -1,21 +1,31 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { SERVICE_NAMES } from '../jayje/config.js';
 
 export const fail = (status, code) => Object.assign(new Error(code),{status,publicCode:code});
 export const isoDate = value => value instanceof Date ? value.toISOString().slice(0,10) : String(value).slice(0,10);
-export const clientSchema = z.object({email:z.string().trim().email().max(254).transform(s=>s.toLowerCase()),name:z.string().trim().min(1).max(160),phone:z.string().trim().max(40).default(''),address:z.string().trim().max(1000).default('')}).strict();
+export const clientSchema = z.object({email:z.string().trim().email().max(254).transform(s=>s.toLowerCase()),name:z.string().trim().min(1).max(160),phone:z.string().trim().max(40).default(''),address:z.string().trim().max(1000).default(''),
+  // A code carried in from the public request form, so the referral survives
+  // the trip from the contact page to the client's first document.
+  referral_code:z.string().trim().toUpperCase().regex(/^[A-Z0-9]{8}$/).nullable().default(null)}).strict();
 export const documentSchema = z.object({client_id:z.string().uuid(),kind:z.enum(['quote','invoice']),title:z.string().trim().min(1).max(180),
-  items:z.array(z.object({description:z.string().trim().min(1).max(500),quantity_milli:z.number().int().min(1).max(1000000),unit_cents:z.number().int().min(0).max(99999999)}).strict()).min(1).max(40),
+  // The service category decides whether a referral discount touches the line.
+  items:z.array(z.object({description:z.string().trim().min(1).max(500),quantity_milli:z.number().int().min(1).max(1000000),unit_cents:z.number().int().min(0).max(99999999),category:z.enum(Object.keys(SERVICE_NAMES)).nullable().default(null)}).strict()).min(1).max(40),
+  apply_credit_ids:z.array(z.string().uuid()).max(20).default([]),
   tax_bps:z.number().int().min(0).max(10000).default(0),notes:z.string().trim().max(5000).default(''),
   due_date:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(s=>!Number.isNaN(Date.parse(s)) && new Date(s).toISOString().slice(0,10)===s).nullable().default(null)}).strict();
-export function totals(items,taxBps) {
+// A referral discount reduces the taxable amount, so tax follows the discount.
+export function totals(items,taxBps,discountCents=0) {
   const lines=items.map(item=>({...item,total_cents:Number((BigInt(item.quantity_milli)*BigInt(item.unit_cents)+500n)/1000n)}));
   const subtotal=lines.reduce((n,item)=>n+item.total_cents,0);
-  const tax=Number((BigInt(subtotal)*BigInt(taxBps)+5000n)/10000n);
-  if(!Number.isSafeInteger(subtotal+tax) || subtotal+tax<50 || subtotal+tax>99999999) throw fail(400,'invoice_amount_out_of_range');
-  return {items:lines,subtotal_cents:subtotal,tax_cents:tax,total_cents:subtotal+tax};
+  const discount=Math.min(Math.max(0,Math.trunc(discountCents)),subtotal);
+  const taxable=subtotal-discount;
+  const tax=Number((BigInt(taxable)*BigInt(taxBps)+5000n)/10000n);
+  const total=taxable+tax;
+  if(!Number.isSafeInteger(total) || total<50 || total>99999999) throw fail(400,'invoice_amount_out_of_range');
+  return {items:lines,subtotal_cents:subtotal,discount_cents:discount,tax_cents:tax,total_cents:total};
 }
-export function createPortalService(db) {
+export function createPortalService(db,referrals=null) {
   const ensureClient=async actor => {
     if(actor.role==='admin') return null;
     const email=actor.email.toLowerCase();
@@ -54,16 +64,24 @@ export function createPortalService(db) {
       if(actor.role!=='admin') query.whereNot({status:'draft'});
       const documents=await query.limit(500);
       const payments=await db('jayje_payments').whereIn('invoice_id',documents.map(d=>d.id)).orderBy('paid_at','desc');
-      return {client:row,documents,payments};
+      if(!referrals) return {client:row,documents,payments};
+      const referred_by=await db('jayje_referrals').where('jayje_referrals.referred_client_id',id)
+        .leftJoin('jayje_clients','jayje_clients.id','jayje_referrals.referrer_client_id')
+        .first('jayje_referrals.id','jayje_referrals.code','jayje_referrals.status','jayje_referrals.discount_cents','jayje_clients.name as referrer_name')||null;
+      const credits=await db('jayje_referral_credits').where({client_id:id,status:'available'}).orderBy('created_at','desc');
+      return {client:row,documents,payments,referred_by,credits};
     },
     async createClient(actor,input) {
-      const data=clientSchema.parse(input);
-      return db.transaction(async trx=>{
+      const {referral_code:code,...data}=clientSchema.parse(input);
+      const row=await db.transaction(async trx=>{
         const existing=await trx('jayje_clients').where({email:data.email}).first();
         if(existing) throw fail(409,'client_already_exists');
-        const [row]=await trx('jayje_clients').insert({id:randomUUID(),...data}).returning('*');
-        await audit(trx,actor,'client_created',row.id);return row;
+        const [created]=await trx('jayje_clients').insert({id:randomUUID(),...data}).returning('*');
+        await audit(trx,actor,'client_created',created.id);return created;
       });
+      // A bad or already-used code must not cost the owner the new client.
+      if(code&&referrals) await referrals.claim(row,{code}).catch(()=>null);
+      return row;
     },
     async messages(actor,id,before) {
       await client(actor,id);
@@ -81,12 +99,21 @@ export function createPortalService(db) {
       await db('jayje_clients').where({id}).update({updated_at:db.fn.now()});return saved;
     },
     async createDocument(actor,input) {
-      const data=documentSchema.parse(input); const amounts=totals(data.items,data.tax_bps);
+      const {apply_credit_ids:creditIds,...data}=documentSchema.parse(input);
+      const priced=totals(data.items,data.tax_bps);
       return db.transaction(async trx=>{
         const customer=await client(actor,data.client_id,trx);
-        const [row]=await trx('jayje_documents').insert({id:randomUUID(),...data,...amounts,items:JSON.stringify(amounts.items),created_by:actor.sub,
-          reference:`JJ-${data.kind==='quote'?'Q':'INV'}-${new Date().getUTCFullYear()}-${randomUUID().slice(0,8).toUpperCase()}`,
-          customer:{name:customer.name,email:customer.email,address:customer.address,phone:customer.phone}}).returning('*');
+        // Reserved under the transaction so two drafts cannot spend one referral.
+        const applied=referrals?await referrals.pending(trx,data.client_id,priced.items,creditIds):{referral_id:null,discount_detail:[],discount_cents:0};
+        const amounts=totals(data.items,data.tax_bps,applied.discount_cents);
+        let row;
+        try {
+          [row]=await trx('jayje_documents').insert({id:randomUUID(),...data,...amounts,items:JSON.stringify(amounts.items),created_by:actor.sub,
+            referral_id:applied.referral_id,discount_detail:JSON.stringify(applied.discount_detail),
+            reference:`JJ-${data.kind==='quote'?'Q':'INV'}-${new Date().getUTCFullYear()}-${randomUUID().slice(0,8).toUpperCase()}`,
+            customer:{name:customer.name,email:customer.email,address:customer.address,phone:customer.phone}}).returning('*');
+        } catch(error) { throw error?.code==='23505'&&applied.referral_id?fail(409,'referral_already_applied'):error; }
+        await referrals?.applyCredits(trx,row);
         await audit(trx,actor,'document_created',row.id);return row;
       });
     },
@@ -99,12 +126,15 @@ export function createPortalService(db) {
           status=action==='accept'?'accepted':'declined';
         } else if(action==='void' && actor.role==='admin' && ['draft','sent','accepted','declined'].includes(row.status)) {
           const active=await trx('jayje_checkout_attempts').where({invoice_id:id}).whereIn('status',['creating','open','pending']).first();
-          if(active) throw fail(409,'checkout_active_wait_for_expiry');status='void';
+          if(active) throw fail(409,'checkout_active_wait_for_expiry');
+          await referrals?.release(trx,row);status='void';
         } else if(action==='convert' && actor.role==='admin' && row.kind==='quote' && row.status==='accepted') {
           const existing=await trx('jayje_documents').where({source_quote_id:id}).first();if(existing)return existing;
           const {created_at,updated_at,issued_at,paid_at,...copy}=row;
           const [invoice]=await trx('jayje_documents').insert({...copy,id:randomUUID(),kind:'invoice',status:'draft',due_date:null,created_by:actor.sub,source_quote_id:id,
-            reference:`JJ-INV-${new Date().getUTCFullYear()}-${randomUUID().slice(0,8).toUpperCase()}`,items:JSON.stringify(row.items)}).returning('*');
+            reference:`JJ-INV-${new Date().getUTCFullYear()}-${randomUUID().slice(0,8).toUpperCase()}`,items:JSON.stringify(row.items),discount_detail:JSON.stringify(row.discount_detail||[])}).returning('*');
+          // The quote's discount and any applied credits follow the invoice.
+          await referrals?.applyCredits(trx,invoice);
           await audit(trx,actor,'quote_converted',invoice.id);return invoice;
         } else throw fail(409,'document_action_unavailable');
         const [saved]=await trx('jayje_documents').where({id}).update({status,updated_at:trx.fn.now(),...(action==='issue'?{issued_at:trx.fn.now()}: {})}).returning('*');

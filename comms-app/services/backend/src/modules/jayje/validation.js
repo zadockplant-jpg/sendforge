@@ -12,6 +12,7 @@ export const requestSchema = z.object({
   timeframe: z.enum(Object.keys(TIMEFRAMES)),
   message: z.string().trim().min(10,'Add at least 10 characters about the work.').max(5000).refine(value=>!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value),'Remove unsupported characters.'),
   consent: z.literal(true,{errorMap:()=>({message:'Confirm that we may contact you about this request.'})}),
+  referralCode: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{8}$/).optional().nullable().default(null).catch(null),
   website: z.string().max(0).optional().default(''),
 }).strict().superRefine((data,context)=>{
   if (data.contactMethod === 'phone' && !data.phone) context.addIssue({code:z.ZodIssueCode.custom,path:['phone'],message:'Enter a number so we can call you.'});

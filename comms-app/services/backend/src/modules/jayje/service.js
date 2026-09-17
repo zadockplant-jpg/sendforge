@@ -8,7 +8,7 @@ export function requestRecord(data) {
  const canonical = {
    name:data.name,email:data.email,phone:data.phone,contact_method:data.contactMethod,
    location:data.location,services:data.services,timeframe:data.timeframe,message:data.message,
-   consent_version:CONSENT_VERSION,
+   referral_code:data.referralCode||null,consent_version:CONSENT_VERSION,
  };
  const id = randomUUID();
  return {...canonical,services:JSON.stringify(data.services),id,request_key:data.requestKey,

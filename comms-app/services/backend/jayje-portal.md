@@ -89,6 +89,31 @@ shared email-code challenge. Essential session cookies are Secure, HttpOnly and
 SameSite=Lax. Pages requires a same-origin Origin header for mutations and never
 accepts a browser-provided Authorization header.
 
+## Referrals
+
+Migration `20260917_create_jayje_referrals` adds `jayje_referral_codes`,
+`jayje_referrals` and `jayje_referral_credits`, three discount columns on
+`jayje_documents`, and `referral_code` on `jayje_service_requests`. It is
+additive and applied by the existing Render migration step.
+
+`GET /v1/jayje/portal/referrals` returns the signed-in client's code, link,
+invitations and credit balance. `POST .../referrals/invite` stores the
+invitation and then mails it; `POST .../referrals/claim` attaches a code to the
+friend's account. All three are client-only; the owner sees a client's referral
+state on `GET .../clients/:id`.
+
+Two partial unique indexes carry the rules that matter: one open referral per
+invited address, and at most one live quote and one live invoice holding a
+given referral's discount. A second draft for the same referral is refused with
+`referral_already_applied` rather than discounting twice. The discount is
+reserved under the document transaction, spent when the invoice is paid, and
+the referrer's credit is written in that same transaction.
+
+`JAYJE_REFERRAL_BPS` (default 500) sets the share. Only line items whose
+category is `handyman` are discounted; an earned credit is cash and applies to
+the whole document. Failed invitations are listed and retried with
+`node src/modules/jayje-portal/referrals-cli.js`.
+
 ## Verification and rollback
 
 Run `npm test` in this backend directory with isolated test database/Redis URLs. The portal itself uses PostgreSQL for rate limits and OAuth state; it does not depend on Redis availability.

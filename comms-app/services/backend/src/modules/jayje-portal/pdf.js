@@ -25,6 +25,7 @@ export function documentPdf(invoice,payment=null) {
     }
     if(pdf.y>580)pdf.addPage();
     pdf.moveDown().font('Helvetica').text(`Subtotal: ${money(invoice.subtotal_cents)}`,{align:'right'});
+    for(const line of invoice.discount_detail||[]) pdf.text(`${line.label}: -${money(line.amount_cents)}`,{align:'right'});
     pdf.text(`Tax (${invoice.tax_bps/100}%): ${money(invoice.tax_cents)}`,{align:'right'});
     pdf.font('Helvetica-Bold').fontSize(15).text(`Total: ${money(invoice.total_cents)}`,{align:'right'}).moveDown();
     if(payment) {

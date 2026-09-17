@@ -9,6 +9,8 @@ import { createPortalBilling,assertSessionMatches } from '../src/modules/jayje-p
 import { documentPdf } from '../src/modules/jayje-portal/pdf.js';
 import { createPortalState } from '../src/modules/jayje-portal/state.js';
 import { up as stateUp, down as stateDown } from '../src/db/migrations/20260908_create_jayje_portal_state.js';
+import { up as requestsUp, down as requestsDown } from '../src/db/migrations/20260906_create_jayje_service_requests.js';
+import { up as referralsUp, down as referralsDown } from '../src/db/migrations/20260917_create_jayje_referrals.js';
 
 let pg,db,service,admin,alice,bob,client,other,stripe,billing;
 const sessions=new Map(),keys=new Map();let calls=0;
@@ -23,7 +25,7 @@ before(async()=>{
   db.client.destroyRawConnection=async()=>{};
   await db.schema.createTable('users',t=>{t.uuid('id').primary();t.text('email').unique();});
   await db.schema.createTable('admin_audit_log',t=>{t.uuid('id').primary();t.uuid('admin_user_id');t.text('admin_email');t.text('action');t.text('resource_type');t.text('resource_id');t.jsonb('metadata');});
-  await up(db);await stateUp(db);service=createPortalService(db);
+  await up(db);await stateUp(db);await requestsUp(db);await referralsUp(db);service=createPortalService(db);
   admin={sub:randomUUID(),email:'owner@example.com',role:'admin'};alice={sub:randomUUID(),email:'alice@example.com',role:'client'};bob={sub:randomUUID(),email:'bob@example.com',role:'client'};
   await db('users').insert([admin,alice,bob].map(a=>({id:a.sub,email:a.email})));
   client=await service.createClient(admin,{name:'Alice Example',email:'ALICE@example.com'});
@@ -35,7 +37,7 @@ before(async()=>{
   }}};
   billing=createPortalBilling({db,stripe,service,siteUrl:'https://jayje.com'});
 });
-after(async()=>{if(db){await stateDown(db);await down(db);await db.destroy();}await pg?.close();});
+after(async()=>{if(db){await referralsDown(db);await requestsDown(db);await stateDown(db);await down(db);await db.destroy();}await pg?.close();});
 const input=(overrides={})=>({client_id:client.id,kind:'invoice',title:'Lighting installation',items:[{description:'Install fixtures',quantity_milli:1500,unit_cents:12345}],tax_bps:600,notes:'Discuss placement before work.',...overrides});
 async function invoice(){const d=await service.createDocument(admin,input());return service.action(admin,d.id,'issue');}
 

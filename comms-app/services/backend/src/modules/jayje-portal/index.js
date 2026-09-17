@@ -14,16 +14,20 @@ import { createPortalBilling } from './billing.js';
 import { createGoogleAuth,googleReady,allowedAdmin } from './google.js';
 import { documentPdf } from './pdf.js';
 import { createPortalState } from './state.js';
+import { createReferrals } from './referrals.js';
+import { createInviteMailer } from './referral-mail.js';
 
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
-const service=createPortalService(db);
+const siteUrl=process.env.JAYJE_SITE_URL||'https://jayje.com';
+const referrals=createReferrals({db,siteUrl,mail:createInviteMailer()});
+const service=createPortalService(db,referrals);
 const stateStore=createPortalState(db);
 const google=createGoogleAuth({db,stateStore});
 let stripe;
 function billing() {
   if(!process.env.STRIPE_SECRET_KEY || !process.env.JAYJE_STRIPE_WEBHOOK_SECRET)throw fail(503,'billing_unavailable');
   stripe ||= new Stripe(process.env.STRIPE_SECRET_KEY,{apiVersion:'2024-06-20',timeout:15000,maxNetworkRetries:1});
-  return createPortalBilling({db,stripe,service,siteUrl:process.env.JAYJE_SITE_URL||'https://jayje.com'});
+  return createPortalBilling({db,stripe,service,siteUrl,referrals});
 }
 async function identity(req,required=true) {
   const token=req.get('Authorization')?.replace(/^Bearer /,'');
@@ -87,6 +91,14 @@ jayjePortalRouter.get('/clients/:id/messages',wrap(async(req,res)=>{
   res.json(await service.messages(req.actor,req.params.id,before));
 }));
 jayjePortalRouter.post('/clients/:id/messages',wrap(async(req,res)=>res.status(201).json(await service.sendMessage(req.actor,req.params.id,req.body))));
+// Referrals belong to the signed-in client; the admin reads them per client.
+const asClient=async req=>{
+  if(req.actor.role!=='client')throw fail(403,'client_account_required');
+  return service.ensureClient(req.actor);
+};
+jayjePortalRouter.get('/referrals',wrap(async(req,res)=>res.json(await referrals.summary((await asClient(req)).id))));
+jayjePortalRouter.post('/referrals/invite',wrap(async(req,res)=>res.status(201).json(await referrals.invite(await asClient(req),req.body))));
+jayjePortalRouter.post('/referrals/claim',wrap(async(req,res)=>res.json(await referrals.claim(await asClient(req),req.body))));
 jayjePortalRouter.post('/documents',admin,wrap(async(req,res)=>res.status(201).json(await service.createDocument(req.actor,req.body))));
 jayjePortalRouter.get('/documents/:id',wrap(async(req,res)=>res.json(await service.document(req.actor,req.params.id))));
 jayjePortalRouter.post('/documents/:id/action',wrap(async(req,res)=>res.json(await service.action(req.actor,req.params.id,req.body?.action))));

@@ -7,7 +7,7 @@ export function assertSessionMatches(session,attempt,invoice) {
     session.amount_total!==invoice.total_cents || session.amount_total!==attempt.amount_cents ||
     session.currency!==invoice.currency || session.currency!==attempt.currency) throw fail(409,'payment_verification_failed');
 }
-export function createPortalBilling({db,stripe,service,siteUrl}) {
+export function createPortalBilling({db,stripe,service,siteUrl,referrals=null}) {
   async function reconcile(session) {
     const attemptId=session.metadata?.jayje_attempt_id;
     if(!attemptId || !/^[a-f0-9-]{36}$/i.test(attemptId)) return null;
@@ -32,6 +32,8 @@ export function createPortalBilling({db,stripe,service,siteUrl}) {
           stripe_payment_intent_id:paymentIntent,amount_cents:invoice.total_cents,currency:invoice.currency,paid_at:trx.fn.now()}).onConflict('invoice_id').ignore();
         await trx('jayje_documents').where({id:invoice.id}).whereNot({status:'paid'}).update({status:'paid',paid_at:trx.fn.now(),updated_at:trx.fn.now()});
         await trx('jayje_checkout_attempts').where({id:attempt.id}).update({status:'paid',updated_at:trx.fn.now()});
+        // The friend's discount is now spent and the referrer earns their credit.
+        await referrals?.settle(trx,invoice);
       } else if(attempt.status!=='paid') {
         const status=session.status==='expired'?'expired':session.status==='complete'?'pending':'open';
         await trx('jayje_checkout_attempts').where({id:attempt.id}).update({status,updated_at:trx.fn.now()});
