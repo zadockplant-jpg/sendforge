@@ -13,12 +13,30 @@ import {
   isActiveTabForgeSubscriptionStatus,
   isManageableTabForgeSubscriptionStatus,
   isTabForgeSyncEntitlement,
+  stripeCustomerNeedsReplacing,
+  stripeErrorIsMissingResource,
   TABFORGE_SUBSCRIPTION_REVOCABLE_ENTITLEMENTS,
   TABFORGE_PAST_DUE_GRACE_DAYS,
   TABFORGE_SYNC_TRIAL_DAYS,
   tabForgePastDueSince,
   tabForgeAccountBillingStatus,
 } from "../src/services/tabforgeBilling.service.js";
+
+test("a customer or price Stripe no longer knows is recognised, a transient error is not", () => {
+  assert.equal(stripeErrorIsMissingResource({ code: "resource_missing" }), true);
+  assert.equal(stripeErrorIsMissingResource({ statusCode: 404 }), true);
+  assert.equal(stripeErrorIsMissingResource(new Error("No such customer: 'cus_test_123'")), true);
+  assert.equal(stripeErrorIsMissingResource({ raw: { code: "resource_missing" } }), true);
+  assert.equal(stripeErrorIsMissingResource(new Error("Request rate limit exceeded")), false);
+  assert.equal(stripeErrorIsMissingResource({ code: "api_connection_error", statusCode: 503 }), false);
+  assert.equal(stripeErrorIsMissingResource(null), false);
+
+  assert.equal(stripeCustomerNeedsReplacing({ customer: { id: "cus_1", deleted: true } }), true);
+  assert.equal(stripeCustomerNeedsReplacing({ customer: { id: "cus_1", email: "a@b.c" } }), false);
+  assert.equal(stripeCustomerNeedsReplacing({ error: { code: "resource_missing" } }), true);
+  assert.equal(stripeCustomerNeedsReplacing({ error: new Error("timeout") }), false);
+  assert.equal(stripeCustomerNeedsReplacing(), false);
+});
 
 test("Pro checkout charges $10 once and starts a $5 monthly sync item", () => {
   const [pro, sync] = buildTabForgeProBundleLineItems();

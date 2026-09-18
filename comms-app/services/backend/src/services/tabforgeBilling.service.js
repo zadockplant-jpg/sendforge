@@ -163,6 +163,25 @@ function lineItem({ priceId, unitAmountCents, name, recurring = false }) {
   return item;
 }
 
+// Stripe reports a resource it does not know -- deleted, or created under a
+// different key, which is what a test-mode customer or price looks like once
+// the live key is in place -- as resource_missing / "No such ...".
+export function stripeErrorIsMissingResource(error) {
+  if (!error) return false;
+  const code = String(error?.code || error?.raw?.code || "");
+  if (code === "resource_missing") return true;
+  if (Number(error?.statusCode) === 404) return true;
+  return /^No such /i.test(String(error?.message || ""));
+}
+
+// A stored customer id can only go to Checkout if Stripe still has that
+// customer under the current key; otherwise the session is refused outright.
+export function stripeCustomerNeedsReplacing({ customer = null, error = null } = {}) {
+  if (customer && customer.deleted) return true;
+  if (error) return stripeErrorIsMissingResource(error);
+  return false;
+}
+
 export function buildTabForgeProBundleLineItems({
   proPriceId = "",
   syncPriceId = "",
