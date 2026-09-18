@@ -18,7 +18,9 @@ import {
   REFERRAL_REQUIRED_PRODUCT_SLUG,
   resolveReferralInviteToken,
   tiersForVerifiedCount,
-  updateUserCashAppTag,
+  updateUserCashAppTag,
+  commissionPlanForReferralCode,
+  effectiveProgramForReferrer,
 } from "../services/referrals/referral.service.js";
 import {
   EmailSendError,
@@ -580,8 +582,9 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
     const verifiedReferrals = Number(verifiedSignupCountRow?.count || 0);
     const verifiedPurchases = Number(verifiedPurchaseCountRow?.count || 0);
 
+    const referralPlan = commissionPlanForReferralCode(code);
     const programs = programRows.map((program) => {
-      const tiers = tiersForVerifiedCount(program, verifiedPurchases).map((tier) => ({
+      const tiers = tiersForVerifiedCount(effectiveProgramForReferrer(program, code), verifiedPurchases).map((tier) => ({
         requiredPurchases: tier.requiredPurchases,
         rewardAmountCents: tier.rewardAmountCents,
         recurring: Boolean(tier.recurring),
@@ -637,6 +640,7 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
         : null,
       cashAppTag: user.cash_app_tag || null,
       referredByUserId: user.referred_by_user_id || null,
+      plan: referralPlan || { mode: "milestones" },
       rule: {
         productSlug: "tabforge",
         requiredPurchases: 5,
@@ -706,7 +710,7 @@ accountRouter.post("/comp-codes/redeem", requireAuth, async (req, res) => {
   try {
     const result = await redeemCompCodeForUser({ userId: req.user.sub, code, via: "account" });
     if (!result.granted) return res.status(409).json({ error: result.reason });
-    return res.json({ ok: true, code: result.code, products: result.products });
+    return res.json({ ok: true, code: result.code, products: result.products, plan: result.plan || null });
   } catch (err) {
     log("error", "comp_code_redeem_failed", { userId: req.user.sub, message: String(err?.message || err) });
     return res.status(500).json({ error: "server_error" });

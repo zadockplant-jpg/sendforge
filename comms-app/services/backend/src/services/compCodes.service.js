@@ -20,7 +20,7 @@ export const COMP_GRANT_LABELS = Object.freeze(["TabForge Pro", "Private Sync"])
 // Seeded on every boot if missing, so the code exists as soon as the
 // service deploys; the owner dashboard can pause it or add others.
 export const DEFAULT_COMP_CODES = Object.freeze([
-  { code: "SENDIT2026", note: "Launch comp: TabForge Pro and Private Sync included at signup.", maxRedemptions: null },
+  { code: "SENDIT2026", note: "Launch comp: TabForge Pro and Private Sync included at signup.", maxRedemptions: null, commission: { mode: "per_sale", rewardAmountCents: 500 } },
 ]);
 
 export function normalizeCompCode(value) {
@@ -49,6 +49,14 @@ export function compCodeAvailability(row, redeemedCount = 0) {
   return { available: true, reason: null, remaining };
 }
 
+// The affiliate terms a comp code hands to the account that redeems it.
+export function compCodeCommission(row) {
+  const plan = row?.metadata?.commission;
+  if (!plan || typeof plan !== "object" || plan.mode !== "per_sale") return null;
+  const cents = Number(plan.rewardAmountCents);
+  return Number.isInteger(cents) && cents > 0 ? { mode: "per_sale", rewardAmountCents: cents } : null;
+}
+
 export function compCodePublicView(row, availability) {
   return {
     code: row.code,
@@ -56,7 +64,20 @@ export function compCodePublicView(row, availability) {
     reason: availability?.reason || null,
     grants: [...COMP_GRANT_LABELS],
     note: row.metadata?.note || null,
+    commission: compCodeCommission(row),
   };
+}
+
+// Copy the code's terms onto the account's own referral code, which is
+// where the reward engine reads a per-referrer plan from.
+export async function applyCompCodeCommission({ trx = db, userId, compRow }) {
+  const plan = compCodeCommission(compRow);
+  if (!plan || !userId) return null;
+  const code = await trx("referral_codes").where({ user_id: userId, status: "active" }).orderBy("created_at", "asc").first();
+  if (!code) return null;
+  const metadata = { ...(code.metadata || {}), commission: { ...plan, source: "comp_code", code: compRow.code, applied_at: new Date().toISOString() } };
+  await trx("referral_codes").where({ id: code.id }).update({ metadata, updated_at: trx.fn.now() });
+  return { ...plan, referralCode: code.code };
 }
 
 export function compCodeSignupLink(code) {
@@ -120,8 +141,9 @@ export async function redeemCompCodeForUser({ userId, code, via = "account", trx
     products.push(item?.product_slug || slug);
   }
   await ensureReferralCodeForUser(user, trx);
-  log("info", "comp_code_redeemed", { userId, code: row.code, via });
-  return { granted: true, code: row.code, products };
+  const plan = await applyCompCodeCommission({ trx, userId, compRow: row });
+  log("info", "comp_code_redeemed", { userId, code: row.code, via, plan: plan?.mode || null });
+  return { granted: true, code: row.code, products, plan };
 }
 
 export async function redeemPendingCompCodeForVerifiedUser(userId) {
@@ -137,7 +159,14 @@ export async function ensureDefaultCompCodes(trx = db) {
   for (const def of DEFAULT_COMP_CODES) {
     try {
       const existing = await trx("referral_codes").where({ code: def.code }).first();
-      if (existing) continue;
+      if (existing) {
+        // A code seeded before it carried terms picks them up here.
+        if (def.commission && !existing.metadata?.commission) {
+          await trx("referral_codes").where({ id: existing.id }).update({ metadata: { ...(existing.metadata || {}), commission: def.commission }, updated_at: trx.fn.now() });
+          log("info", "comp_code_terms_backfilled", { code: def.code });
+        }
+        continue;
+      }
       await trx("referral_codes").insert({
         id: crypto.randomUUID(),
         user_id: null,
@@ -145,7 +174,7 @@ export async function ensureDefaultCompCodes(trx = db) {
         code: def.code,
         cashapp_handle: null,
         status: "active",
-        metadata: { kind: COMP_CODE_KIND, note: def.note, max_redemptions: def.maxRedemptions ?? null, created_by: "seed" },
+        metadata: { kind: COMP_CODE_KIND, note: def.note, max_redemptions: def.maxRedemptions ?? null, commission: def.commission || null, created_by: "seed" },
         updated_at: trx.fn.now(),
       });
       log("info", "comp_code_seeded", { code: def.code });
@@ -174,12 +203,13 @@ export async function listCompCodes(trx = db) {
       createdBy: row.metadata?.created_by || null,
       createdAt: row.created_at,
       link: compCodeSignupLink(row.code),
+      perSaleRewardCents: compCodeCommission(row)?.rewardAmountCents ?? null,
     });
   }
   return items;
 }
 
-export async function upsertCompCode({ code, note, maxRedemptions, status, createdBy } = {}, trx = db) {
+export async function upsertCompCode({ code, note, maxRedemptions, status, createdBy, perSaleRewardCents } = {}, trx = db) {
   const normalized = normalizeCompCode(code);
   if (!normalized || normalized.length < 3) throw Object.assign(new Error("invalid_comp_code"), { statusCode: 400 });
   const existing = await trx("referral_codes").where({ code: normalized }).first();
@@ -194,6 +224,10 @@ export async function upsertCompCode({ code, note, maxRedemptions, status, creat
       : (Number.isInteger(limit) && limit > 0 ? limit : null),
     created_by: existing?.metadata?.created_by || createdBy || null,
   };
+  if (perSaleRewardCents !== undefined) {
+    const cents = Number(perSaleRewardCents);
+    metadata.commission = Number.isInteger(cents) && cents > 0 ? { mode: "per_sale", rewardAmountCents: cents } : null;
+  }
   const payload = { status: status || existing?.status || "active", metadata, updated_at: trx.fn.now() };
   if (existing) {
     const [row] = await trx("referral_codes").where({ id: existing.id }).update(payload).returning("*");

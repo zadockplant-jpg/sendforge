@@ -11,6 +11,7 @@ import { writeAdminAudit } from "../services/adminAudit.service.js";
 import { grantProductEntitlement, revokeProductEntitlement } from "../services/entitlement.service.js";
 import {
   cashAppTagKey,
+  commissionPlanForReferralCode,
   ensureReferralCodeForUser,
   hasReferralProgramEligibility,
   normalizeCashAppTag,
@@ -57,7 +58,7 @@ const RecurringTierSchema = z.object({ startAfterPurchases: z.number().int().min
 const ReferralProgramSchema = z.object({ productSlug: z.string().min(1), requiredPurchases: z.number().int().min(1).max(1000).optional(), rewardAmountCents: z.number().int().min(0).optional(), rewardType: z.string().min(1).max(80).optional(), refundHoldDays: z.number().int().min(0).max(365).optional(), status: z.enum(["active", "inactive", "draft"]).optional(), tiers: z.array(ReferralTierSchema).max(12).optional(), recurringTier: RecurringTierSchema.nullable().optional(), perSaleRewardCents: z.number().int().min(1).optional(), metadata: z.record(z.any()).optional() });
 const RewardBatchSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(200), status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), batchReference: z.string().max(120).optional().nullable() });
 const PerkSchema = z.object({ email: z.string().email(), note: z.string().max(500).optional().nullable() });
-const CompCodeSchema = z.object({ code: z.string().min(3).max(40), note: z.string().max(500).optional().nullable(), maxRedemptions: z.number().int().min(1).max(100000).optional().nullable(), status: z.enum(["active", "inactive"]).optional() });
+const CompCodeSchema = z.object({ code: z.string().min(3).max(40), note: z.string().max(500).optional().nullable(), maxRedemptions: z.number().int().min(1).max(100000).optional().nullable(), perSaleRewardCents: z.number().int().min(0).max(100000).optional().nullable(), status: z.enum(["active", "inactive"]).optional() });
 const CompCodeUpdateSchema = CompCodeSchema.omit({ code: true }).partial();
 const RewardStatusSchema = z.object({ status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), note: z.string().max(2000).optional().nullable(), cashappHandle: z.string().max(100).optional().nullable(), payoutReference: z.string().max(200).optional().nullable() });
 
@@ -384,6 +385,14 @@ adminRouter.get("/referrals", async (_req, res) => {
   }
 
   const catalog = Array.from(catalogMap.values()).sort((a, b) => String(b.lastActivityAt || "").localeCompare(String(a.lastActivityAt || "")));
+  // Which plan each referrer is on: the milestone programme unless their
+  // code carries per-sale terms (a comp-code affiliate).
+  const planByEmail = new Map();
+  for (const codeRow of codes) {
+    const plan = commissionPlanForReferralCode(codeRow);
+    if (plan && codeRow.email) planByEmail.set(normalizeEmail(codeRow.email), plan);
+  }
+  for (const row of catalog) row.plan = planByEmail.get(normalizeEmail(row.referrerEmail)) || { mode: "milestones" };
   res.json({ items: events, codes, events, programs, rewards, catalog });
 });
 

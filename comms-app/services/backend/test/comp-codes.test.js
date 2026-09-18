@@ -44,7 +44,9 @@ test("availability honours status, expiry and the redemption limit", () => {
   assert.deepEqual(compCodeAvailability({ code: "X", status: "active", metadata: {} }, 0), { available: false, reason: "unknown_code", remaining: null });
 
   const view = compCodePublicView(row, compCodeAvailability(row, 0));
-  assert.deepEqual(view, { code: "SENDIT2026", valid: true, reason: null, grants: ["TabForge Pro", "Private Sync"], note: null });
+  assert.deepEqual(view, { code: "SENDIT2026", valid: true, reason: null, grants: ["TabForge Pro", "Private Sync"], note: null, commission: null });
+  const withPlan = compCodePublicView({ ...row, metadata: { ...row.metadata, commission: { mode: "per_sale", rewardAmountCents: 500 } } }, compCodeAvailability(row, 0));
+  assert.deepEqual(withPlan.commission, { mode: "per_sale", rewardAmountCents: 500 }, "the signup page can say what the affiliate earns");
 });
 
 test("the code is remembered at signup, redeemed at verification, and manageable by the owner", async () => {
@@ -74,4 +76,33 @@ test("the code is remembered at signup, redeemed at verification, and manageable
   // with Pro, and comp rows have no owner.
   const referral = await src("../src/services/referrals/referral.service.js");
   assert.match(referral, /const user = code\.user_id\s*\?[\s\S]*?: null;\s*if \(\s*!user \|\|/);
+});
+
+test("a comp-code account is on a $5 per-sale plan that the reward engine and both dashboards read", async () => {
+  const { commissionPlanForReferralCode, effectiveProgramForReferrer, tiersForVerifiedCount } = await import("../src/services/referrals/referral.service.js");
+  const { compCodeCommission } = await import("../src/services/compCodes.service.js");
+
+  const launch = DEFAULT_COMP_CODES.find((c) => c.code === "SENDIT2026");
+  assert.deepEqual(launch.commission, { mode: "per_sale", rewardAmountCents: 500 });
+  assert.deepEqual(compCodeCommission({ metadata: { kind: "comp", commission: launch.commission } }), { mode: "per_sale", rewardAmountCents: 500 });
+  assert.equal(compCodeCommission({ metadata: { kind: "comp" } }), null);
+
+  const affiliateCode = { code: "AFFIL1234", metadata: { commission: { mode: "per_sale", rewardAmountCents: 500, source: "comp_code", code: "SENDIT2026" } } };
+  assert.deepEqual(commissionPlanForReferralCode(affiliateCode), { mode: "per_sale", rewardAmountCents: 500, source: "comp_code", code: "SENDIT2026" });
+  assert.equal(commissionPlanForReferralCode({ code: "PLAIN1", metadata: {} }), null, "a normal referrer stays on milestones");
+
+  const programme = { product_slug: "tabforge", status: "active", metadata: { tiers: [{ requiredPurchases: 5, rewardAmountCents: 1700 }] } };
+  const effective = effectiveProgramForReferrer(programme, affiliateCode);
+  assert.deepEqual(tiersForVerifiedCount(effective, 3).map((t) => [t.requiredPurchases, t.rewardAmountCents]), [[1, 500], [2, 500], [3, 500], [4, 500]], "every sale pays $5");
+  assert.deepEqual(tiersForVerifiedCount(effectiveProgramForReferrer(programme, { metadata: {} }), 3).map((t) => t.requiredPurchases), [5], "the programme is untouched for everyone else");
+
+  const referral = await src("../src/services/referrals/referral.service.js");
+  assert.match(referral, /tiersForVerifiedCount\(effectiveProgramForReferrer\(program, referralCode\), verifiedCount\)/, "the queue uses the referrer's plan");
+  const comp = await src("../src/services/compCodes.service.js");
+  assert.match(comp, /const plan = await applyCompCodeCommission\(\{ trx, userId, compRow: row \}\);/, "redeeming applies the terms");
+  const account = await src("../src/routes/account.routes.js");
+  assert.match(account, /plan: referralPlan \|\| \{ mode: "milestones" \}/, "the account API says which plan");
+  assert.match(account, /tiersForVerifiedCount\(effectiveProgramForReferrer\(program, code\), verifiedPurchases\)/);
+  const admin = await src("../src/routes/admin.routes.js");
+  assert.match(admin, /row\.plan = planByEmail\.get\(normalizeEmail\(row\.referrerEmail\)\) \|\| \{ mode: "milestones" \}/, "the owner catalogue says which plan");
 });

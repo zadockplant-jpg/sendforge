@@ -644,6 +644,33 @@ export function tiersForVerifiedCount(program, verifiedCount = 0) {
   return tiers.sort((a, b) => a.requiredPurchases - b.requiredPurchases);
 }
 
+// A per-referrer plan overrides the programme's tiers. Today there is one
+// kind: a flat amount on every qualified sale, which is what a comp-code
+// affiliate signs up to. It lives on the referrer's referral code, so the
+// programme row stays the default for everyone else.
+export function commissionPlanForReferralCode(referralCode) {
+  const meta = referralCode?.metadata && typeof referralCode.metadata === "object" ? referralCode.metadata : {};
+  const plan = meta.commission && typeof meta.commission === "object" ? meta.commission : null;
+  if (!plan || plan.mode !== "per_sale") return null;
+  const cents = Number(plan.rewardAmountCents ?? plan.reward_amount_cents);
+  if (!Number.isInteger(cents) || cents < 1) return null;
+  return { mode: "per_sale", rewardAmountCents: cents, source: plan.source || null, code: plan.code || null };
+}
+
+export function effectiveProgramForReferrer(program, referralCode) {
+  const plan = commissionPlanForReferralCode(referralCode);
+  if (!plan || !program) return program;
+  return {
+    ...program,
+    metadata: {
+      ...(program.metadata && typeof program.metadata === "object" ? program.metadata : {}),
+      plan: "per_sale",
+      tiers: [{ requiredPurchases: 1, rewardAmountCents: plan.rewardAmountCents }],
+      recurringTier: { startAfterPurchases: 1, everyPurchases: 1, rewardAmountCents: plan.rewardAmountCents },
+    },
+  };
+}
+
 export async function getReferralProgram(productSlug, trx = db) {
   const slug = normalizeProductSlug(productSlug);
   let program = await trx("referral_programs")
@@ -697,7 +724,8 @@ async function queueRewardsForVerifiedCount({
   qualificationRef,
 }) {
   const rewards = [];
-  const tiers = tiersForVerifiedCount(program, verifiedCount);
+  // The referrer's own plan, when they have one, decides the tiers.
+  const tiers = tiersForVerifiedCount(effectiveProgramForReferrer(program, referralCode), verifiedCount);
 
   for (const tier of tiers) {
     if (verifiedCount < tier.requiredPurchases) continue;
