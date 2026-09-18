@@ -16,6 +16,8 @@ import {
   buildTabForgeSubscriptionCheckoutOptions,
   buildTabForgeSyncLineItem,
   isManageableTabForgeSubscriptionStatus,
+  stripeCustomerNeedsReplacing,
+  stripeErrorIsMissingResource,
   isTabForgeSyncEntitlement,
   tabForgePastDueSince,
   TABFORGE_PRO_PRODUCT_SLUG,
@@ -28,6 +30,7 @@ import {
   TABFORGE_SYNC_TRIAL_DAYS,
 } from "../services/tabforgeBilling.service.js";
 import { handleStripeWebhook } from "./stripe.webhooks.routes.js";
+import { log } from "../utils/logger.js";
 
 export const billingRouter = Router();
 
@@ -229,6 +232,40 @@ function normalizeSlug(slug) {
   return String(slug || "")
     .trim()
     .toLowerCase();
+}
+
+// A configured price id is used only if Stripe knows it under the current
+// key and it is active; otherwise the line item falls back to inline price
+// data at the catalog amount, so a price created under the test key can never
+// break live checkout. Each answer is remembered for the process lifetime.
+const usablePriceIdCache = new Map();
+async function usableStripePriceId(stripe, priceId) {
+  const id = String(priceId || "").trim();
+  if (!stripe || !id) return "";
+  if (usablePriceIdCache.has(id)) return usablePriceIdCache.get(id) ? id : "";
+  try {
+    const price = await stripe.prices.retrieve(id);
+    const usable = Boolean(price?.id) && price.active !== false;
+    usablePriceIdCache.set(id, usable);
+    if (!usable) log("warn", "stripe_price_inactive", { priceId: id });
+    return usable ? id : "";
+  } catch (error) {
+    if (stripeErrorIsMissingResource(error)) {
+      usablePriceIdCache.set(id, false);
+      log("warn", "stripe_price_missing", { priceId: id, message: String(error?.message || error) });
+      return "";
+    }
+    // A transient Stripe error is not evidence against the id; keep it and
+    // let the session call decide.
+    return id;
+  }
+}
+
+async function usableTabForgePriceIds(stripe) {
+  return {
+    pro: await usableStripePriceId(stripe, env.stripePriceTabforge),
+    sync: await usableStripePriceId(stripe, env.stripePriceTabforgeSync),
+  };
 }
 
 function stripeResourceId(value) {
@@ -453,26 +490,43 @@ async function getOrCreateStripeCustomerForUser(userId) {
   const user = await getUserOrFail(userId);
 
   if (user.stripe_customer_id) {
+    // A stored id that Stripe no longer knows -- the customer was deleted, or
+    // it was created under the test key before the live key went in -- must
+    // not reach Checkout: Stripe refuses the whole session with "No such
+    // customer". Such an id is replaced below; any other hiccup keeps it.
+    let replaceCustomer = false;
     try {
       const customer = await stripe.customers.retrieve(user.stripe_customer_id);
-      if (!customer?.deleted && user.email && customer.email !== user.email) {
-        await stripe.customers.update(user.stripe_customer_id, {
-          email: user.email,
-          metadata: {
-            ...(customer.metadata || {}),
-            user_id: user.id,
-          },
-        });
+      if (stripeCustomerNeedsReplacing({ customer })) {
+        replaceCustomer = true;
+      } else if (user.email && customer.email !== user.email) {
+        try {
+          await stripe.customers.update(user.stripe_customer_id, {
+            email: user.email,
+            metadata: {
+              ...(customer.metadata || {}),
+              user_id: user.id,
+            },
+          });
+        } catch {
+          // Do not block checkout if the email refresh fails; webhook
+          // fulfillment remains authoritative.
+        }
       }
-    } catch {
-      // Do not block checkout if Stripe customer email refresh fails.
-      // Checkout still uses the stored customer ID and webhook fulfillment remains authoritative.
+    } catch (error) {
+      replaceCustomer = stripeCustomerNeedsReplacing({ error });
     }
 
-    return {
-      user,
-      customerId: user.stripe_customer_id,
-    };
+    if (!replaceCustomer) {
+      return {
+        user,
+        customerId: user.stripe_customer_id,
+      };
+    }
+    log("warn", "stripe_customer_replaced", {
+      userId: user.id,
+      previousCustomerId: user.stripe_customer_id,
+    });
   }
 
   const customer = await stripe.customers.create({
@@ -554,6 +608,7 @@ function buildLineItems({
   skins,
   quantity,
   proOnly = false,
+  priceIds = { pro: env.stripePriceTabforge, sync: env.stripePriceTabforgeSync },
 }) {
   const lineItems = [];
 
@@ -562,21 +617,21 @@ function buildLineItems({
       if (proOnly) {
         lineItems.push(
           buildTabForgeProBundleLineItems({
-            proPriceId: env.stripePriceTabforge,
+            proPriceId: priceIds.pro,
           })[0]
         );
       } else {
         lineItems.push(
           ...buildTabForgeProBundleLineItems({
-            proPriceId: env.stripePriceTabforge,
-            syncPriceId: env.stripePriceTabforgeSync,
+            proPriceId: priceIds.pro,
+            syncPriceId: priceIds.sync,
           })
         );
       }
     } else if (product.slug === TABFORGE_SYNC_PRODUCT_SLUG) {
       lineItems.push(
         buildTabForgeSyncLineItem({
-          syncPriceId: env.stripePriceTabforgeSync,
+          syncPriceId: priceIds.sync,
         })
       );
     } else {
@@ -1146,6 +1201,7 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
       proOnly,
     });
     const lineItems = buildLineItems({
+      priceIds: await usableTabForgePriceIds(stripe),
       product,
       packs,
       skins,
