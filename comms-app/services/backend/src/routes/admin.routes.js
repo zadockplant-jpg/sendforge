@@ -11,9 +11,20 @@ import { writeAdminAudit } from "../services/adminAudit.service.js";
 import { grantProductEntitlement, revokeProductEntitlement } from "../services/entitlement.service.js";
 import {
   cashAppTagKey,
+  ensureReferralCodeForUser,
   hasReferralProgramEligibility,
   normalizeCashAppTag,
 } from "../services/referrals/referral.service.js";
+import {
+  PERK_ENTITLEMENT_SLUGS,
+  PERK_ENTITLEMENT_SOURCE,
+  batchPayoutReference,
+  commissionSummary,
+  groupPerkAccounts,
+  perSaleCommission,
+  perkEntitlementMetadata,
+  programMetadataFromInput,
+} from "../services/adminReferralControls.service.js";
 import { adminLiveTestingRouter } from "./admin.liveTesting.routes.js";
 import { liveTestingEnabledFor, liveTestingOwnerEmail } from "../services/adminLiveTesting.service.js";
 import { getRequestId, log, sanitizeEmail } from "../utils/logger.js";
@@ -41,7 +52,10 @@ const ProductUpdateSchema = ProductSchema.omit({ slug: true }).partial();
 const EntitlementSchema = z.object({ email: z.string().email(), productSlug: z.string().min(1), metadata: z.record(z.any()).optional() });
 const ReferralCodeSchema = z.object({ email: z.string().email().optional().nullable(), code: z.string().min(3).max(40).optional(), cashappHandle: z.string().max(100).optional().nullable(), metadata: z.record(z.any()).optional() });
 const ReferralTierSchema = z.object({ requiredPurchases: z.number().int().min(1).max(1000), rewardAmountCents: z.number().int().min(0) });
-const ReferralProgramSchema = z.object({ productSlug: z.string().min(1), requiredPurchases: z.number().int().min(1).max(1000).optional(), rewardAmountCents: z.number().int().min(0).optional(), rewardType: z.string().min(1).max(80).optional(), refundHoldDays: z.number().int().min(0).max(365).optional(), status: z.enum(["active", "inactive", "draft"]).optional(), tiers: z.array(ReferralTierSchema).max(12).optional(), metadata: z.record(z.any()).optional() });
+const RecurringTierSchema = z.object({ startAfterPurchases: z.number().int().min(1).max(1000), everyPurchases: z.number().int().min(1).max(1000), rewardAmountCents: z.number().int().min(1) });
+const ReferralProgramSchema = z.object({ productSlug: z.string().min(1), requiredPurchases: z.number().int().min(1).max(1000).optional(), rewardAmountCents: z.number().int().min(0).optional(), rewardType: z.string().min(1).max(80).optional(), refundHoldDays: z.number().int().min(0).max(365).optional(), status: z.enum(["active", "inactive", "draft"]).optional(), tiers: z.array(ReferralTierSchema).max(12).optional(), recurringTier: RecurringTierSchema.nullable().optional(), perSaleRewardCents: z.number().int().min(1).optional(), metadata: z.record(z.any()).optional() });
+const RewardBatchSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(200), status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), batchReference: z.string().max(120).optional().nullable() });
+const PerkSchema = z.object({ email: z.string().email(), note: z.string().max(500).optional().nullable() });
 const RewardStatusSchema = z.object({ status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), note: z.string().max(2000).optional().nullable(), cashappHandle: z.string().max(100).optional().nullable(), payoutReference: z.string().max(200).optional().nullable() });
 
 const loginLimiter = createRateLimiter({ name: "admin-login", windowMs: 60 * 1000, max: 5, keyGenerator: rateLimitByIpAndBodyEmail, message: "too_many_admin_login_attempts" });
@@ -388,33 +402,42 @@ adminRouter.post("/referrals/codes", writeLimiter, async (req, res) => {
 
 adminRouter.get("/referrals/programs", async (_req, res) => {
   const rows = await db("referral_programs").orderBy("product_slug", "asc");
-  res.json({ items: rows });
+  res.json({ items: rows.map((row) => ({ ...row, commission: commissionSummary(row) })) });
 });
 
 adminRouter.post("/referrals/programs", writeLimiter, async (req, res) => {
   const parsed = ReferralProgramSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
   const p = parsed.data;
-  const tiers = Array.isArray(p.tiers) && p.tiers.length
-    ? p.tiers
-    : [
-        { requiredPurchases: p.requiredPurchases || 5, rewardAmountCents: p.rewardAmountCents ?? 1700 },
-        { requiredPurchases: 15, rewardAmountCents: 3500 },
-        { requiredPurchases: 25, rewardAmountCents: 4000 },
-        { requiredPurchases: 50, rewardAmountCents: 15000 },
-      ];
+  // "$X per sale" is one intent that becomes a first-purchase milestone plus
+  // the same amount on every purchase after it; explicit tiers and an
+  // optional recurring rule cover the milestone programme.
+  const perSale = p.perSaleRewardCents ? perSaleCommission(p.perSaleRewardCents) : null;
+  const tiers = perSale
+    ? perSale.tiers
+    : Array.isArray(p.tiers) && p.tiers.length
+      ? p.tiers
+      : [
+          { requiredPurchases: p.requiredPurchases || 5, rewardAmountCents: p.rewardAmountCents ?? 1700 },
+          { requiredPurchases: 15, rewardAmountCents: 3500 },
+          { requiredPurchases: 25, rewardAmountCents: 4000 },
+          { requiredPurchases: 50, rewardAmountCents: 15000 },
+        ];
+  const recurringTier = perSale ? perSale.recurringTier : p.recurringTier;
   const primaryTier = tiers[0];
   const holdDays = referralPayoutHoldDays(p.productSlug, p.refundHoldDays);
-  const metadata = {
-    ...(p.metadata || {}),
-    qualification: (p.metadata || {}).qualification || "verified_purchase",
-    payout_hold_days: holdDays,
-    payout_hold_reason: "Fraud/refund verification window before manual Cash App payout.",
+  const existingProgram = await db("referral_programs").where({ product_slug: normalizeSlug(p.productSlug) }).first();
+  const metadata = programMetadataFromInput({
+    existingMetadata: existingProgram?.metadata,
     tiers,
-  };
+    recurringTier,
+    holdDays,
+    qualification: (p.metadata || {}).qualification,
+    extra: p.metadata || {},
+  });
   const rows = await db("referral_programs").insert({ id: crypto.randomUUID(), product_slug: normalizeSlug(p.productSlug), required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: holdDays, status: p.status || "active", metadata, updated_at: db.fn.now() }).onConflict("product_slug").merge({ required_purchases: primaryTier.requiredPurchases, reward_amount_cents: primaryTier.rewardAmountCents, reward_type: p.rewardType || "cashapp_manual", refund_hold_days: holdDays, status: p.status || "active", metadata, updated_at: db.fn.now() }).returning("*");
-  await writeAdminAudit(req, { action: "referral_program.upsert", resourceType: "referral_program", resourceId: normalizeSlug(p.productSlug), afterValue: rows[0] });
-  res.json({ item: rows[0] });
+  await writeAdminAudit(req, { action: "referral_program.upsert", resourceType: "referral_program", resourceId: normalizeSlug(p.productSlug), beforeValue: existingProgram || null, afterValue: rows[0] });
+  res.json({ item: rows[0], commission: commissionSummary(rows[0]) });
 });
 
 adminRouter.get("/rewards", async (_req, res) => {
@@ -438,10 +461,11 @@ adminRouter.get("/rewards", async (_req, res) => {
   res.json({ items: rows.map((row) => enrichReward(row, programMap)) });
 });
 
-async function updateRewardStatus(req, res) {
-  const parsed = RewardStatusSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
-  const target = parsed.data.status;
+// The status change itself, shared by the single-row route and the batch
+// route. It throws rewardStatusError for every rule it enforces, so both
+// callers report the same codes.
+async function applyRewardStatusChange(req, rewardId, data) {
+  const target = data.status;
   const allowedTransitions = {
     pending: new Set(["approved", "paid", "rejected"]),
     approved: new Set(["pending", "paid", "rejected"]),
@@ -449,12 +473,11 @@ async function updateRewardStatus(req, res) {
     paid: new Set(),
   };
 
-  try {
-    const result = await db.transaction(async (trx) => {
+  return db.transaction(async (trx) => {
       // Read enough identity to lock qualifying purchase rows before the reward
       // row. Refund/dispute handling uses the same event-then-reward order.
       const snapshot = await trx("reward_queue")
-        .where({ id: req.params.id })
+        .where({ id: rewardId })
         .first();
       if (!snapshot) {
         throw rewardStatusError(404, "reward_not_found");
@@ -500,15 +523,15 @@ async function updateRewardStatus(req, res) {
       }
 
       const adminNote =
-        parsed.data.adminNote ??
-        parsed.data.note ??
+        data.adminNote ??
+        data.note ??
         existing.admin_note;
       if (target === "rejected" && !String(adminNote || "").trim()) {
         throw rewardStatusError(400, "rejection_note_required");
       }
 
       let cashAppHandle = normalizeCashAppTag(
-        parsed.data.cashappHandle ?? existing.cashapp_handle
+        data.cashappHandle ?? existing.cashapp_handle
       );
       if (!cashAppHandle && existing.user_id) {
         const owner = await trx("users")
@@ -582,7 +605,7 @@ async function updateRewardStatus(req, res) {
       }
 
       const payoutReference =
-        String(parsed.data.payoutReference || "").trim() ||
+        String(data.payoutReference || "").trim() ||
         (target === "paid" ? `manual:${existing.id}` : "");
       const update = {
         status: target,
@@ -629,19 +652,27 @@ async function updateRewardStatus(req, res) {
         trx
       );
       return { item: rows[0] };
-    });
-    return res.json(result);
+  });
+}
+
+function rewardStatusErrorPayload(err) {
+  if (err?.statusCode && err?.responseBody) return { statusCode: err.statusCode, body: err.responseBody };
+  if (err?.code === "23505") return { statusCode: 409, body: { error: "payout_reference_already_used" } };
+  return null;
+}
+
+async function updateRewardStatus(req, res) {
+  const parsed = RewardStatusSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
+  try {
+    return res.json(await applyRewardStatusChange(req, req.params.id, parsed.data));
   } catch (err) {
-    if (err?.statusCode && err?.responseBody) {
-      return res.status(err.statusCode).json(err.responseBody);
-    }
-    if (err?.code === "23505") {
-      return res.status(409).json({ error: "payout_reference_already_used" });
-    }
+    const known = rewardStatusErrorPayload(err);
+    if (known) return res.status(known.statusCode).json(known.body);
     log("error", "admin_reward_update_failed", {
       requestId: getRequestId(req),
       rewardId: req.params.id,
-      target,
+      target: parsed.data.status,
       code: err?.code,
       message: String(err?.message || err),
     });
@@ -649,8 +680,116 @@ async function updateRewardStatus(req, res) {
   }
 }
 
+
+
 adminRouter.patch("/rewards/:id", writeLimiter, updateRewardStatus);
 adminRouter.put("/rewards/:id", writeLimiter, updateRewardStatus);
+
+// One Cash App run, one call: mark a batch of payouts paid (or approve or
+// reject several) without clicking through rows. Each reward is applied on
+// its own so one failure never blocks the rest, and the response names
+// which ids changed and which did not, with the single-row error codes.
+adminRouter.post("/rewards/batch", writeLimiter, async (req, res) => {
+  const parsed = RewardBatchSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
+  const { ids, status, adminNote, batchReference } = parsed.data;
+  const results = [];
+  for (const id of [...new Set(ids)]) {
+    try {
+      const result = await applyRewardStatusChange(req, id, {
+        status,
+        adminNote: adminNote ?? undefined,
+        payoutReference: status === "paid" ? batchPayoutReference(batchReference, id) : undefined,
+      });
+      results.push({ id, ok: true, unchanged: Boolean(result.unchanged), item: result.item });
+    } catch (err) {
+      const known = rewardStatusErrorPayload(err);
+      if (!known) {
+        log("error", "admin_reward_batch_item_failed", { requestId: getRequestId(req), rewardId: id, target: status, code: err?.code, message: String(err?.message || err) });
+      }
+      results.push({ id, ok: false, error: known?.body?.error || "server_error", detail: known?.body || null });
+    }
+  }
+  const changed = results.filter((row) => row.ok && !row.unchanged).map((row) => row.id);
+  const failed = results.filter((row) => !row.ok).map((row) => row.id);
+  await writeAdminAudit(req, { action: `reward.batch.${status}`, resourceType: "reward_queue", resourceId: batchReference || null, afterValue: { ids, changed, failed }, metadata: { batchReference: batchReference || null } });
+  res.json({ status, batchReference: batchReference || null, changed: changed.length, failed: failed.length, results });
+});
+
+// Perk accounts: TabForge Pro and Private Sync without a purchase. They are
+// ordinary entitlements with a perk marker, so referral eligibility, sync
+// access and the account page all see a normal owner. The person must have
+// created a SendForge account first; the grant is by email.
+adminRouter.get("/perks", async (_req, res) => {
+  const rows = await db("product_entitlements as e")
+    .leftJoin("users as u", "e.user_id", "u.id")
+    .select("e.*", "u.email as email")
+    .where((builder) => {
+      builder.where("e.source", PERK_ENTITLEMENT_SOURCE).orWhereRaw("e.metadata->>'perk' = 'true'");
+    })
+    .orderBy("e.granted_at", "desc")
+    .limit(2000);
+  const userIds = [...new Set(rows.map((row) => row.user_id).filter(Boolean))];
+  const codes = userIds.length
+    ? await db("referral_codes").whereIn("user_id", userIds).where({ status: "active" }).orderBy("created_at", "asc")
+    : [];
+  const codeByUser = new Map();
+  for (const code of codes) if (!codeByUser.has(code.user_id)) codeByUser.set(code.user_id, code.code);
+  res.json({ items: groupPerkAccounts(rows.map((row) => ({ ...row, referral_code: codeByUser.get(row.user_id) || null }))) });
+});
+
+adminRouter.post("/perks/grant", writeLimiter, async (req, res) => {
+  const parsed = PerkSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
+  try {
+    const user = await requireTargetUserByEmail(parsed.data.email);
+    const metadata = perkEntitlementMetadata({ adminEmail: req.admin.email, note: parsed.data.note });
+    const items = [];
+    for (const slug of PERK_ENTITLEMENT_SLUGS) {
+      items.push(await grantProductEntitlement({ userId: user.id, productSlug: slug, source: PERK_ENTITLEMENT_SOURCE, sourceRef: req.admin.email, metadata }));
+    }
+    const referralCode = await ensureReferralCodeForUser(user);
+    await writeAdminAudit(req, { action: "perk.grant", resourceType: "user", resourceId: user.id, afterValue: { email: user.email, products: [...PERK_ENTITLEMENT_SLUGS], note: metadata.note } });
+    return res.json({
+      account: {
+        userId: user.id,
+        email: user.email,
+        products: items.map((item) => item?.product_slug).filter(Boolean),
+        referralCode: referralCode?.code || null,
+        note: metadata.note,
+        grantedBy: metadata.granted_by,
+        grantedAt: metadata.granted_at,
+        active: true,
+      },
+    });
+  } catch (err) {
+    if (err?.statusCode === 404) return res.status(404).json({ error: "user_not_found", message: "No SendForge account uses that email yet. Have them create one first." });
+    log("error", "admin_perk_grant_failed", { requestId: getRequestId(req), email: sanitizeEmail(parsed.data.email), message: String(err?.message || err) });
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+adminRouter.post("/perks/revoke", writeLimiter, async (req, res) => {
+  const parsed = PerkSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
+  try {
+    const user = await requireTargetUserByEmail(parsed.data.email);
+    const metadata = { perk: true, revoked_by: req.admin.email, revoked_at: new Date().toISOString(), note: String(parsed.data.note || "").trim() || null };
+    const items = [];
+    for (const slug of PERK_ENTITLEMENT_SLUGS) {
+      const existing = await db("product_entitlements").where({ user_id: user.id, product_slug: slug }).first();
+      if (existing && (existing.source === PERK_ENTITLEMENT_SOURCE || existing.metadata?.perk === true)) {
+        items.push(await revokeProductEntitlement(user.id, slug, metadata));
+      }
+    }
+    await writeAdminAudit(req, { action: "perk.revoke", resourceType: "user", resourceId: user.id, afterValue: { email: user.email, products: items.map((item) => item?.product_slug).filter(Boolean), note: metadata.note } });
+    return res.json({ account: { userId: user.id, email: user.email, products: items.map((item) => item?.product_slug).filter(Boolean), active: false } });
+  } catch (err) {
+    if (err?.statusCode === 404) return res.status(404).json({ error: "user_not_found" });
+    log("error", "admin_perk_revoke_failed", { requestId: getRequestId(req), email: sanitizeEmail(parsed.data.email), message: String(err?.message || err) });
+    return res.status(500).json({ error: "server_error" });
+  }
+});
 
 adminRouter.get("/attribution/clicks", async (_req, res) => {
   const rows = await db("attribution_clicks").orderBy("created_at", "desc").limit(500);

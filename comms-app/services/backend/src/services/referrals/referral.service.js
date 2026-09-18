@@ -601,7 +601,7 @@ export function tiersFromProgram(program) {
     .sort((a, b) => a.requiredPurchases - b.requiredPurchases);
 }
 
-function recurringTierFromProgram(program) {
+export function recurringTierFromProgram(program) {
   const slug = normalizeProductSlug(program?.product_slug);
   const meta = program?.metadata && typeof program.metadata === "object" ? program.metadata : {};
   const raw = meta.recurringTier && typeof meta.recurringTier === "object" ? meta.recurringTier : null;
