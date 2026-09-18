@@ -5,13 +5,14 @@ import Stripe from 'stripe';
 import { z } from 'zod';
 import { db } from '../../config/db.js';
 import { authRouter } from '../../routes/auth.routes.js';
-import { adminRouter } from '../../routes/admin.routes.js';
-import { verifyCustomerAccessToken,verifyAdminAccessToken,getCurrentCustomerAuthState,customerTokenMatchesUser,adminTokenMatchesUser } from '../../services/auth.service.js';
+import { verifyCustomerAccessToken,getCurrentCustomerAuthState,customerTokenMatchesUser } from '../../services/auth.service.js';
+import { sendJayjeAdminCodeEmail } from '../../services/email.service.js';
 import { adminWritesEnabled } from '../../middleware/adminAuth.js';
 import { secureEqual } from '../jayje/router.js';
 import { createPortalService,fail } from './service.js';
+import { createJayjeAdminAuth,verifyJayjeAdminToken,isJayjeAdmin } from './admin-auth.js';
 import { createPortalBilling } from './billing.js';
-import { createGoogleAuth,googleReady,allowedAdmin } from './google.js';
+import { createGoogleAuth,googleReady } from './google.js';
 import { documentPdf } from './pdf.js';
 import { createPortalState } from './state.js';
 import { createReferrals } from './referrals.js';
@@ -23,6 +24,7 @@ const referrals=createReferrals({db,siteUrl,mail:createInviteMailer()});
 const service=createPortalService(db,referrals);
 const stateStore=createPortalState(db);
 const google=createGoogleAuth({db,stateStore});
+const adminAuth=createJayjeAdminAuth({db,sendCode:sendJayjeAdminCodeEmail});
 let stripe;
 function billing() {
   if(!process.env.STRIPE_SECRET_KEY || !process.env.JAYJE_STRIPE_WEBHOOK_SECRET)throw fail(503,'billing_unavailable');
@@ -33,10 +35,12 @@ async function identity(req,required=true) {
   const token=req.get('Authorization')?.replace(/^Bearer /,'');
   if(!token){if(required)throw fail(401,'sign_in_required');return null;}
   let payload,role='client';
-  try{payload=verifyCustomerAccessToken(token);}catch{try{payload=verifyAdminAccessToken(token);role='admin';}catch{throw fail(401,'session_expired');}}
+  // Only shared customer sessions and JayJe admin sessions are read here; a SendForge admin token is turned away.
+  try{payload=verifyCustomerAccessToken(token);}catch{try{payload=verifyJayjeAdminToken(token);role='admin';}catch{throw fail(401,'session_expired');}}
   const user=await getCurrentCustomerAuthState(payload.sub);
-  if(!(role==='admin'?adminTokenMatchesUser(payload,user):customerTokenMatchesUser(payload,user)))throw fail(401,'session_expired');
-  if(role==='admin' && !allowedAdmin(user.email))throw fail(403,'admin_not_authorized');
+  // Both roles are tied to the shared account state, so a password or auth_version change ends the session.
+  if(!customerTokenMatchesUser(payload,user))throw fail(401,'session_expired');
+  if(role==='admin' && !isJayjeAdmin(user.email))throw fail(403,'admin_not_authorized');
   return {...payload,sub:user.id,email:user.email,role};
 }
 export const jayjePortalRouter=express.Router();
@@ -70,10 +74,17 @@ jayjePortalRouter.use('/auth',(req,res,next)=>{
   req.body=Object.fromEntries(['email','password','token'].filter(k=>typeof req.body?.[k]==='string').map(k=>[k,req.body[k]]));
   authRouter(req,res,next);
 });
-jayjePortalRouter.use('/admin/auth',(req,res,next)=>{
-  if(req.method!=='POST'||!['/login','/verify'].includes(req.path))return res.status(404).json({error:'not_found'});
-  req.url=`/auth${req.url}`;adminRouter(req,res,next);
+// Per-account caps on top of the per-address bucket above: guesses at one admin email or one
+// challenge are counted together wherever they come from, so a pool of addresses gains nothing.
+const accountLimit=(scope,field,max)=>wrap(async(req,_res,next)=>{
+  const value=typeof req.body?.[field]==='string'?req.body[field].trim().toLowerCase().slice(0,254):'';
+  if(value && await stateStore.rate(createHash('sha256').update(`${process.env.JAYJE_PROXY_SECRET}:${scope}:${value}`).digest('hex'))>max)throw fail(429,'too_many_requests');
+  next();
 });
+// JayJe's own admin sign-in: password, then a six-digit code mailed to the JayJe admin inbox. Nothing else under /admin exists here.
+jayjePortalRouter.post('/admin/auth/login',accountLimit('admin-login','email',5),wrap(async(req,res)=>res.json(await adminAuth.login(req.body))));
+jayjePortalRouter.post('/admin/auth/verify',accountLimit('admin-verify','challengeId',8),wrap(async(req,res)=>res.json(await adminAuth.verify(req.body))));
+jayjePortalRouter.use('/admin/auth',(_req,res)=>res.status(404).json({error:'not_found'}));
 jayjePortalRouter.post('/google/start',wrap(async(req,res)=>res.json(await google.start({origin:req.get('X-Jayje-Origin'),mode:req.body?.mode,actor:await identity(req,false)}))));
 jayjePortalRouter.post('/google/callback',wrap(async(req,res)=>res.json(await google.callback({...req.body,origin:req.get('X-Jayje-Origin'),actor:await identity(req,false)}))));
 jayjePortalRouter.use(wrap(async(req,_res,next)=>{

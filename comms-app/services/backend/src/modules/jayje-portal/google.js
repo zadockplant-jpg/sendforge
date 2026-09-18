@@ -1,12 +1,12 @@
-import { randomBytes,randomUUID,createHash,randomInt } from 'node:crypto';
+import { randomBytes,randomUUID,createHash } from 'node:crypto';
 import bcrypt from 'bcrypt';
 import { OAuth2Client } from 'google-auth-library';
 import { issueCustomerAccessToken } from '../../services/auth.service.js';
-import { sendAdminMfaCodeEmail } from '../../services/email.service.js';
+import { sendJayjeAdminCodeEmail } from '../../services/email.service.js';
 import { fail } from './service.js';
+import { isJayjeAdmin,startAdminChallenge } from './admin-auth.js';
 
 export const googleReady=()=>Boolean(process.env.JAYJE_GOOGLE_CLIENT_ID && process.env.JAYJE_GOOGLE_CLIENT_SECRET);
-export const allowedAdmin=email=>String(process.env.ADMIN_ALLOWED_EMAILS||process.env.ADMIN_EMAIL||'zadockplant@gmail.com').split(',').map(s=>s.trim().toLowerCase()).includes(email.toLowerCase());
 export function validateGoogleIdentity(payload,nonce) {
   if(!payload?.sub || !payload.email || payload.email_verified!==true || payload.nonce!==nonce || !['accounts.google.com','https://accounts.google.com'].includes(payload.iss))throw fail(401,'google_identity_invalid');
   return {subject:payload.sub,email:payload.email.toLowerCase()};
@@ -47,18 +47,17 @@ export function createGoogleAuth({db,stateStore}) {
         if(linked) return trx('users').where({id:linked.user_id}).first();
         const existing=await trx('users').whereRaw('lower(email) = ?',[identity.email]).first();
         if(existing)throw fail(409,'google_link_required');
-        if(data.mode==='admin')throw fail(403,'admin_not_authorized');
+        // A JayJe admin may create their account with Google on first sign-in; anyone else must use the client flow.
+        if(data.mode==='admin' && !isJayjeAdmin(identity.email))throw fail(403,'admin_not_authorized');
         const [created]=await trx('users').insert({id:randomUUID(),email:identity.email,password_hash:await bcrypt.hash(randomBytes(48).toString('hex'),12),email_verified:true,verified_at:trx.fn.now()}).returning('*');
         await trx('jayje_google_identities').insert({subject:identity.subject,user_id:created.id});return created;
       });
       if(!user?.email_verified)throw fail(403,'email_not_verified');
       if(data.mode==='link')return {linked:true};
       if(data.mode==='admin') {
-        if(!allowedAdmin(user.email))throw fail(403,'admin_not_authorized');
-        const code=String(randomInt(100000,1000000)),challengeId=randomUUID();
-        await db('admin_mfa_codes').insert({id:challengeId,user_id:user.id,email:user.email,code_hash:createHash('sha256').update(code).digest('hex'),purpose:'admin_login',expires_at:new Date(Date.now()+300000),metadata:{source:'jayje_google'}});
-        await sendAdminMfaCodeEmail({to:process.env.ADMIN_MFA_EMAIL||user.email,code,requestId:challengeId});
-        return {challengeId};
+        if(!isJayjeAdmin(user.email))throw fail(403,'admin_not_authorized');
+        // Same challenge as the password path: a code that cannot be mailed is reported as code_delivery_failed and leaves no row.
+        return startAdminChallenge({db,sendCode:sendJayjeAdminCodeEmail,user,source:'jayje_google'});
       }
       return {token:issueCustomerAccessToken({id:user.id,email:user.email,authVersion:user.auth_version||0})};
     },

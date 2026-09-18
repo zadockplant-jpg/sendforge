@@ -1,8 +1,9 @@
 # JayJe account portal
 
-JayJe uses the existing SendForge users, password verification, signed customer
-sessions, admin allowlist, and admin email-code verification. The account UI lives
-at `https://jayje.com/account/`. TabForge and SendForge product billing is unchanged.
+JayJe uses the existing SendForge users, password verification and signed customer
+sessions. Admin sign-in is JayJe's own: its allowlist, emailed code and session are
+separate from SendForge's admin. The account UI lives at
+`https://jayje.com/account/`. TabForge and SendForge product billing is unchanged.
 
 ## Configuration
 
@@ -17,9 +18,37 @@ Required backend settings:
 - `JAYJE_ALLOWED_ORIGINS=https://jayje.com,https://www.jayje.com`
 - `STRIPE_SECRET_KEY`: existing Stripe account key; keep unchanged.
 - `JAYJE_STRIPE_WEBHOOK_SECRET`: signing secret for the separate JayJe endpoint.
+- `JAYJE_ADMIN_EMAILS`: comma-separated JayJe admin accounts
+  (default `paul@jayje.com,zadockplant@gmail.com`).
+- `JAYJE_ADMIN_CODE_EMAIL`: inbox that receives every admin sign-in code
+  (default: the admin's own address; set it to `paul@jayje.com`).
 
 Public service-request intake remains independently controlled by `JAYJE_ENABLED`
 and its configured notification inbox. Enabling the portal does not enable intake.
+
+## Admin sign-in
+
+An admin signs in at `jayje.com/account` with a password or with Google. Either
+way the portal mails a six-digit code to `JAYJE_ADMIN_CODE_EMAIL`, and the session
+starts only once that code is entered. A code lasts 5 minutes, allows 5 attempts
+and is used once. The session is a JayJe-scoped token: SendForge's admin API
+rejects it, and the portal rejects SendForge admin tokens, so neither sign-in
+opens the other.
+
+`paul@jayje.com` must exist as a verified account before it can sign in as admin:
+register on `jayje.com/account` and confirm the email, or sign in with Google once.
+
+Sign-in attempts are capped per visitor address (20 a minute across the auth
+routes) and, on top of that, per admin email (5 password attempts a minute) and
+per challenge (8 code attempts a minute), so spreading guesses over many
+addresses does not help. Both caps answer `429 too_many_requests`.
+
+The code is mailed through SendGrid from the configured JayJe sender. If SendGrid
+refuses the send, both the
+password and Google paths answer `503 code_delivery_failed`, the challenge row is
+removed and no admin session can start. Admin sign-in therefore depends on
+SendGrid sending being enabled for the key in `SENDGRID_API_KEY`; the service
+request intake shares that dependency.
 
 ## Payments
 
@@ -85,7 +114,7 @@ The server uses state, nonce, PKCE, Google-issued ID-token validation and a
 ten-minute single-use PostgreSQL transaction. An existing shared account must first
 sign in and select **Link Google** with the same email. Matching an email alone
 never silently links an existing account. Admin Google sign-in still requires the
-shared email-code challenge. Essential session cookies are Secure, HttpOnly and
+JayJe email-code challenge. Essential session cookies are Secure, HttpOnly and
 SameSite=Lax. Pages requires a same-origin Origin header for mutations and never
 accepts a browser-provided Authorization header.
 

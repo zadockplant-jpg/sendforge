@@ -119,7 +119,8 @@ async function sendEmailViaSendGrid({
 }) {
   const senderEmail = fromEmail || accountFromEmail();
   const senderName = fromName || accountFromName();
-  const sgKey = process.env.SENDGRID_API_KEY;
+  // Trimmed like jayje/config.js, so both senders read the same key from a pasted value.
+  const sgKey = String(process.env.SENDGRID_API_KEY || "").trim();
 
   if (!senderEmail || !sgKey) {
     log("warn", "email_send_skipped_not_configured", {
@@ -510,6 +511,35 @@ If you did not request this, secure your account immediately.`;
     fromEmail: process.env.ADMIN_FROM_EMAIL || process.env.SENDGRID_FROM_EMAIL || process.env.VERIFY_FROM_EMAIL,
     fromName: process.env.ADMIN_FROM_NAME || process.env.SENDGRID_FROM_NAME || "SendForge Admin",
     messageKind: "admin-mfa",
+    messageRef: requestId,
+  });
+}
+export async function sendJayjeAdminCodeEmail({ to, code, requestId }) {
+  const subject = "Your JayJe admin sign-in code";
+  const text = `Your JayJe admin sign-in code is ${code}.
+
+This code expires in 5 minutes.
+
+If you did not request this, secure your account immediately.`;
+  const html = `
+    <div style="font-family: system-ui; line-height: 1.5;">
+      <h2>JayJe admin sign-in</h2>
+      <p>Your admin sign-in code is:</p>
+      <p style="font-size:28px;font-weight:800;letter-spacing:4px;">${escapeHtml(code)}</p>
+      <p>This code expires in 5 minutes.</p>
+      <p style="font-size:12px;color:#666;">If you did not request this, secure your account immediately.</p>
+    </div>
+  `;
+
+  return sendEmailViaSendGrid({
+    to,
+    subject,
+    text,
+    html,
+    requestId,
+    fromEmail: process.env.JAYJE_FROM_EMAIL || process.env.CONTACT_FROM_EMAIL || process.env.ACCOUNT_FROM_EMAIL || process.env.SENDGRID_FROM_EMAIL,
+    fromName: "JayJe",
+    messageKind: "jayje-admin-code",
     messageRef: requestId,
   });
 }

@@ -67,6 +67,20 @@ test('drafts stay private, clients cannot issue or void; accepted quotes convert
   const converted=await Promise.all([service.action(admin,quote.id,'convert'),service.action(admin,quote.id,'convert')]);
   assert.equal(converted[0].id,converted[1].id);assert.equal(converted[0].total_cents,quote.total_cents);assert.equal(converted[0].status,'draft');
 });
+test('admin can invoice a sent quote before the client accepts it',async()=>{
+  const draft=await service.createDocument(admin,input({kind:'quote'}));
+  await assert.rejects(service.action(admin,draft.id,'convert'),{status:409,publicCode:'document_action_unavailable'});
+  const quote=await service.action(admin,draft.id,'issue');assert.equal(quote.status,'sent');
+  const inv=await service.action(admin,quote.id,'convert');
+  assert.equal(inv.kind,'invoice');assert.equal(inv.status,'draft');assert.equal(inv.source_quote_id,quote.id);
+  assert.deepEqual(inv.items,quote.items);assert.equal(inv.total_cents,quote.total_cents);
+  assert.equal((await service.action(admin,quote.id,'convert')).id,inv.id);
+  assert.equal((await db('jayje_documents').where({source_quote_id:quote.id})).length,1);
+  assert.equal((await db('jayje_documents').where({id:quote.id}).first()).status,'sent');
+  const declined=await service.action(admin,(await service.createDocument(admin,input({kind:'quote'}))).id,'issue');
+  await service.action(alice,declined.id,'decline');
+  await assert.rejects(service.action(admin,declined.id,'convert'),{status:409,publicCode:'document_action_unavailable'});
+});
 test('both sides can message and retries preserve exactly one message without key substitution',async()=>{
   const data={body:'Can we use warm white fixtures?',request_key:randomUUID()};
   const all=await Promise.all([service.sendMessage(alice,client.id,data),service.sendMessage(alice,client.id,data)]);

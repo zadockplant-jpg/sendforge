@@ -128,7 +128,8 @@ export function createPortalService(db,referrals=null) {
           const active=await trx('jayje_checkout_attempts').where({invoice_id:id}).whereIn('status',['creating','open','pending']).first();
           if(active) throw fail(409,'checkout_active_wait_for_expiry');
           await referrals?.release(trx,row);status='void';
-        } else if(action==='convert' && actor.role==='admin' && row.kind==='quote' && row.status==='accepted') {
+        } else if(action==='convert' && actor.role==='admin' && row.kind==='quote' && ['sent','accepted'].includes(row.status)) {
+          // The owner may invoice a sent quote without waiting for the client's Accept.
           const existing=await trx('jayje_documents').where({source_quote_id:id}).first();if(existing)return existing;
           const {created_at,updated_at,issued_at,paid_at,...copy}=row;
           const [invoice]=await trx('jayje_documents').insert({...copy,id:randomUUID(),kind:'invoice',status:'draft',due_date:null,created_by:actor.sub,source_quote_id:id,

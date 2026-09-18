@@ -19,7 +19,7 @@ export function getJayjeConfig(environment = process.env) {
     toEmail: environment.JAYJE_CONTACT_TO_EMAIL || '',
     fromEmail: environment.JAYJE_FROM_EMAIL || environment.CONTACT_FROM_EMAIL || environment.ACCOUNT_FROM_EMAIL || environment.SENDGRID_FROM_EMAIL || '',
     fromName: (environment.JAYJE_FROM_NAME || 'JayJe service requests').replace(/[\r\n]/g,' ').slice(0,100),
-    sendgridKey: environment.SENDGRID_API_KEY || '',
+    sendgridKey: (environment.SENDGRID_API_KEY || '').trim(),
     bodyLimit: '24kb',
   });
 }
