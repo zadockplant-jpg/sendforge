@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { db } from "../config/db.js";
 import { requireAuth } from "../middleware/auth.js";
+import { compCodePublicView, compCodeStatus, redeemCompCodeForUser } from "../services/compCodes.service.js";
 import {
   getActivePlan,
   listProductEntitlements,
@@ -676,6 +677,39 @@ accountRouter.get("/referrals", requireAuth, async (req, res) => {
       error: "server_error",
       message: String(err?.message || err),
     });
+  }
+});
+
+/**
+ * GET /v1/account/comp-codes/:code
+ * Public: tells the signup page whether a code in the referral box is a
+ * comp code, so it can say that Pro and Sync are included. Reveals nothing
+ * beyond validity.
+ */
+accountRouter.get("/comp-codes/:code", async (req, res) => {
+  try {
+    const { row, availability } = await compCodeStatus(req.params.code);
+    if (!row) return res.status(404).json({ valid: false, reason: "unknown_code" });
+    return res.json(compCodePublicView(row, availability));
+  } catch (err) {
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+/**
+ * POST /v1/account/comp-codes/redeem
+ * Signed in: redeem a comp code on an existing account.
+ */
+accountRouter.post("/comp-codes/redeem", requireAuth, async (req, res) => {
+  const code = String(req.body?.code || "").trim();
+  if (!code) return res.status(400).json({ error: "invalid_input" });
+  try {
+    const result = await redeemCompCodeForUser({ userId: req.user.sub, code, via: "account" });
+    if (!result.granted) return res.status(409).json({ error: result.reason });
+    return res.json({ ok: true, code: result.code, products: result.products });
+  } catch (err) {
+    log("error", "comp_code_redeem_failed", { userId: req.user.sub, message: String(err?.message || err) });
+    return res.status(500).json({ error: "server_error" });
   }
 });
 

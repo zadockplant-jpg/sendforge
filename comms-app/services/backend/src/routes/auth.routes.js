@@ -23,6 +23,7 @@ import {
   claimReferralInviteToken,
   resolveReferralInviteToken,
 } from "../services/referrals/referral.service.js";
+import { noteCompCodeForUser } from "../services/compCodes.service.js";
 import {
   clearCustomerAuthStateCache,
   customerTokenMatchesUser,
@@ -315,6 +316,7 @@ authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (
           referralIdentifier: effectiveReferralIdentifier,
           cashAppTag,
         });
+        await noteCompCodeForUser({ trx, userId: existing.id, code: effectiveReferralIdentifier });
 
         if (inviteToken) {
           await claimReferralInviteToken({
@@ -354,6 +356,9 @@ authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (
         referralIdentifier: effectiveReferralIdentifier,
         cashAppTag,
       });
+      // A comp code typed into the referral box is kept on the account and
+      // redeemed the moment the email is verified.
+      await noteCompCodeForUser({ trx, userId: id, code: effectiveReferralIdentifier });
 
       if (inviteToken) {
         await claimReferralInviteToken({

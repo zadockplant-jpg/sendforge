@@ -26,6 +26,7 @@ import {
   programMetadataFromInput,
 } from "../services/adminReferralControls.service.js";
 import { adminLiveTestingRouter } from "./admin.liveTesting.routes.js";
+import { listCompCodes, upsertCompCode } from "../services/compCodes.service.js";
 import { liveTestingEnabledFor, liveTestingOwnerEmail } from "../services/adminLiveTesting.service.js";
 import { getRequestId, log, sanitizeEmail } from "../utils/logger.js";
 import { issueAdminAccessToken } from "../services/auth.service.js";
@@ -56,6 +57,8 @@ const RecurringTierSchema = z.object({ startAfterPurchases: z.number().int().min
 const ReferralProgramSchema = z.object({ productSlug: z.string().min(1), requiredPurchases: z.number().int().min(1).max(1000).optional(), rewardAmountCents: z.number().int().min(0).optional(), rewardType: z.string().min(1).max(80).optional(), refundHoldDays: z.number().int().min(0).max(365).optional(), status: z.enum(["active", "inactive", "draft"]).optional(), tiers: z.array(ReferralTierSchema).max(12).optional(), recurringTier: RecurringTierSchema.nullable().optional(), perSaleRewardCents: z.number().int().min(1).optional(), metadata: z.record(z.any()).optional() });
 const RewardBatchSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(200), status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), batchReference: z.string().max(120).optional().nullable() });
 const PerkSchema = z.object({ email: z.string().email(), note: z.string().max(500).optional().nullable() });
+const CompCodeSchema = z.object({ code: z.string().min(3).max(40), note: z.string().max(500).optional().nullable(), maxRedemptions: z.number().int().min(1).max(100000).optional().nullable(), status: z.enum(["active", "inactive"]).optional() });
+const CompCodeUpdateSchema = CompCodeSchema.omit({ code: true }).partial();
 const RewardStatusSchema = z.object({ status: z.enum(["pending", "approved", "paid", "rejected"]), adminNote: z.string().max(2000).optional().nullable(), note: z.string().max(2000).optional().nullable(), cashappHandle: z.string().max(100).optional().nullable(), payoutReference: z.string().max(200).optional().nullable() });
 
 const loginLimiter = createRateLimiter({ name: "admin-login", windowMs: 60 * 1000, max: 5, keyGenerator: rateLimitByIpAndBodyEmail, message: "too_many_admin_login_attempts" });
@@ -767,6 +770,38 @@ adminRouter.post("/perks/grant", writeLimiter, async (req, res) => {
     log("error", "admin_perk_grant_failed", { requestId: getRequestId(req), email: sanitizeEmail(parsed.data.email), message: String(err?.message || err) });
     return res.status(500).json({ error: "server_error" });
   }
+});
+
+// Comp codes: a code that gives Pro and Private Sync at signup or from the
+// account page. Listed with redemption counts and the signup link to put in
+// an ad; paused by setting status inactive.
+adminRouter.get("/comp-codes", async (_req, res) => {
+  res.json({ items: await listCompCodes() });
+});
+
+async function saveCompCode(req, res, input) {
+  try {
+    const row = await upsertCompCode({ ...input, createdBy: req.admin.email });
+    await writeAdminAudit(req, { action: "comp_code.upsert", resourceType: "referral_code", resourceId: row.code, afterValue: row });
+    const items = await listCompCodes();
+    return res.json({ item: items.find((item) => item.code === row.code) || row });
+  } catch (err) {
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    log("error", "admin_comp_code_save_failed", { requestId: getRequestId(req), message: String(err?.message || err) });
+    return res.status(500).json({ error: "server_error" });
+  }
+}
+
+adminRouter.post("/comp-codes", writeLimiter, async (req, res) => {
+  const parsed = CompCodeSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
+  return saveCompCode(req, res, parsed.data);
+});
+
+adminRouter.patch("/comp-codes/:code", writeLimiter, async (req, res) => {
+  const parsed = CompCodeUpdateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
+  return saveCompCode(req, res, { ...parsed.data, code: req.params.code });
 });
 
 adminRouter.post("/perks/revoke", writeLimiter, async (req, res) => {

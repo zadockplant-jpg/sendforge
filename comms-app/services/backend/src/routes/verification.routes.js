@@ -5,6 +5,7 @@ import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { log, getRequestId } from "../utils/logger.js";
 import { recordVerifiedReferralSignup } from "../services/referrals/referral.service.js";
+import { redeemPendingCompCodeForVerifiedUser } from "../services/compCodes.service.js";
 
 export const verificationRouter = Router();
 
@@ -74,6 +75,17 @@ verificationRouter.get("/verify", async (req, res) => {
         userId: user.id,
         error: String(referralError?.message || referralError),
       });
+    }
+
+    // A comp code entered at signup grants TabForge Pro and Private Sync now
+    // that the address is verified. It must never block verification either.
+    try {
+      const comp = await redeemPendingCompCodeForVerifiedUser(user.id);
+      if (comp?.granted || (comp?.reason && comp.reason !== "no_code")) {
+        log("info", "comp_code_signup_processed", { requestId, userId: user.id, granted: Boolean(comp?.granted), reason: comp?.reason || null });
+      }
+    } catch (compError) {
+      log("error", "comp_code_signup_failed", { requestId, userId: user.id, error: String(compError?.message || compError) });
     }
 
     // Keep it simple for now: JSON response. (You can later redirect to app deep link.)
