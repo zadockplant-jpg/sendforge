@@ -23,7 +23,10 @@ export const claimSchema = z.object({
 
 export const newCode = () => Array.from({ length: 8 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('');
 export const share = cents => Number((BigInt(Math.max(0, cents)) * BigInt(REFERRAL_BPS) + 5000n) / 10000n);
-export const referralLink = (code, siteUrl) => `${siteUrl.replace(/\/$/, '')}/?ref=${code}`;
+// An invitation lands on the services page: the site confirms the code there
+// and carries it on every in-site link, so the request form fills it in by
+// itself once the visitor has picked the work they need.
+export const referralLink = (code, siteUrl) => `${siteUrl.replace(/\/$/, '')}/services/?ref=${code}`;
 
 /** Cents of a document's line items that a referral discount applies to. */
 export function discountableCents(items) {
