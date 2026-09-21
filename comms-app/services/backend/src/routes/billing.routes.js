@@ -35,6 +35,19 @@ import { log } from "../utils/logger.js";
 export const billingRouter = Router();
 
 const PRODUCT_CATALOG = {
+  // One-time $20. The purchase grants a perpetual entitlement (expires_at
+  // stays NULL); activating machines against it is handled separately in
+  // licensing.routes.js.
+  forgedrop: {
+    slug: "forgedrop",
+    displayName: "ForgeDrop",
+    mode: "payment",
+    stripePriceId: env.stripePriceForgedrop,
+    unitAmountCents: 2000,
+    entitlementSlug: "forgedrop",
+    defaultSuccessPath: "/account/index.html?purchase_context=forgedrop",
+    defaultCancelPath: "/products/forgedrop/index.html",
+  },
   tabforge: {
     slug: "tabforge",
     displayName: "TabForge Pro",

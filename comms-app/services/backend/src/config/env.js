@@ -38,6 +38,15 @@ export const env = {
   stripePriceTabforge: process.env.STRIPE_PRICE_TABFORGE || "",
   stripePriceTabforgeSync:
     process.env.STRIPE_PRICE_TABFORGE_SYNC || "",
+  stripePriceForgedrop: process.env.STRIPE_PRICE_FORGEDROP || "",
+
+  // Ed25519 seed (32 bytes, base64 or hex) that signs offline device licences.
+  // Never stored in Postgres. A licence signed by this key is trusted by an
+  // installed app forever, with no channel to reach that machine and say
+  // otherwise - rotating the kid keeps old licences valid, so rotation is not
+  // revocation.
+  licenseSigningKey: process.env.FORGEDROP_LICENSE_SIGNING_KEY || "",
+  licenseSigningKid: process.env.FORGEDROP_LICENSE_SIGNING_KID || "fd-2026-09",
 
   // Inmate Records merch fulfillment (backend only)
   printfulApiKey: process.env.PRINTFUL_API_KEY || "",

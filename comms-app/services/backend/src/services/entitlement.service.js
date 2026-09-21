@@ -6,6 +6,7 @@ export const TABFORGE_CLOUD_ENTITLEMENTS =
   TABFORGE_SYNC_ENTITLEMENT_ALIASES;
 
 const ACCOUNT_PRODUCT_ALIASES = Object.freeze({
+  forgedrop: "forgedrop",
   tabforge: "tabforge",
   "tabforge-pro": "tabforge",
   "tabforge-subscription": "tabforge-subscription",
