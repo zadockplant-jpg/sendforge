@@ -21,6 +21,7 @@ import {
 import {
   disqualifyReferralPurchaseForStripe,
   recordReferralPurchase,
+  recordSyncSubscriptionShare,
 } from "../services/referrals/referral.service.js";
 import {
   markInmateRecordsOrderPaidFromStripe,
@@ -697,6 +698,31 @@ async function handleStripeSubscriptionEvent(stripe, sub, deleted = false) {
   }
 }
 
+function invoiceCoversTabForgeSync(invoice) {
+  const lines = invoice?.lines?.data || [];
+  return lines.some((line) => {
+    const candidates = [
+      line?.price?.metadata?.entitlement_slug,
+      line?.price?.metadata?.slug,
+      line?.metadata?.entitlement_slug,
+      line?.metadata?.slug,
+      line?.plan?.metadata?.entitlement_slug,
+      line?.description,
+      line?.price?.nickname,
+      line?.plan?.nickname,
+    ];
+    return candidates.some((value) => {
+      const text = String(value || "");
+      if (!text) return false;
+      return (
+        isTabForgeSyncEntitlement(text) ||
+        text === TABFORGE_SYNC_PRODUCT_SLUG ||
+        /private\s*sync/i.test(text)
+      );
+    });
+  });
+}
+
 async function handleInvoicePaid(invoice) {
   const customerId = invoice.customer ? String(invoice.customer) : "";
   if (!customerId) return;
@@ -722,6 +748,26 @@ async function handleInvoicePaid(invoice) {
   }
 
   await db("users").where({ id: user.id }).update(updates);
+
+  // Every paid Private Sync invoice, the first one and every renewal after
+  // it, pays the account directly above this one its share. Keyed on the
+  // invoice id, so a replayed webhook cannot pay for the same month twice.
+  if (!isHardcap && invoiceCoversTabForgeSync(invoice)) {
+    const netPaidCents = checkoutNetPaidCents(invoice);
+    if (netPaidCents > 0) {
+      await recordSyncSubscriptionShare({
+        subscriberUserId: user.id,
+        invoiceRef: String(invoice.id || ""),
+        netPaidCents,
+        metadata: {
+          stripe_invoice_id: String(invoice.id || ""),
+          stripe_customer_id: customerId,
+          stripe_subscription_id: stripeObjectId(invoice.subscription) || null,
+          billing_reason: String(invoice.billing_reason || ""),
+        },
+      });
+    }
+  }
 }
 
 async function handleInvoicePaymentFailed(invoice, stripe) {

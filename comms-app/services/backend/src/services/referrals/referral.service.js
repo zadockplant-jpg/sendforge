@@ -23,6 +23,28 @@ const TABFORGE_RECURRING_PURCHASE_TIER = {
 };
 
 const INVITE_TTL_DAYS = 30;
+
+// Private Sync pays the referrer a share of every renewal, for as long as the
+// person they referred keeps paying.
+//
+// One level, and only one. The share goes to the account directly above the
+// subscriber and stops there. We never walk further up the chain, so a
+// referrer's own referrer is paid nothing on this invoice. That is a product
+// decision, not an oversight: a second level turns a referral scheme into a
+// structure people have to be told is not one, and it is not worth the
+// explaining.
+export const SYNC_SHARE_RATE = 0.05;
+export const SYNC_SHARE_PRODUCT_SLUG = "tabforge-subscription";
+
+export function syncShareCents(netPaidCents) {
+  const paid = Number(netPaidCents);
+  if (!Number.isFinite(paid) || paid <= 0) return 0;
+  // Rounded to the nearest cent, but a paid invoice never earns nothing: at
+  // the $5 price this is 25 cents, and it should not silently become zero if
+  // the price is ever lowered.
+  return Math.max(1, Math.round(paid * SYNC_SHARE_RATE));
+}
+
 export const REFERRAL_REQUIRED_PRODUCT_SLUG = "tabforge";
 const REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS = [
   REFERRAL_REQUIRED_PRODUCT_SLUG,
@@ -1002,6 +1024,83 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
     });
 
     return { recorded: true, event, rewards, verifiedCount };
+  });
+}
+
+export async function recordSyncSubscriptionShare({
+  subscriberUserId,
+  invoiceRef,
+  netPaidCents,
+  metadata = {},
+}) {
+  const ref = normalizeReferralValue(invoiceRef);
+  const amountCents = syncShareCents(netPaidCents);
+  if (!subscriberUserId || !ref) return { recorded: false, reason: "missing_input" };
+  if (amountCents <= 0) return { recorded: false, reason: "no_positive_payment" };
+
+  return db.transaction(async (trx) => {
+    const subscriber = await trx("users").where({ id: subscriberUserId }).first();
+    if (!subscriber) return { recorded: false, reason: "subscriber_missing" };
+
+    // One level up, and no further. referred_by_user_id is read once and the
+    // chain is never walked, so whoever referred the referrer earns nothing
+    // from this invoice.
+    const referrerId = subscriber.referred_by_user_id;
+    if (!referrerId) return { recorded: false, reason: "no_referrer" };
+    if (referrerId === subscriber.id) return { recorded: false, reason: "self_referral" };
+
+    const referrer = await trx("users").where({ id: referrerId }).first();
+    if (!referrer) return { recorded: false, reason: "referrer_missing" };
+
+    // The same gate the one-off purchase uses. Someone who no longer owns Pro
+    // does not keep earning from renewals.
+    if (!(await hasReferralProgramEligibility(referrer.id, REFERRAL_REQUIRED_PRODUCT_SLUG, trx))) {
+      return { recorded: false, reason: "referrer_tabforge_pro_required" };
+    }
+
+    const referralCode = subscriber.referral_code_id
+      ? await trx("referral_codes").where({ id: subscriber.referral_code_id }).first()
+      : await ensureReferralCodeForUser(referrer, trx);
+
+    // Keyed by the invoice, so Stripe replaying a webhook cannot pay twice.
+    const rewardKey = `sync_share:${ref}`;
+    const [reward] = await trx("reward_queue")
+      .insert({
+        id: crypto.randomUUID(),
+        referral_code_id: referralCode?.id || null,
+        user_id: referrer.id,
+        email: normalizeEmail(referrer.email),
+        product_slug: SYNC_SHARE_PRODUCT_SLUG,
+        reward_key: rewardKey,
+        reward_amount_cents: amountCents,
+        reward_type: "cashapp_manual",
+        cashapp_handle: normalizeCashAppTag(referrer.cash_app_tag || referralCode?.cashapp_handle),
+        status: "pending",
+        metadata: {
+          ...metadata,
+          kind: "sync_share",
+          level: 1,
+          share_rate: SYNC_SHARE_RATE,
+          invoice_ref: ref,
+          net_paid_cents: Number(netPaidCents) || 0,
+          subscriber_user_id: subscriber.id,
+          subscriber_email: normalizeEmail(subscriber.email),
+        },
+        updated_at: trx.fn.now(),
+      })
+      .onConflict(["user_id", "product_slug", "reward_key"])
+      .ignore()
+      .returning("*");
+
+    if (!reward) return { recorded: false, reason: "duplicate_invoice" };
+
+    log("info", "sync_share_queued", {
+      referrerUserId: referrer.id,
+      subscriberUserId: subscriber.id,
+      invoiceRef: ref,
+      amountCents,
+    });
+    return { recorded: true, reward, amountCents };
   });
 }
 

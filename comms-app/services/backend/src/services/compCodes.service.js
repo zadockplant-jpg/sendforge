@@ -17,11 +17,16 @@ export const COMP_CODE_SOURCE = "comp_code";
 export const COMP_GRANT_SLUGS = PERK_ENTITLEMENT_SLUGS;
 export const COMP_GRANT_LABELS = Object.freeze(["TabForge Pro", "Private Sync"]);
 
-// Seeded on every boot if missing, so the code exists as soon as the
-// service deploys; the owner dashboard can pause it or add others.
-export const DEFAULT_COMP_CODES = Object.freeze([
-  { code: "SENDIT2026", note: "Launch comp: TabForge Pro and Private Sync included at signup.", maxRedemptions: null, commission: { mode: "per_sale", rewardAmountCents: 500 } },
-]);
+// Nothing is seeded any more. There used to be one shared launch code with no
+// redemption limit, which is fine on a landing page and wrong in an email: a
+// single uncapped code sent to a list is a code that ends up on coupon sites
+// handing out free licences. Codes are now issued one per person, by the
+// outreach tool, and each is spent by the first account that redeems it.
+export const DEFAULT_COMP_CODES = Object.freeze([]);
+
+// A comp code belongs to the one account that redeems it. Anything created
+// without an explicit limit gets this one.
+export const DEFAULT_COMP_MAX_REDEMPTIONS = 1;
 
 export function normalizeCompCode(value) {
   return String(value || "")
@@ -42,9 +47,12 @@ export function compCodeAvailability(row, redeemedCount = 0) {
   if (expiresAt && Number.isFinite(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
     return { available: false, reason: "code_expired", remaining: null };
   }
+  // An absent or unusable limit means one redemption, not unlimited. A code
+  // that escapes into the wild should stop working after the first account
+  // claims it, and defaulting the other way makes a leak expensive.
   const max = Number(row.metadata?.max_redemptions);
-  const limit = Number.isInteger(max) && max > 0 ? max : null;
-  const remaining = limit === null ? null : Math.max(0, limit - Number(redeemedCount || 0));
+  const limit = Number.isInteger(max) && max > 0 ? max : DEFAULT_COMP_MAX_REDEMPTIONS;
+  const remaining = Math.max(0, limit - Number(redeemedCount || 0));
   if (remaining === 0) return { available: false, reason: "code_exhausted", remaining };
   return { available: true, reason: null, remaining };
 }
@@ -182,6 +190,35 @@ export async function ensureDefaultCompCodes(trx = db) {
       log("warn", "comp_code_seed_failed", { code: def.code, message: String(err?.message || err) });
     }
   }
+  await retireLegacyCompCodes(trx);
+}
+
+// Codes that used to be seeded and are no longer offered. Deactivated on boot
+// rather than deleted, so the accounts that already redeemed one keep their
+// entitlements and the record of where they came from survives.
+export const RETIRED_COMP_CODES = Object.freeze(["SENDIT2026"]);
+
+export async function retireLegacyCompCodes(trx = db) {
+  for (const code of RETIRED_COMP_CODES) {
+    try {
+      const row = await findCompCode(code, trx);
+      if (!row || String(row.status || "") !== "active") continue;
+      await trx("referral_codes")
+        .where({ id: row.id })
+        .update({
+          status: "inactive",
+          metadata: {
+            ...(row.metadata || {}),
+            retired_at: new Date().toISOString(),
+            retired_reason: "shared_launch_code_withdrawn",
+          },
+          updated_at: trx.fn.now(),
+        });
+      log("info", "comp_code_retired", { code: row.code });
+    } catch (err) {
+      log("warn", "comp_code_retire_failed", { code, message: String(err?.message || err) });
+    }
+  }
 }
 
 export async function listCompCodes(trx = db) {
@@ -219,9 +256,12 @@ export async function upsertCompCode({ code, note, maxRedemptions, status, creat
     ...(existing?.metadata || {}),
     kind: COMP_CODE_KIND,
     note: note === undefined ? (existing?.metadata?.note || null) : (String(note || "").trim() || null),
+    // One account per code unless an admin deliberately raises it. Creating a
+    // code without saying how many times it may be used must not produce an
+    // uncapped one.
     max_redemptions: maxRedemptions === undefined
-      ? (existing?.metadata?.max_redemptions ?? null)
-      : (Number.isInteger(limit) && limit > 0 ? limit : null),
+      ? (existing?.metadata?.max_redemptions ?? DEFAULT_COMP_MAX_REDEMPTIONS)
+      : (Number.isInteger(limit) && limit > 0 ? limit : DEFAULT_COMP_MAX_REDEMPTIONS),
     created_by: existing?.metadata?.created_by || createdBy || null,
   };
   if (perSaleRewardCents !== undefined) {
