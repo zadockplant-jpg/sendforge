@@ -77,6 +77,8 @@ const PRODUCT_CATALOG = {
     stripePriceId: env.stripePriceForgedrop,
     unitAmountCents: 2000,
     entitlementSlug: "forgedrop",
+    // One purchase already covers five machines; a second would buy nothing.
+    singlePurchase: true,
     defaultSuccessPath: "/account/index.html?purchase_context=forgedrop",
     defaultCancelPath: "/products/forgedrop/index.html",
   },
