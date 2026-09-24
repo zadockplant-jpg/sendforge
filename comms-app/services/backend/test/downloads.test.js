@@ -65,3 +65,12 @@ test("only known products download", async () => {
   const res = await fetch(`${base}/v1/downloads/..%2F..%2Fetc`);
   assert.equal(res.status, 404);
 });
+
+test("the app actually mounts the downloads route", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  // Once lost when app.js was rewritten from an older copy: the site's
+  // Download button then 404s with nothing else looking wrong.
+  assert.match(app, /import \{ downloadsRouter \} from "\.\/routes\/downloads\.routes\.js";/);
+  assert.match(app, /app\.use\("\/v1\/downloads", downloadsRouter\);/);
+});
