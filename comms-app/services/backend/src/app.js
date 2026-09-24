@@ -28,6 +28,7 @@ import { unsubscribeRouter } from "./routes/unsubscribe.routes.js";
 import { jayjeRouter } from "./modules/jayje/index.js";
 import { jayjePortalRouter } from "./modules/jayje-portal/index.js";
 import { rtsRouter } from "./modules/romancing-the-stone/index.js";
+import { forgedropLinkRouter } from "./modules/forgedrop-link/index.js";
 
 export const app = express();
 
@@ -49,6 +50,12 @@ app.use(
 // Romancing the Stone owns its JSON parser (256 KiB) and error responses, so it
 // mounts after CORS and before the shared 25 MB parser. Off until RTS_ENABLED=true.
 app.use("/v1/rts", rtsRouter);
+
+// ForgeDrop phone link: in-memory WebRTC signaling between a phone's browser
+// and a desktop. It owns its JSON parser (64 KiB) and error responses, so it
+// mounts here for the same reason as RTS. If the module cannot load, its
+// routes answer 503 and the rest of the API still starts (see its index.js).
+app.use("/v1/forgedrop/link", forgedropLinkRouter);
 
 app.use(
   express.json({
