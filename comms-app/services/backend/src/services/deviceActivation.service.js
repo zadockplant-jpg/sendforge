@@ -255,20 +255,6 @@ export async function deactivateDevice(userId, productSlug, deviceId) {
   return rows[0] || null;
 }
 
-/**
- * When this account last freed a slot for this product. A per-device product
- * limits how often that can happen, because a licence already on a machine
- * keeps working there - an unlimited "move" would be unlimited devices.
- */
-export async function lastDeactivationAt(userId, productSlug) {
-  const row = await db("device_activations")
-    .where({ user_id: userId, product_slug: normalizeSlug(productSlug) })
-    .whereNotNull("deactivated_at")
-    .max({ at: "deactivated_at" })
-    .first();
-  return row?.at ? new Date(row.at) : null;
-}
-
 export async function describeActivation(userId, productSlug, deviceLimit = DEFAULT_DEVICE_LIMIT) {
   const slug = normalizeSlug(productSlug);
   const [codeRow, devices] = await Promise.all([

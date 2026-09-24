@@ -4,6 +4,9 @@
  * Rose Colored Glasses is good for one device per purchase. The first device
  * is $5. Every device after that is $4 - the $1 a referral pays, taken off,
  * because buying a second copy for yourself is you referring yourself.
+ *
+ * A seat never moves. $5 buys the product for that device; a new PC is a new
+ * purchase (see licensing.routes.js, which refuses to free a seat's slot).
  */
 
 import crypto from "crypto";
@@ -19,14 +22,6 @@ export const SEAT_PRICING = Object.freeze({
     maxDevicesPerCheckout: 10,
   }),
 });
-
-/**
- * A seat is one device, but people replace computers. Freeing a slot so the
- * licence can move is allowed once per this many days per product. It cannot
- * be unlimited: the licence already on the old machine is verified offline and
- * keeps working there, so an unlimited "move" would be unlimited devices.
- */
-export const DEVICE_MOVE_COOLDOWN_DAYS = 30;
 
 export const SEAT_REVERSAL_STATUSES = Object.freeze([
   "refunded",
@@ -103,6 +98,67 @@ export async function deviceLimitFor(userId, product, trx = db) {
   if (!product.seatBased) return floor;
   const seats = await countActiveSeats(userId, product.slug, trx);
   return Math.max(seats, floor);
+}
+
+/**
+ * Seats split by where they came from: bought through checkout, or given by
+ * the owner (a perk, an invite). Both count toward the device limit.
+ */
+export async function seatBreakdown(userId, productSlug, trx = db) {
+  const rows = await trx("product_seat_purchases")
+    .select(trx.raw("coalesce(metadata->>'perk', 'false') as perk"))
+    .sum({ seats: "quantity" })
+    .where({ user_id: userId, product_slug: normalizeSlug(productSlug), status: "active" })
+    .groupByRaw("coalesce(metadata->>'perk', 'false')");
+  let paid = 0;
+  let perk = 0;
+  for (const row of rows) {
+    if (row.perk === "true") perk += Number(row.seats || 0);
+    else paid += Number(row.seats || 0);
+  }
+  return { paid, perk, total: paid + perk };
+}
+
+/**
+ * Set how many devices the owner has given this account, replacing any
+ * earlier gift. Paid seats are never touched. Zero removes the gift.
+ *
+ * The old gift row is retired, not deleted, so the record of what was given
+ * and when survives the change.
+ */
+export async function setPerkSeats(
+  { userId, productSlug, seats, grantedBy = null, source = "admin_perk", note = null },
+  trx = db
+) {
+  const slug = normalizeSlug(productSlug);
+  const count = Math.max(0, Math.min(1000, Math.round(Number(seats) || 0)));
+  if (!userId || !slug) return { perk: 0 };
+
+  await trx("product_seat_purchases")
+    .where({ user_id: userId, product_slug: slug, status: "active" })
+    .whereRaw("metadata->>'perk' = 'true'")
+    .update({ status: "revoked", reversed_at: trx.fn.now(), updated_at: trx.fn.now() });
+
+  if (count > 0) {
+    await trx("product_seat_purchases").insert({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      product_slug: slug,
+      purchase_ref: `perk:${crypto.randomUUID()}`,
+      quantity: count,
+      amount_cents: 0,
+      status: "active",
+      metadata: {
+        perk: true,
+        source,
+        granted_by: grantedBy,
+        granted_at: new Date().toISOString(),
+        note: note ? String(note).slice(0, 500) : null,
+      },
+      updated_at: trx.fn.now(),
+    });
+  }
+  return { perk: count };
 }
 
 /**

@@ -128,8 +128,8 @@ export async function hasReferralProgramEligibility(
 
 /**
  * Whether this account gets a referral code at all: it owns TabForge Pro or a
- * product with a flat referral reward. Which sales it earns on is decided per
- * payout, not here.
+ * product with a flat referral reward, or the owner made it an affiliate from
+ * the admin dashboard. Which sales it earns on is decided per payout, not here.
  */
 export async function canHoldReferralCode(userId, trx = db) {
   if (!userId) return false;
@@ -140,7 +140,26 @@ export async function canHoldReferralCode(userId, trx = db) {
       query.whereNull("expires_at").orWhere("expires_at", ">", trx.fn.now());
     })
     .first();
-  return Boolean(entitlement);
+  if (entitlement) return true;
+  const affiliate = await trx("referral_codes")
+    .where({ user_id: userId, status: "active" })
+    .whereRaw("metadata->>'affiliate' = 'true'")
+    .first();
+  return Boolean(affiliate);
+}
+
+/**
+ * What a flat-reward product pays this referrer per new customer: the rate
+ * the owner set on their code, or the product's standard reward. A rate of
+ * zero is allowed and means this person earns nothing on the product.
+ */
+export function flatRewardCentsForCode(referralCode, productSlug) {
+  const slug = normalizeProductSlug(productSlug);
+  const standard = flatReferralRewardCents(slug);
+  if (!standard) return 0;
+  const rates = referralCode?.metadata?.flat_rates;
+  const custom = rates && typeof rates === "object" ? Number(rates[slug]) : NaN;
+  return Number.isInteger(custom) && custom >= 0 ? custom : standard;
 }
 
 /**
@@ -208,6 +227,108 @@ export async function ensureReferralCodeForUser(user, trx = db) {
     })
     .returning("*");
 
+  return row;
+}
+
+/**
+ * The referral code the owner hands someone from the admin dashboard, whether
+ * or not they own a product: an affiliate or a friend. Marked `affiliate`, so
+ * canHoldReferralCode lets it be used, and never a second code for one person.
+ */
+export async function ensureAffiliateReferralCode(user, { source = "admin" } = {}, trx = db) {
+  if (!user?.id || !user?.email) return null;
+  const existing = await trx("referral_codes")
+    .where({ user_id: user.id, status: "active" })
+    .orderBy("created_at", "asc")
+    .first();
+  if (existing) {
+    if (existing.metadata?.affiliate === true) return existing;
+    const [row] = await trx("referral_codes")
+      .where({ id: existing.id })
+      .update({ metadata: { ...(existing.metadata || {}), affiliate: true }, updated_at: trx.fn.now() })
+      .returning("*");
+    return row;
+  }
+  const code = await createUniqueReferralCode(trx, user.email);
+  const [row] = await trx("referral_codes")
+    .insert({
+      id: crypto.randomUUID(),
+      user_id: user.id,
+      email: normalizeEmail(user.email),
+      code,
+      cashapp_handle: normalizeCashAppTag(user.cash_app_tag),
+      status: "active",
+      metadata: { source, affiliate: true },
+      updated_at: trx.fn.now(),
+    })
+    .returning("*");
+  return row;
+}
+
+/**
+ * The per-person referral terms the owner sets: a flat amount per TabForge
+ * sale (null returns them to the milestone tiers) and a rate per flat-reward
+ * product (null returns that product to its standard reward).
+ */
+export async function setReferralTerms(codeRow, { tabforgePerSaleCents, flatRates } = {}, trx = db) {
+  if (!codeRow?.id) return null;
+  const metadata = { ...(codeRow.metadata || {}) };
+
+  if (tabforgePerSaleCents !== undefined) {
+    const cents = Number(tabforgePerSaleCents);
+    if (tabforgePerSaleCents === null || !Number.isInteger(cents) || cents < 1) {
+      delete metadata.commission;
+    } else {
+      metadata.commission = {
+        mode: "per_sale",
+        rewardAmountCents: cents,
+        source: "admin",
+        applied_at: new Date().toISOString(),
+      };
+    }
+  }
+
+  if (flatRates && typeof flatRates === "object") {
+    const rates = { ...(metadata.flat_rates || {}) };
+    for (const [slug, value] of Object.entries(flatRates)) {
+      const key = normalizeProductSlug(slug);
+      if (!FLAT_REFERRAL_REWARDS[key]) continue;
+      const cents = Number(value);
+      if (value === null || !Number.isInteger(cents) || cents < 0) delete rates[key];
+      else rates[key] = cents;
+    }
+    if (Object.keys(rates).length) metadata.flat_rates = rates;
+    else delete metadata.flat_rates;
+  }
+
+  const [row] = await trx("referral_codes")
+    .where({ id: codeRow.id })
+    .update({ metadata, updated_at: trx.fn.now() })
+    .returning("*");
+  return row;
+}
+
+/**
+ * Give a referral code a name of the owner's choosing. People already
+ * referred keep their link to the referrer, which is stored by id; only
+ * links carrying the old code stop resolving.
+ */
+export async function renameReferralCode(codeRow, newCode, trx = db) {
+  const code = String(newCode || "").trim().replace(/^#/, "").toUpperCase();
+  if (!/^[A-Z0-9_-]{3,40}$/.test(code)) {
+    throw referralServiceError("invalid_referral_code", 400);
+  }
+  if (code === codeRow.code) return codeRow;
+  const taken = await trx("referral_codes").where({ code }).first();
+  if (taken) throw referralServiceError("referral_code_taken", 409);
+  const [row] = await trx("referral_codes")
+    .where({ id: codeRow.id })
+    .update({
+      code,
+      metadata: { ...(codeRow.metadata || {}), previous_codes: [...(codeRow.metadata?.previous_codes || []), codeRow.code] },
+      updated_at: trx.fn.now(),
+    })
+    .returning("*");
   return row;
 }
 
@@ -1163,9 +1284,8 @@ export async function recordFlatProductReferral({
   metadata = {},
 }) {
   const slug = normalizeProductSlug(productSlug);
-  const amountCents = flatReferralRewardCents(slug);
   const ref = normalizeReferralValue(purchaseRef);
-  if (!amountCents) return { recorded: false, reason: "not_flat_referral_product" };
+  if (!flatReferralRewardCents(slug)) return { recorded: false, reason: "not_flat_referral_product" };
   if (!referredUserId || !ref) return { recorded: false, reason: "missing_input" };
   if (!(Number(netPaidCents) > 0)) return { recorded: false, reason: "no_positive_payment" };
 
@@ -1186,6 +1306,10 @@ export async function recordFlatProductReferral({
     const referralCode = referredUser.referral_code_id
       ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
       : await ensureReferralCodeForUser(referrer, trx);
+
+    // The referrer's own rate, when the owner set one, decides the amount.
+    const amountCents = flatRewardCentsForCode(referralCode, slug);
+    if (amountCents <= 0) return { recorded: false, reason: "referrer_rate_zero" };
 
     const [reward] = await trx("reward_queue")
       .insert({

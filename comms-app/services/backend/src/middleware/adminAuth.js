@@ -5,6 +5,15 @@ import {
 } from "../services/auth.service.js";
 import { getRequestId, log } from "../utils/logger.js";
 
+// The one SendForge administrator. Deliberately a constant, not an
+// environment variable: a mistyped or leaked ADMIN_ALLOWED_EMAILS on a host
+// must not be able to hand the owner dashboard to anyone else.
+export const SENDFORGE_ADMIN_EMAIL = "zadockplant@gmail.com";
+
+export function isSendForgeAdmin(email) {
+  return String(email || "").trim().toLowerCase() === SENDFORGE_ADMIN_EMAIL;
+}
+
 export function adminWritesEnabled() {
   return String(process.env.ADMIN_WRITES_ENABLED || "true").toLowerCase() !== "false";
 }
@@ -26,6 +35,11 @@ export async function requireAdminAuth(req, res, next) {
     const user = await getCurrentCustomerAuthState(payload.sub);
     if (!adminTokenMatchesUser(payload, user)) {
       return res.status(401).json({ error: "invalid_admin_token" });
+    }
+    // Checked on every request, not only at sign-in, so a token can never
+    // outlive the account it was issued to being the administrator.
+    if (!isSendForgeAdmin(user.email)) {
+      return res.status(403).json({ error: "admin_not_allowed" });
     }
     req.admin = {
       ...payload,

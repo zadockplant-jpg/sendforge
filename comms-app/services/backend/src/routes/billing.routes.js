@@ -36,6 +36,17 @@ import {
   seatPricing,
 } from "../services/productSeats.service.js";
 import { handleStripeWebhook } from "./stripe.webhooks.routes.js";
+import {
+  buildRtsSubscriptionCheckoutOptions,
+  buildRtsSubscriptionLineItems,
+  RTS_CATALOG,
+  rtsCheckoutReturnUrls,
+  rtsExistingLicense,
+} from "../modules/romancing-the-stone/billing.js";
+import {
+  getRtsConfig,
+  RTS_SUBSCRIPTION_PRODUCT_SLUG,
+} from "../modules/romancing-the-stone/config.js";
 import { log } from "../utils/logger.js";
 
 export const billingRouter = Router();
@@ -144,6 +155,9 @@ const PRODUCT_CATALOG = {
     defaultSuccessPath: "/products/tabforge/index.html#pricing",
     defaultCancelPath: "/store/index.html#tabforge",
   },
+  // Romancing the Stone: $30 today with the first 6 months included, then
+  // $5/month; or a $120 permanent licence. See modules/romancing-the-stone/billing.js.
+  ...RTS_CATALOG,
 };
 
 const TABFORGE_PACK_CATALOG = {
@@ -1124,6 +1138,29 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     });
   }
 
+  if (product?.rts) {
+    if (!getRtsConfig().enabled) {
+      return res.status(503).json({ error: "service_unavailable" });
+    }
+    const existingRtsLicense = await rtsExistingLicense(req.user.sub);
+    if (existingRtsLicense === "permanent") {
+      return res.status(409).json({
+        error: "already_owned",
+        message: "You already own the Romancing the Stone permanent license.",
+      });
+    }
+    if (
+      existingRtsLicense === "subscription" &&
+      product.slug === RTS_SUBSCRIPTION_PRODUCT_SLUG
+    ) {
+      return res.status(409).json({
+        error: "subscription_already_active",
+        message:
+          "A Romancing the Stone subscription already exists for this account. Manage it from Account.",
+      });
+    }
+  }
+
   if (
     product &&
     product.slug !== "tabforge-page" &&
@@ -1294,7 +1331,9 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
           quantity,
           proOnly,
         });
-    const lineItems = seatLines
+    const lineItems = product?.slug === RTS_SUBSCRIPTION_PRODUCT_SLUG
+      ? buildRtsSubscriptionLineItems()
+      : seatLines
       ? buildSeatLineItems(product, seatLines)
       : buildLineItems({
           priceIds: await usableTabForgePriceIds(stripe),
@@ -1341,7 +1380,18 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
       }),
       metadata,
     };
-    if (sessionConfig.mode === "subscription") {
+    if (
+      sessionConfig.mode === "subscription" &&
+      product?.slug === RTS_SUBSCRIPTION_PRODUCT_SLUG
+    ) {
+      Object.assign(
+        sessionConfig,
+        buildRtsSubscriptionCheckoutOptions({
+          userId: user.id,
+          checkoutItems,
+        })
+      );
+    } else if (sessionConfig.mode === "subscription") {
       const initialProPurchase =
         product?.slug === TABFORGE_PRO_PRODUCT_SLUG;
       Object.assign(
@@ -1352,6 +1402,9 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
           initialProPurchase,
         })
       );
+    }
+    if (product?.rts) {
+      Object.assign(sessionConfig, rtsCheckoutReturnUrls() || {});
     }
 
     const selectionKey = checkoutSelectionKey({

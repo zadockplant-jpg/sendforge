@@ -34,6 +34,13 @@ import {
   markInmateRecordsOrderPaidFromStripe,
 } from "../services/inmate.records/orders.service.js";
 import {
+  afterRtsPermanentPurchase,
+  checkoutIncludesRtsPermanent,
+  isRtsSubscription,
+  isRtsSubscriptionEntitlement,
+  syncRtsSubscriptionEntitlement,
+} from "../modules/romancing-the-stone/billing.js";
+import {
   markInmateRecordsOrderReadyForManualFulfillment,
 } from "../services/inmate.records/fulfillment.service.js";
 
@@ -255,6 +262,13 @@ async function upsertStripeSubscription(sub) {
       pastDueSince: tabForgePastDueSince({ raw: payload.raw }),
     });
   }
+
+  if (isRtsSubscription(sub)) {
+    await syncRtsSubscriptionEntitlement({
+      userId,
+      subscription: { ...payload.raw, id: sub.id, status: payload.status },
+    });
+  }
 }
 
 async function markStripeSubscriptionCanceled(sub) {
@@ -458,6 +472,8 @@ async function grantCheckoutEntitlements({
     // deliver events out of order, so only the subscription's current status
     // is allowed to grant or revoke Private Sync.
     if (isTabForgeSyncEntitlement(entitlementSlug)) continue;
+    // The same holds for the Romancing the Stone subscription.
+    if (isRtsSubscriptionEntitlement(entitlementSlug)) continue;
 
     if (entitlementSlug === "tabforge-skin-bundle-all") {
       for (const skinEntitlementSlug of [
@@ -709,6 +725,12 @@ export async function handleCheckoutSessionCompleted(session, stripe) {
         referralNetPaidCents,
       });
     }
+  }
+
+  // A permanent Romancing the Stone licence replaces a subscription: stop the
+  // $5/month renewal at the end of the current period (or included months).
+  if (checkoutIncludesRtsPermanent(checkoutItems)) {
+    await afterRtsPermanentPurchase({ userId, stripe, customerId });
   }
 
   // Retrieve the subscription after permanent entitlements are committed.

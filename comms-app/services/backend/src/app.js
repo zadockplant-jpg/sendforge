@@ -20,13 +20,13 @@ import { contactRouter } from "./routes/support.contact.js";
 import { tabforgeConfigsRouter } from "./routes/tabforge.configs.routes.js";
 import { tabforgeCloudRouter } from "./routes/tabforge.cloud.routes.js";
 import { licensingRouter } from "./routes/licensing.routes.js";
-import { downloadsRouter } from "./routes/downloads.routes.js";
 import { inmateRecordsStoreRouter } from "./routes/inmate.records.store.routes.js";
 import { adminRouter } from "./routes/admin.routes.js";
 import { unsubscribeRouter } from "./routes/unsubscribe.routes.js";
 
 import { jayjeRouter } from "./modules/jayje/index.js";
 import { jayjePortalRouter } from "./modules/jayje-portal/index.js";
+import { rtsRouter } from "./modules/romancing-the-stone/index.js";
 
 export const app = express();
 
@@ -44,6 +44,10 @@ app.use(
     credentials: true,
   })
 );
+
+// Romancing the Stone owns its JSON parser (256 KiB) and error responses, so it
+// mounts after CORS and before the shared 25 MB parser. Off until RTS_ENABLED=true.
+app.use("/v1/rts", rtsRouter);
 
 app.use(
   express.json({
@@ -70,7 +74,6 @@ app.use("/v1/contact", contactRouter);
 app.use("/v1/tabforge/configs", tabforgeConfigsRouter);
 app.use("/v1/tabforge/cloud", tabforgeCloudRouter);
 app.use("/v1/licensing", licensingRouter);
-app.use("/v1/downloads", downloadsRouter);
 app.use("/v1/inmate-records/store", inmateRecordsStoreRouter);
 app.use("/v1/admin", adminRouter);
 app.use("/v1/unsubscribe", unsubscribeRouter);

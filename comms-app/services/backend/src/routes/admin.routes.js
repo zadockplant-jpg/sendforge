@@ -5,7 +5,7 @@ import { z } from "zod";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { createRateLimiter, rateLimitByIpAndBodyEmail, rateLimitByUserOrIp } from "../middleware/rateLimit.js";
-import { requireAdminAuth, requireAdminWritesEnabled } from "../middleware/adminAuth.js";
+import { isSendForgeAdmin, requireAdminAuth, requireAdminWritesEnabled } from "../middleware/adminAuth.js";
 import { sendAdminMfaCodeEmail } from "../services/email.service.js";
 import { writeAdminAudit } from "../services/adminAudit.service.js";
 import { grantProductEntitlement, revokeProductEntitlement } from "../services/entitlement.service.js";
@@ -28,6 +28,7 @@ import {
   programMetadataFromInput,
 } from "../services/adminReferralControls.service.js";
 import { adminLiveTestingRouter } from "./admin.liveTesting.routes.js";
+import { adminAccountsRouter } from "./admin.accounts.routes.js";
 import { listCompCodes, upsertCompCode } from "../services/compCodes.service.js";
 import { liveTestingEnabledFor, liveTestingOwnerEmail } from "../services/adminLiveTesting.service.js";
 import { getRequestId, log, sanitizeEmail } from "../utils/logger.js";
@@ -121,8 +122,7 @@ function rewardStatusError(statusCode, error, extra = {}) {
   err.responseBody = { error, ...extra };
   return err;
 }
-function allowedAdminEmails() { return String(process.env.ADMIN_ALLOWED_EMAILS || process.env.ADMIN_EMAIL || "zadockplant@gmail.com").split(",").map(normalizeEmail).filter(Boolean); }
-function isAllowedAdmin(email) { return allowedAdminEmails().includes(normalizeEmail(email)); }
+function isAllowedAdmin(email) { return isSendForgeAdmin(email); }
 function sha256(value) { return crypto.createHash("sha256").update(String(value)).digest("hex"); }
 function makeReferralCode(email = "") { const base = String(email).split("@")[0].replace(/[^a-z0-9]/gi, "").slice(0, 8).toUpperCase() || "FORGE"; return `${base}${crypto.randomInt(1000, 9999)}`; }
 function adminTokenFor(user) { return issueAdminAccessToken({ id: user.id, email: user.email, authVersion: user.auth_version || 0 }); }
@@ -196,6 +196,7 @@ adminRouter.get("/me", (req, res) => res.json({
 }));
 
 adminRouter.use("/testing/live", adminLiveTestingRouter);
+adminRouter.use("/accounts", adminAccountsRouter);
 
 adminRouter.get("/audit-log", async (req, res) => {
   const rows = await db("admin_audit_log").orderBy("created_at", "desc").limit(Math.min(Number(req.query.limit || 100), 500));

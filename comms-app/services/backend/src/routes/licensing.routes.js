@@ -22,12 +22,10 @@ import {
   deactivateDevice,
   describeActivation,
   findByActivationCode,
-  lastDeactivationAt,
   rotateActivationCode,
 } from "../services/deviceActivation.service.js";
 import { LICENSED_PRODUCTS, licensedProduct } from "../services/licensedProducts.js";
 import {
-  DEVICE_MOVE_COOLDOWN_DAYS,
   countActiveSeats,
   deviceLimitFor,
   nextDeviceCents,
@@ -107,25 +105,13 @@ function seatSummary(product, seats) {
   };
 }
 
-async function moveWindow(userId, product) {
-  if (!product.seatBased) return { moveCooldownDays: 0, nextMoveAt: null };
-  const last = await lastDeactivationAt(userId, product.slug);
-  const next = last
-    ? new Date(last.getTime() + DEVICE_MOVE_COOLDOWN_DAYS * 24 * 60 * 60 * 1000)
-    : null;
-  return {
-    moveCooldownDays: DEVICE_MOVE_COOLDOWN_DAYS,
-    nextMoveAt: next && next.getTime() > Date.now() ? next.toISOString() : null,
-  };
-}
-
 async function accountView(userId, product) {
   const limit = await deviceLimitFor(userId, product);
   const seats = product.seatBased ? await countActiveSeats(userId, product.slug) : 0;
   return {
     ...(await describeActivation(userId, product.slug, limit)),
     ...seatSummary(product, seats),
-    ...(await moveWindow(userId, product)),
+    devicesCanMove: !product.seatBased,
   };
 }
 
@@ -273,11 +259,11 @@ licensingRouter.post(
     const product = licensedProduct(req.body?.productSlug || req.query.productSlug);
     if (!product) return res.status(404).json({ error: "unknown_product" });
 
+    // A per-device purchase is for that device. Freeing its slot would let
+    // the licence, which keeps working offline on the old PC, move to a new
+    // one - a second device for the price of one. A new PC is a new purchase.
     if (product.seatBased) {
-      const window = await moveWindow(req.user.sub, product);
-      if (window.nextMoveAt) {
-        return res.status(429).json({ error: "device_move_cooldown", ...window });
-      }
+      return res.status(403).json({ error: "device_moves_not_allowed", productSlug: product.slug });
     }
 
     const row = await deactivateDevice(req.user.sub, product.slug, req.params.deviceId);

@@ -96,8 +96,10 @@ test("the admin router exposes batch payouts and perk accounts on the shared sta
   assert.match(source, /source: PERK_ENTITLEMENT_SOURCE, sourceRef: req\.admin\.email/);
   assert.match(source, /perSaleRewardCents: z\.number\(\)\.int\(\)\.min\(1\)\.optional\(\)/);
   assert.match(source, /recurringTier: RecurringTierSchema\.nullable\(\)\.optional\(\)/);
-  // The allow-list still defaults to the owner.
-  assert.match(source, /"zadockplant@gmail\.com"/);
+  // The owner is the one administrator, fixed in the admin middleware.
+  const middleware = await readFile(new URL("../src/middleware/adminAuth.js", import.meta.url), "utf8");
+  assert.match(middleware, /SENDFORGE_ADMIN_EMAIL = "zadockplant@gmail\.com"/);
+  assert.match(source, /function isAllowedAdmin\(email\) \{ return isSendForgeAdmin\(email\); \}/);
   // Every write on these routes still passes through the admin gates.
   assert.ok(source.indexOf("adminRouter.use(requireAdminAuth);") < source.indexOf('adminRouter.post("/rewards/batch"'));
   assert.ok(source.indexOf("adminRouter.use(requireAdminWritesEnabled);") < source.indexOf('adminRouter.post("/perks/grant"'));

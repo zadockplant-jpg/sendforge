@@ -9,13 +9,43 @@ import crypto from "crypto";
 import { db } from "../config/db.js";
 import { log } from "../utils/logger.js";
 import { grantProductEntitlement } from "./entitlement.service.js";
-import { ensureReferralCodeForUser } from "./referrals/referral.service.js";
+import {
+  ensureAffiliateReferralCode,
+  ensureReferralCodeForUser,
+  setReferralTerms,
+} from "./referrals/referral.service.js";
 import { PERK_ENTITLEMENT_SLUGS } from "./adminReferralControls.service.js";
+import { setPerkSeats } from "./productSeats.service.js";
 
 export const COMP_CODE_KIND = "comp";
 export const COMP_CODE_SOURCE = "comp_code";
 export const COMP_GRANT_SLUGS = PERK_ENTITLEMENT_SLUGS;
 export const COMP_GRANT_LABELS = Object.freeze(["TabForge Pro", "Private Sync"]);
+
+// Everything the owner can give away from the admin dashboard, by the
+// entitlement slug purchase fulfilment would grant.
+export const GRANTABLE_PRODUCTS = Object.freeze({
+  tabforge: "TabForge Pro",
+  "tabforge-subscription": "TabForge Private Sync",
+  "rose-colored-glasses": "Rose Colored Glasses",
+  forgedrop: "ForgeDrop",
+});
+
+/**
+ * What a code grants. A personal invite made from the admin dashboard lists
+ * its own products; every older comp code grants Pro and Private Sync.
+ */
+export function compCodeGrants(row) {
+  const listed = row?.metadata?.grants;
+  if (!Array.isArray(listed)) return [...COMP_GRANT_SLUGS];
+  return [...new Set(listed.map((slug) => String(slug || "").trim().toLowerCase()))].filter(
+    (slug) => GRANTABLE_PRODUCTS[slug]
+  );
+}
+
+export function isPersonalInvite(row) {
+  return Array.isArray(row?.metadata?.grants);
+}
 
 // Nothing is seeded any more. There used to be one shared launch code with no
 // redemption limit, which is fine on a landing page and wrong in an email: a
@@ -70,7 +100,9 @@ export function compCodePublicView(row, availability) {
     code: row.code,
     valid: Boolean(availability?.available),
     reason: availability?.reason || null,
-    grants: [...COMP_GRANT_LABELS],
+    grants: isPersonalInvite(row)
+      ? compCodeGrants(row).map((slug) => GRANTABLE_PRODUCTS[slug])
+      : [...COMP_GRANT_LABELS],
     note: row.metadata?.note || null,
     commission: compCodeCommission(row),
   };
@@ -88,8 +120,10 @@ export async function applyCompCodeCommission({ trx = db, userId, compRow }) {
   return { ...plan, referralCode: code.code };
 }
 
-export function compCodeSignupLink(code) {
-  return `/signup.html?ref=${encodeURIComponent(normalizeCompCode(code))}`;
+export function compCodeSignupLink(code, email = null) {
+  const params = new URLSearchParams({ ref: normalizeCompCode(code) });
+  if (email) params.set("email", String(email).trim().toLowerCase());
+  return `/signup.html?${params.toString()}`;
 }
 
 export async function findCompCode(code, trx = db) {
@@ -100,12 +134,17 @@ export async function findCompCode(code, trx = db) {
 }
 
 export async function countCompRedemptions(code, trx = db) {
-  const row = await trx("product_entitlements")
+  const normalized = normalizeCompCode(code);
+  const row = await trx("referral_codes").where({ code: normalized }).first();
+  // A personal invite is spent once it is redeemed, even one that grants no
+  // product (an affiliate-only invite), so it is counted by its own mark.
+  if (isPersonalInvite(row)) return row.metadata?.redeemed_by ? 1 : 0;
+  const counted = await trx("product_entitlements")
     .where({ source: COMP_CODE_SOURCE, product_slug: "tabforge" })
-    .whereRaw("metadata->>'comp_code' = ?", [normalizeCompCode(code)])
+    .whereRaw("metadata->>'comp_code' = ?", [normalized])
     .count({ count: "id" })
     .first();
-  return Number(row?.count || 0);
+  return Number(counted?.count || 0);
 }
 
 export async function compCodeStatus(code, trx = db) {
@@ -127,11 +166,55 @@ export async function noteCompCodeForUser({ trx = db, userId, code }) {
   return true;
 }
 
+/**
+ * A personal invite: the products, devices and referral terms the owner chose
+ * for one email address, applied when that address's account is verified.
+ */
+async function redeemPersonalInvite({ user, row, availability, via, trx }) {
+  const invitedEmail = String(row.metadata?.email || "").trim().toLowerCase();
+  if (invitedEmail && invitedEmail !== String(user.email || "").trim().toLowerCase()) {
+    return { granted: false, reason: "code_for_another_email" };
+  }
+  if (row.metadata?.redeemed_by === user.id) return { granted: false, reason: "already_redeemed" };
+  if (!availability.available) return { granted: false, reason: availability.reason };
+
+  const grants = compCodeGrants(row);
+  const metadata = { comp: true, perk: true, comp_code: row.code, redeemed_at: new Date().toISOString(), via, note: row.metadata?.note || null, granted_by: row.metadata?.created_by || null };
+  const products = [];
+  for (const slug of grants) {
+    const owned = await trx("product_entitlements")
+      .where({ user_id: user.id, product_slug: slug, status: "active" })
+      .first();
+    if (!owned) await grantProductEntitlement({ userId: user.id, productSlug: slug, source: COMP_CODE_SOURCE, sourceRef: row.code, metadata });
+    products.push(slug);
+  }
+
+  const devices = Number(row.metadata?.rcg_devices || 0);
+  if (grants.includes("rose-colored-glasses") && devices > 0) {
+    await setPerkSeats({ userId: user.id, productSlug: "rose-colored-glasses", seats: devices, grantedBy: row.metadata?.created_by || null, source: COMP_CODE_SOURCE, note: `invite ${row.code}` }, trx);
+  }
+
+  const terms = row.metadata?.referral_terms || {};
+  const hasTerms = terms.tabforgePerSaleCents != null || (terms.flatRates && Object.keys(terms.flatRates).length);
+  let code = hasTerms || row.metadata?.affiliate
+    ? await ensureAffiliateReferralCode(user, { source: "invite" }, trx)
+    : await ensureReferralCodeForUser(user, trx);
+  if (code && hasTerms) code = await setReferralTerms(code, terms, trx);
+
+  await trx("referral_codes")
+    .where({ id: row.id })
+    .update({ metadata: { ...(row.metadata || {}), redeemed_by: user.id, redeemed_at: new Date().toISOString() }, updated_at: trx.fn.now() });
+
+  log("info", "personal_invite_redeemed", { userId: user.id, code: row.code, via, products });
+  return { granted: true, code: row.code, products, referralCode: code?.code || null };
+}
+
 export async function redeemCompCodeForUser({ userId, code, via = "account", trx = db }) {
   const { row, availability } = await compCodeStatus(code, trx);
   if (!row) return { granted: false, reason: "unknown_code" };
   const user = await trx("users").where({ id: userId }).first();
   if (!user) return { granted: false, reason: "user_not_found" };
+  if (isPersonalInvite(row)) return redeemPersonalInvite({ user, row, availability, via, trx });
   const owned = await trx("product_entitlements")
     .where({ user_id: userId, product_slug: "tabforge", status: "active" })
     .andWhere((qb) => { qb.whereNull("expires_at").orWhere("expires_at", ">", trx.fn.now()); })
@@ -239,11 +322,92 @@ export async function listCompCodes(trx = db) {
       reason: availability.reason,
       createdBy: row.metadata?.created_by || null,
       createdAt: row.created_at,
-      link: compCodeSignupLink(row.code),
+      link: compCodeSignupLink(row.code, row.metadata?.email || null),
       perSaleRewardCents: compCodeCommission(row)?.rewardAmountCents ?? null,
+      email: row.metadata?.email || null,
+      grants: isPersonalInvite(row) ? compCodeGrants(row) : [...COMP_GRANT_SLUGS],
+      invite: isPersonalInvite(row),
     });
   }
   return items;
+}
+
+/**
+ * A personal invite for one email address that has no account yet. The link
+ * signs them up with the address filled in; verifying it applies everything
+ * here. Spent by that one account.
+ */
+export async function createPersonalInvite(
+  { email, grants = [], rcgDevices = 0, tabforgePerSaleCents = null, flatRates = {}, affiliate = false, note = null, createdBy = null } = {},
+  trx = db
+) {
+  const address = String(email || "").trim().toLowerCase();
+  if (!address.includes("@")) throw Object.assign(new Error("invalid_email"), { statusCode: 400 });
+  const products = [...new Set((grants || []).map((slug) => String(slug || "").trim().toLowerCase()))].filter(
+    (slug) => GRANTABLE_PRODUCTS[slug]
+  );
+
+  let code = "";
+  for (let i = 0; i < 8 && !code; i += 1) {
+    const candidate = `INVITE-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+    if (!(await trx("referral_codes").where({ code: candidate }).first())) code = candidate;
+  }
+  if (!code) throw Object.assign(new Error("code_generation_failed"), { statusCode: 500 });
+
+  const terms = {};
+  if (Number.isInteger(Number(tabforgePerSaleCents)) && Number(tabforgePerSaleCents) > 0) {
+    terms.tabforgePerSaleCents = Number(tabforgePerSaleCents);
+  }
+  const rates = {};
+  for (const [slug, value] of Object.entries(flatRates || {})) {
+    const cents = Number(value);
+    if (value !== null && value !== "" && Number.isInteger(cents) && cents >= 0) rates[slug] = cents;
+  }
+  if (Object.keys(rates).length) terms.flatRates = rates;
+
+  const [row] = await trx("referral_codes")
+    .insert({
+      id: crypto.randomUUID(),
+      user_id: null,
+      email: null,
+      code,
+      cashapp_handle: null,
+      status: "active",
+      metadata: {
+        kind: COMP_CODE_KIND,
+        email: address,
+        grants: products,
+        rcg_devices: products.includes("rose-colored-glasses") ? Math.max(1, Math.min(1000, Number(rcgDevices) || 1)) : 0,
+        referral_terms: terms,
+        affiliate: Boolean(affiliate),
+        max_redemptions: 1,
+        note: String(note || "").trim() || null,
+        created_by: createdBy,
+      },
+      updated_at: trx.fn.now(),
+    })
+    .returning("*");
+  return { row, link: compCodeSignupLink(row.code, address) };
+}
+
+export async function listInvitesForEmail(email, trx = db) {
+  const address = String(email || "").trim().toLowerCase();
+  const rows = await trx("referral_codes")
+    .whereRaw("metadata->>'kind' = ?", [COMP_CODE_KIND])
+    .whereRaw("lower(metadata->>'email') = ?", [address])
+    .orderBy("created_at", "desc");
+  return rows.map((row) => ({
+    code: row.code,
+    status: row.status,
+    redeemed: Boolean(row.metadata?.redeemed_by),
+    grants: compCodeGrants(row),
+    rcgDevices: row.metadata?.rcg_devices || 0,
+    referralTerms: row.metadata?.referral_terms || {},
+    affiliate: Boolean(row.metadata?.affiliate),
+    note: row.metadata?.note || null,
+    createdAt: row.created_at,
+    link: compCodeSignupLink(row.code, address),
+  }));
 }
 
 export async function upsertCompCode({ code, note, maxRedemptions, status, createdBy, perSaleRewardCents } = {}, trx = db) {

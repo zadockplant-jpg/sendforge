@@ -345,3 +345,15 @@ test("activation codes for Rose Colored Glasses start with RC", async () => {
   const row = await getOrCreateActivationCode(gus, RCG);
   assert.match(row.code, /^RC-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
 });
+
+test("a Rose Colored Glasses device never moves to another PC", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const routes = await readFile(new URL("../src/routes/licensing.routes.js", import.meta.url), "utf8");
+  const deactivate = routes.slice(routes.indexOf('"/devices/:deviceId/deactivate"'));
+  // Refused before any row is touched: $5 buys the product for that device.
+  assert.ok(
+    deactivate.indexOf("device_moves_not_allowed") < deactivate.indexOf("deactivateDevice("),
+    "the seat-based refusal comes before the slot is freed"
+  );
+  assert.match(deactivate, /if \(product\.seatBased\) \{\s*return res\.status\(403\)/);
+});
