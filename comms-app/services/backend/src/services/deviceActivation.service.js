@@ -1,8 +1,9 @@
 /**
  * Activation slots: how many machines a licence may run on, and which.
  *
- * The rule the product sells is "up to 5 devices". Enforcing that correctly is
- * the whole job here, and the one subtle part is the counting.
+ * The rule each product sells - "up to 5 devices" for ForgeDrop, "one device
+ * per purchase" for Rose Colored Glasses - is a device limit. Enforcing it
+ * correctly is the whole job here, and the one subtle part is the counting.
  */
 
 import crypto from "crypto";
@@ -14,6 +15,7 @@ import {
   normalizeActivationCode,
   signLicenseToken,
 } from "./licenseToken.service.js";
+import { codePrefixFor } from "./licensedProducts.js";
 
 export const DEFAULT_DEVICE_LIMIT = 5;
 
@@ -45,7 +47,7 @@ export async function getOrCreateActivationCode(userId, productSlug) {
     .first();
   if (existing) return existing;
 
-  const code = generateActivationCode();
+  const code = generateActivationCode(codePrefixFor(slug));
   const row = {
     id: crypto.randomUUID(),
     user_id: userId,
@@ -70,7 +72,7 @@ export async function getOrCreateActivationCode(userId, productSlug) {
 
 export async function rotateActivationCode(userId, productSlug) {
   const slug = normalizeSlug(productSlug);
-  const code = generateActivationCode();
+  const code = generateActivationCode(codePrefixFor(slug));
 
   const rows = await db("product_activation_codes")
     .where({ user_id: userId, product_slug: slug })
@@ -127,6 +129,11 @@ export class DeviceLimitReached extends Error {
  * simply running activation twice) re-signs without consuming a second slot.
  * That idempotency is load-bearing: without it, reinstalling Windows five
  * times exhausts a licence the owner never shared.
+ *
+ * `deviceLimit` is a number, or a function of the transaction for a product
+ * whose limit is the account's paid seats. The function is called while the
+ * lock is held, so the limit and the count it is compared against are read
+ * together.
  */
 export async function activateDevice({
   userId,
@@ -142,6 +149,10 @@ export async function activateDevice({
 
   return db.transaction(async (trx) =>
     withActivationLock(trx, userId, slug, async () => {
+      const limit =
+        typeof deviceLimit === "function"
+          ? Number(await deviceLimit(trx))
+          : Number(deviceLimit);
       const existing = deviceId
         ? await trx("device_activations")
             .where({ user_id: userId, product_slug: slug, device_id: deviceId })
@@ -153,8 +164,8 @@ export async function activateDevice({
         .select("*");
 
       const isReturning = existing && existing.status === "active";
-      if (!isReturning && active.length >= deviceLimit) {
-        throw new DeviceLimitReached(active.map(presentDevice), deviceLimit);
+      if (!isReturning && active.length >= limit) {
+        throw new DeviceLimitReached(active.map(presentDevice), limit);
       }
 
       const resolvedDeviceId = existing?.device_id || deviceId || crypto.randomUUID();
@@ -169,7 +180,7 @@ export async function activateDevice({
           name: deviceName || null,
           iat: Math.floor(issuedAt.getTime() / 1000),
           exp: null, // perpetual, matching expires_at NULL in product_entitlements
-          lim: deviceLimit,
+          lim: limit,
         },
         { signingKey: env.licenseSigningKey, kid: env.licenseSigningKid }
       );
@@ -214,7 +225,7 @@ export async function activateDevice({
         kid: env.licenseSigningKid,
         issuedAt,
         reactivated: Boolean(isReturning),
-        devices: { used, limit: deviceLimit },
+        devices: { used, limit },
       };
     })
   );
@@ -244,6 +255,20 @@ export async function deactivateDevice(userId, productSlug, deviceId) {
   return rows[0] || null;
 }
 
+/**
+ * When this account last freed a slot for this product. A per-device product
+ * limits how often that can happen, because a licence already on a machine
+ * keeps working there - an unlimited "move" would be unlimited devices.
+ */
+export async function lastDeactivationAt(userId, productSlug) {
+  const row = await db("device_activations")
+    .where({ user_id: userId, product_slug: normalizeSlug(productSlug) })
+    .whereNotNull("deactivated_at")
+    .max({ at: "deactivated_at" })
+    .first();
+  return row?.at ? new Date(row.at) : null;
+}
+
 export async function describeActivation(userId, productSlug, deviceLimit = DEFAULT_DEVICE_LIMIT) {
   const slug = normalizeSlug(productSlug);
   const [codeRow, devices] = await Promise.all([
@@ -253,7 +278,9 @@ export async function describeActivation(userId, productSlug, deviceLimit = DEFA
 
   return {
     productSlug: slug,
-    activationCode: codeRow ? formatActivationCode(codeRow.code_normalized) : null,
+    activationCode: codeRow
+      ? formatActivationCode(codeRow.code_normalized, codePrefixFor(slug))
+      : null,
     devices: devices.map(presentDevice),
     limit: deviceLimit,
     used: devices.length,

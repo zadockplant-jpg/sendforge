@@ -15,6 +15,7 @@ import {
   ensureReferralCodeForUser,
   hasReferralProgramEligibility,
   normalizeCashAppTag,
+  rewardPayoutEligibility,
 } from "../services/referrals/referral.service.js";
 import {
   PERK_ENTITLEMENT_SLUGS,
@@ -555,7 +556,7 @@ async function applyRewardStatusChange(req, rewardId, data) {
 
       if (target === "approved" || target === "paid") {
         if (
-          !(await hasReferralProgramEligibility(
+          !(await rewardPayoutEligibility(
             existing.user_id,
             existing.product_slug,
             trx

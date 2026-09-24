@@ -29,12 +29,33 @@ import {
   TABFORGE_SYNC_PRODUCT_SLUG,
   TABFORGE_SYNC_TRIAL_DAYS,
 } from "../services/tabforgeBilling.service.js";
+import {
+  countActiveSeats,
+  seatLinesTotalCents,
+  seatPriceLines,
+  seatPricing,
+} from "../services/productSeats.service.js";
 import { handleStripeWebhook } from "./stripe.webhooks.routes.js";
 import { log } from "../utils/logger.js";
 
 export const billingRouter = Router();
 
 const PRODUCT_CATALOG = {
+  // One device per purchase: $5 for an account's first device, $4 for each
+  // one after (see productSeats.service.js). The purchase grants the
+  // entitlement and adds seats; activating machines against those seats is
+  // handled in licensing.routes.js.
+  "rose-colored-glasses": {
+    slug: "rose-colored-glasses",
+    displayName: "Rose Colored Glasses",
+    mode: "payment",
+    seatBased: true,
+    entitlementSlug: "rose-colored-glasses",
+    quantityMin: 1,
+    quantityMax: 10,
+    defaultSuccessPath: "/account/index.html?purchase_context=rose-colored-glasses#rose-colored-glasses",
+    defaultCancelPath: "/products/rose-colored-glasses/index.html",
+  },
   // One-time $20. The purchase grants a perpetual entitlement (expires_at
   // stays NULL); activating machines against it is handled separately in
   // licensing.routes.js.
@@ -615,6 +636,43 @@ async function userHasPermanentTabForgePro(userId) {
   ]);
 }
 
+/**
+ * A seat purchase as Stripe line items: the first device at its own price when
+ * the account has none yet, then every other device at the additional price.
+ */
+function buildSeatLineItems(product, seatLines) {
+  return seatLines.map((line) => ({
+    quantity: line.quantity,
+    price_data: {
+      currency: "usd",
+      unit_amount: line.unitAmountCents,
+      product_data: {
+        name:
+          line.role === "first"
+            ? `${product.displayName} — 1 device`
+            : `${product.displayName} — additional device`,
+        metadata: {
+          kind: "device_seat",
+          slug: product.slug,
+          entitlement_slug: product.entitlementSlug || product.slug,
+          seat_role: line.role,
+        },
+      },
+    },
+  }));
+}
+
+function buildSeatCheckoutItem(product, seatLines) {
+  return {
+    kind: "device_seat",
+    slug: product.slug,
+    displayName: product.displayName,
+    entitlementSlug: product.entitlementSlug || product.slug,
+    quantity: seatLines.reduce((sum, line) => sum + line.quantity, 0),
+    amountCents: seatLinesTotalCents(seatLines),
+  };
+}
+
 function buildLineItems({
   product,
   packs,
@@ -1066,7 +1124,19 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     });
   }
 
-  if (product && product.slug !== "tabforge-page" && quantity !== 1) {
+  if (
+    product &&
+    product.slug !== "tabforge-page" &&
+    !product.seatBased &&
+    quantity !== 1
+  ) {
+    return res.status(400).json({ error: "invalid_quantity" });
+  }
+
+  if (
+    product?.seatBased &&
+    (quantity < (product.quantityMin || 1) || quantity > (product.quantityMax || 1))
+  ) {
     return res.status(400).json({ error: "invalid_quantity" });
   }
 
@@ -1206,21 +1276,34 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     const proOnly =
       product?.slug === TABFORGE_PRO_PRODUCT_SLUG &&
       reconciledTabForgeSyncSubscription;
-    const checkoutItems = buildCheckoutSummary({
-      product,
-      packs,
-      skins,
-      quantity,
-      proOnly,
-    });
-    const lineItems = buildLineItems({
-      priceIds: await usableTabForgePriceIds(stripe),
-      product,
-      packs,
-      skins,
-      quantity,
-      proOnly,
-    });
+    // A per-device product is priced from the seats the account already
+    // holds: only an account with none pays the first-device price.
+    const seatLines = product?.seatBased && seatPricing(product.slug)
+      ? seatPriceLines(
+          product.slug,
+          await countActiveSeats(user.id, product.slug),
+          quantity
+        )
+      : null;
+    const checkoutItems = seatLines
+      ? [buildSeatCheckoutItem(product, seatLines)]
+      : buildCheckoutSummary({
+          product,
+          packs,
+          skins,
+          quantity,
+          proOnly,
+        });
+    const lineItems = seatLines
+      ? buildSeatLineItems(product, seatLines)
+      : buildLineItems({
+          priceIds: await usableTabForgePriceIds(stripe),
+          product,
+          packs,
+          skins,
+          quantity,
+          proOnly,
+        });
 
     const metadata =
       checkoutItems.length === 1 &&

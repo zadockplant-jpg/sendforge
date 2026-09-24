@@ -2,32 +2,47 @@
  * Activation for licensed desktop and mobile apps.
  *
  * `POST /activate` is the only endpoint an installed app ever calls, once, and
- * then never again. Everything else here serves the account page.
+ * then never again. Everything else here serves the account page and the
+ * product pages.
  */
 
 import { Router } from "express";
 import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { createRateLimiter, rateLimitByUserOrIp } from "../middleware/rateLimit.js";
+import {
+  customerTokenMatchesUser,
+  getCurrentCustomerAuthState,
+  verifyCustomerAccessToken,
+} from "../services/auth.service.js";
 import { hasProductEntitlement } from "../services/entitlement.service.js";
 import {
-  DEFAULT_DEVICE_LIMIT,
   DeviceLimitReached,
   activateDevice,
   deactivateDevice,
   describeActivation,
   findByActivationCode,
+  lastDeactivationAt,
   rotateActivationCode,
 } from "../services/deviceActivation.service.js";
 import { LICENSED_PRODUCTS, licensedProduct } from "../services/licensedProducts.js";
+import {
+  DEVICE_MOVE_COOLDOWN_DAYS,
+  countActiveSeats,
+  deviceLimitFor,
+  nextDeviceCents,
+  seatPricing,
+} from "../services/productSeats.service.js";
 import { log, getRequestId } from "../utils/logger.js";
 
 export const licensingRouter = Router();
 
 /**
- * Activation is unauthenticated: the app collects a code, not a password. The
- * code is 60 bits, so the limiter is about keeping the endpoint quiet rather
- * than about making guessing infeasible, which it already is.
+ * Activation is unauthenticated when the app brings a code: the code is 60
+ * bits, so the limiter is about keeping the endpoint quiet rather than about
+ * making guessing infeasible, which it already is. An app that signs in brings
+ * a customer token instead; password guessing happens one step earlier, at
+ * /v1/auth/login, which has its own limiter.
  */
 const activateLimiter = createRateLimiter({
   name: "license-activate",
@@ -51,9 +66,79 @@ function clean(value, max = 120) {
   return text.slice(0, max);
 }
 
+/**
+ * The account behind a Bearer token, when the request carries one. The app
+ * signs in with the customer's SendForge email and password, so the account
+ * that bought the product is the one the machine is tied to, with no code to
+ * copy between windows.
+ */
+async function customerFromBearer(req) {
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) return null;
+
+  let payload;
+  try {
+    payload = verifyCustomerAccessToken(header.slice(7));
+  } catch {
+    return { error: "invalid_token" };
+  }
+  const user = await getCurrentCustomerAuthState(payload.sub);
+  if (!customerTokenMatchesUser(payload, user)) return { error: "invalid_token" };
+  return { userId: user.id };
+}
+
+function limitResolver(userId, product) {
+  // A seat-based product reads its seats inside the activation lock, so the
+  // limit and the device count it is compared against are read together.
+  return product.seatBased
+    ? (trx) => deviceLimitFor(userId, product, trx)
+    : product.deviceLimit;
+}
+
+function seatSummary(product, seats) {
+  if (!product.seatBased) return {};
+  const pricing = seatPricing(product.slug);
+  return {
+    seatBased: true,
+    seats,
+    nextDeviceCents: nextDeviceCents(product.slug, seats),
+    firstDeviceCents: pricing?.firstDeviceCents ?? null,
+    additionalDeviceCents: pricing?.additionalDeviceCents ?? null,
+  };
+}
+
+async function moveWindow(userId, product) {
+  if (!product.seatBased) return { moveCooldownDays: 0, nextMoveAt: null };
+  const last = await lastDeactivationAt(userId, product.slug);
+  const next = last
+    ? new Date(last.getTime() + DEVICE_MOVE_COOLDOWN_DAYS * 24 * 60 * 60 * 1000)
+    : null;
+  return {
+    moveCooldownDays: DEVICE_MOVE_COOLDOWN_DAYS,
+    nextMoveAt: next && next.getTime() > Date.now() ? next.toISOString() : null,
+  };
+}
+
+async function accountView(userId, product) {
+  const limit = await deviceLimitFor(userId, product);
+  const seats = product.seatBased ? await countActiveSeats(userId, product.slug) : 0;
+  return {
+    ...(await describeActivation(userId, product.slug, limit)),
+    ...seatSummary(product, seats),
+    ...(await moveWindow(userId, product)),
+  };
+}
+
 licensingRouter.post("/activate", activateLimiter, async (req, res) => {
-  const { activationCode, deviceId, deviceName, platform, appVersion, identityFingerprint } =
-    req.body || {};
+  const {
+    activationCode,
+    productSlug,
+    deviceId,
+    deviceName,
+    platform,
+    appVersion,
+    identityFingerprint,
+  } = req.body || {};
 
   // Deploying without the signing key would otherwise surface to a paying
   // customer as a 500 on the machine they just bought the app for. Fail
@@ -63,37 +148,47 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
     return res.status(503).json({ error: "licensing_unavailable" });
   }
 
-  const codeRow = await findByActivationCode(activationCode);
-  if (!codeRow) {
-    return res.status(404).json({ error: "unknown_activation_code" });
+  let userId;
+  let product;
+  const signedIn = await customerFromBearer(req);
+  if (signedIn?.error) {
+    return res.status(401).json({ error: signedIn.error });
   }
 
-  const product = licensedProduct(codeRow.product_slug);
-  if (!product) {
-    return res.status(404).json({ error: "unknown_product" });
+  if (signedIn) {
+    product = licensedProduct(productSlug);
+    if (!product) return res.status(404).json({ error: "unknown_product" });
+    userId = signedIn.userId;
+  } else {
+    const codeRow = await findByActivationCode(activationCode);
+    if (!codeRow) {
+      return res.status(404).json({ error: "unknown_activation_code" });
+    }
+    product = licensedProduct(codeRow.product_slug);
+    if (!product) {
+      return res.status(404).json({ error: "unknown_product" });
+    }
+    userId = codeRow.user_id;
   }
 
-  // The code identifies the account; the entitlement is what actually grants
-  // the product. A refunded or revoked purchase must stop activating new
-  // machines even though the owner still has the code written down.
-  const entitled = await hasProductEntitlement(
-    codeRow.user_id,
-    product.entitlementSlug || product.slug
-  );
+  // The code or the sign-in identifies the account; the entitlement is what
+  // actually grants the product. A refunded or revoked purchase must stop
+  // activating new machines even though the owner still has the code.
+  const entitled = await hasProductEntitlement(userId, product.entitlementSlug || product.slug);
   if (!entitled) {
-    return res.status(403).json({ error: "entitlement_required" });
+    return res.status(403).json({ error: "entitlement_required", productSlug: product.slug });
   }
 
   try {
     const result = await activateDevice({
-      userId: codeRow.user_id,
+      userId,
       productSlug: product.slug,
       deviceId: clean(deviceId, 64),
       deviceName: clean(deviceName, 80),
       platform: clean(platform, 32),
       appVersion: clean(appVersion, 32),
       identityFingerprint: clean(identityFingerprint, 64),
-      deviceLimit: product.deviceLimit || DEFAULT_DEVICE_LIMIT,
+      deviceLimit: limitResolver(userId, product),
     });
 
     return res.json({
@@ -108,12 +203,15 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
     });
   } catch (error) {
     if (error instanceof DeviceLimitReached) {
-      // Hand back the list so the app can offer to free a slot in place,
-      // rather than sending the user off to a website mid-install.
+      // Hand back the list so the app can say which machines hold the
+      // licence, and for a per-device product what one more device costs.
+      const seats = product.seatBased ? await countActiveSeats(userId, product.slug) : 0;
       return res.status(409).json({
         error: "device_limit_reached",
         limit: error.limit,
         devices: error.devices,
+        productSlug: product.slug,
+        ...seatSummary(product, seats),
       });
     }
 
@@ -132,8 +230,26 @@ licensingRouter.get("/products", (_req, res) => {
       slug: p.slug,
       displayName: p.displayName,
       deviceLimit: p.deviceLimit,
+      seatBased: Boolean(p.seatBased),
+      ...(p.seatBased ? { pricing: seatPricing(p.slug) } : {}),
     })),
   });
+});
+
+/**
+ * What the product page needs to price the next device for the signed-in
+ * account: $5 for someone who owns none, $4 after that. Answers whether or
+ * not the account owns the product yet.
+ */
+licensingRouter.get("/seats", requireAuth, deviceAdminLimiter, async (req, res) => {
+  const product = licensedProduct(req.query.productSlug);
+  if (!product || !product.seatBased) return res.status(404).json({ error: "unknown_product" });
+
+  const [owned, seats] = await Promise.all([
+    hasProductEntitlement(req.user.sub, product.entitlementSlug || product.slug),
+    countActiveSeats(req.user.sub, product.slug),
+  ]);
+  return res.json({ productSlug: product.slug, owned, ...seatSummary(product, seats) });
 });
 
 licensingRouter.get("/devices", requireAuth, deviceAdminLimiter, async (req, res) => {
@@ -146,9 +262,7 @@ licensingRouter.get("/devices", requireAuth, deviceAdminLimiter, async (req, res
   );
   if (!owned) return res.status(403).json({ error: "entitlement_required" });
 
-  return res.json(
-    await describeActivation(req.user.sub, product.slug, product.deviceLimit)
-  );
+  return res.json(await accountView(req.user.sub, product));
 });
 
 licensingRouter.post(
@@ -159,13 +273,17 @@ licensingRouter.post(
     const product = licensedProduct(req.body?.productSlug || req.query.productSlug);
     if (!product) return res.status(404).json({ error: "unknown_product" });
 
+    if (product.seatBased) {
+      const window = await moveWindow(req.user.sub, product);
+      if (window.nextMoveAt) {
+        return res.status(429).json({ error: "device_move_cooldown", ...window });
+      }
+    }
+
     const row = await deactivateDevice(req.user.sub, product.slug, req.params.deviceId);
     if (!row) return res.status(404).json({ error: "unknown_device" });
 
-    return res.json({
-      ok: true,
-      ...(await describeActivation(req.user.sub, product.slug, product.deviceLimit)),
-    });
+    return res.json({ ok: true, ...(await accountView(req.user.sub, product)) });
   }
 );
 
@@ -180,7 +298,5 @@ licensingRouter.post("/code/rotate", requireAuth, deviceAdminLimiter, async (req
   if (!owned) return res.status(403).json({ error: "entitlement_required" });
 
   await rotateActivationCode(req.user.sub, product.slug);
-  return res.json(
-    await describeActivation(req.user.sub, product.slug, product.deviceLimit)
-  );
+  return res.json(await accountView(req.user.sub, product));
 });

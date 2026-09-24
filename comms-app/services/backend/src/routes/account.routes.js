@@ -12,13 +12,15 @@ import {
   tabForgeAccountBillingStatus,
 } from "../services/tabforgeBilling.service.js";
 import {
+  canHoldReferralCode,
   createReferralInvite,
   ensureReferralCodeForUser,
+  flatReferralSummary,
   hasReferralProgramEligibility,
   REFERRAL_REQUIRED_PRODUCT_SLUG,
   resolveReferralInviteToken,
   tiersForVerifiedCount,
-  updateUserCashAppTag,
+  updateUserCashAppTag,
   commissionPlanForReferralCode,
   effectiveProgramForReferrer,
 } from "../services/referrals/referral.service.js";
@@ -334,10 +336,18 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
           .orderBy("updated_at", "desc")
           .first(),
       ]);
+    // referralEligible keeps meaning "earns on TabForge". Owning a product
+    // with a flat reward, such as Rose Colored Glasses, is enough for a code
+    // too; productReferrals says what that code earns there.
     const referralEligible = await hasReferralProgramEligibility(user.id);
-    const referralCode = referralEligible
+    const holdsReferralCode =
+      referralEligible || (await canHoldReferralCode(user.id));
+    const referralCode = holdsReferralCode
       ? await ensureReferralCodeForUser(user)
       : null;
+    const productReferrals = holdsReferralCode
+      ? await flatReferralSummary(user.id)
+      : [];
 
     return res.json({
       user: {
@@ -360,6 +370,7 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
         reason: referralEligible ? null : "tabforge_pro_required",
         requiredProductSlug: REFERRAL_REQUIRED_PRODUCT_SLUG,
       },
+      productReferrals,
       billing: {
         activePlan: activePlan.plan,
         limits: activePlan.limits,

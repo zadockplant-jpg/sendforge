@@ -45,8 +45,18 @@ export const env = {
   // installed app forever, with no channel to reach that machine and say
   // otherwise - rotating the kid keeps old licences valid, so rotation is not
   // revocation.
-  licenseSigningKey: process.env.FORGEDROP_LICENSE_SIGNING_KEY || "",
-  licenseSigningKid: process.env.FORGEDROP_LICENSE_SIGNING_KID || "fd-2026-09",
+  //
+  // One key signs every licensed product; the product is inside the signed
+  // payload, so a ForgeDrop licence can never open Rose Colored Glasses. The
+  // FORGEDROP_ names are the original ones and still work.
+  licenseSigningKey:
+    process.env.LICENSE_SIGNING_KEY ||
+    process.env.FORGEDROP_LICENSE_SIGNING_KEY ||
+    "",
+  licenseSigningKid:
+    process.env.LICENSE_SIGNING_KID ||
+    process.env.FORGEDROP_LICENSE_SIGNING_KID ||
+    "fd-2026-09",
 
   // Inmate Records merch fulfillment (backend only)
   printfulApiKey: process.env.PRINTFUL_API_KEY || "",

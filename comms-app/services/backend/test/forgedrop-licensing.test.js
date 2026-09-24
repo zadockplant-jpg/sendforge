@@ -107,7 +107,11 @@ test("ForgeDrop is registered as a licensed product with a 5-device limit", () =
   assert.equal(product.deviceLimit, 5);
   assert.equal(product.entitlementSlug, "forgedrop");
   assert.equal(licensedProduct("tabforge"), null, "only licensed apps belong here");
-  assert.equal(LICENSED_PRODUCTS.length, 1);
+  assert.equal(product.seatBased, false, "one purchase covers all five");
+  assert.deepEqual(
+    LICENSED_PRODUCTS.map((p) => p.slug),
+    ["forgedrop", "rose-colored-glasses"]
+  );
 });
 
 test("slot counting is serialised by an advisory lock", async () => {

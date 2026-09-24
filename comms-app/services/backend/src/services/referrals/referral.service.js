@@ -51,6 +51,27 @@ const REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS = [
   "tabforge-pro",
 ];
 
+// Products that pay the referrer a flat amount, once per customer they bring
+// in, instead of the TabForge milestone tiers. Rose Colored Glasses pays $1.
+//
+// Owning one of these is also enough to hold a referral code. It is the same
+// code TabForge uses - one link per person - but it earns only on products
+// whose own gate the referrer passes: the TabForge tiers still check TabForge
+// Pro on every payout, so owning Rose Colored Glasses alone never pays on a
+// TabForge sale.
+export const FLAT_REFERRAL_REWARDS = Object.freeze({
+  "rose-colored-glasses": 100,
+});
+
+const REFERRAL_CODE_ENTITLEMENT_SLUGS = [
+  ...REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS,
+  ...Object.keys(FLAT_REFERRAL_REWARDS),
+];
+
+export function flatReferralRewardCents(productSlug) {
+  return FLAT_REFERRAL_REWARDS[normalizeProductSlug(productSlug)] || 0;
+}
+
 export function normalizeReferralValue(value) {
   return String(value || "").trim();
 }
@@ -105,6 +126,35 @@ export async function hasReferralProgramEligibility(
   return Boolean(entitlement);
 }
 
+/**
+ * Whether this account gets a referral code at all: it owns TabForge Pro or a
+ * product with a flat referral reward. Which sales it earns on is decided per
+ * payout, not here.
+ */
+export async function canHoldReferralCode(userId, trx = db) {
+  if (!userId) return false;
+  const entitlement = await trx("product_entitlements")
+    .where({ user_id: userId, status: "active" })
+    .whereIn("product_slug", REFERRAL_CODE_ENTITLEMENT_SLUGS)
+    .andWhere((query) => {
+      query.whereNull("expires_at").orWhere("expires_at", ">", trx.fn.now());
+    })
+    .first();
+  return Boolean(entitlement);
+}
+
+/**
+ * Whether a queued reward may be approved and paid, by the product it was
+ * earned on. A flat-reward product needs its referrer to still be a customer;
+ * TabForge rewards, including Private Sync shares, need TabForge Pro.
+ */
+export async function rewardPayoutEligibility(userId, productSlug, trx = db) {
+  const slug = normalizeProductSlug(productSlug);
+  if (flatReferralRewardCents(slug) > 0) return canHoldReferralCode(userId, trx);
+  const programSlug = slug === SYNC_SHARE_PRODUCT_SLUG ? REFERRAL_REQUIRED_PRODUCT_SLUG : slug;
+  return hasReferralProgramEligibility(userId, programSlug, trx);
+}
+
 function hashInviteToken(token) {
   return crypto.createHash("sha256").update(String(token || "")).digest("hex");
 }
@@ -133,7 +183,7 @@ async function createUniqueReferralCode(knex, email) {
 
 export async function ensureReferralCodeForUser(user, trx = db) {
   if (!user?.id || !user?.email) return null;
-  if (!(await hasReferralProgramEligibility(user.id, REFERRAL_REQUIRED_PRODUCT_SLUG, trx))) {
+  if (!(await canHoldReferralCode(user.id, trx))) {
     return null;
   }
 
@@ -184,14 +234,7 @@ export async function resolveReferralIdentifier(identifier, trx = db) {
   const user = code.user_id
     ? await trx("users").where({ id: code.user_id }).first()
     : null;
-  if (
-    !user ||
-    !(await hasReferralProgramEligibility(
-      user.id,
-      REFERRAL_REQUIRED_PRODUCT_SLUG,
-      trx
-    ))
-  ) {
+  if (!user || !(await canHoldReferralCode(user.id, trx))) {
     return null;
   }
 
@@ -1101,6 +1144,181 @@ export async function recordSyncSubscriptionShare({
       amountCents,
     });
     return { recorded: true, reward, amountCents };
+  });
+}
+
+/**
+ * A flat-reward product pays the referrer once per customer they brought in,
+ * on that customer's first paid purchase. Extra devices the same customer
+ * buys later pay nothing more: their $1 discount already is the referral.
+ *
+ * Keyed on the referred customer, so neither a replayed webhook nor a second
+ * purchase can queue a second reward.
+ */
+export async function recordFlatProductReferral({
+  referredUserId,
+  productSlug,
+  purchaseRef,
+  netPaidCents,
+  metadata = {},
+}) {
+  const slug = normalizeProductSlug(productSlug);
+  const amountCents = flatReferralRewardCents(slug);
+  const ref = normalizeReferralValue(purchaseRef);
+  if (!amountCents) return { recorded: false, reason: "not_flat_referral_product" };
+  if (!referredUserId || !ref) return { recorded: false, reason: "missing_input" };
+  if (!(Number(netPaidCents) > 0)) return { recorded: false, reason: "no_positive_payment" };
+
+  return db.transaction(async (trx) => {
+    const referredUser = await trx("users").where({ id: referredUserId }).first();
+    if (!referredUser) return { recorded: false, reason: "customer_missing" };
+
+    const referrerId = referredUser.referred_by_user_id;
+    if (!referrerId) return { recorded: false, reason: "no_referrer" };
+    if (referrerId === referredUser.id) return { recorded: false, reason: "self_referral" };
+
+    const referrer = await trx("users").where({ id: referrerId }).first();
+    if (!referrer) return { recorded: false, reason: "referrer_missing" };
+    if (!(await canHoldReferralCode(referrer.id, trx))) {
+      return { recorded: false, reason: "referrer_not_a_customer" };
+    }
+
+    const referralCode = referredUser.referral_code_id
+      ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
+      : await ensureReferralCodeForUser(referrer, trx);
+
+    const [reward] = await trx("reward_queue")
+      .insert({
+        id: crypto.randomUUID(),
+        referral_code_id: referralCode?.id || null,
+        user_id: referrer.id,
+        email: normalizeEmail(referrer.email),
+        product_slug: slug,
+        reward_key: `first_purchase:${referredUser.id}`,
+        reward_amount_cents: amountCents,
+        reward_type: "cashapp_manual",
+        cashapp_handle: normalizeCashAppTag(referrer.cash_app_tag || referralCode?.cashapp_handle),
+        status: "pending",
+        metadata: {
+          ...metadata,
+          kind: "flat_referral",
+          purchase_ref: ref,
+          net_paid_cents: Number(netPaidCents) || 0,
+          referred_user_id: referredUser.id,
+          referred_email: normalizeEmail(referredUser.email),
+        },
+        updated_at: trx.fn.now(),
+      })
+      .onConflict(["user_id", "product_slug", "reward_key"])
+      .ignore()
+      .returning("*");
+
+    if (!reward) return { recorded: false, reason: "duplicate_referred_customer" };
+
+    await trx("referral_events")
+      .insert({
+        id: crypto.randomUUID(),
+        referral_code_id: referralCode?.id || null,
+        referrer_user_id: referrer.id,
+        referred_user_id: referredUser.id,
+        product_slug: slug,
+        purchase_ref: ref,
+        event_type: "purchase",
+        status: "verified",
+        metadata: {
+          ...metadata,
+          qualification: "flat_referral",
+          initial_net_paid_cents: Number(netPaidCents) || 0,
+        },
+        updated_at: trx.fn.now(),
+      })
+      .onConflict(["referral_code_id", "purchase_ref"])
+      .ignore();
+
+    log("info", "flat_referral_queued", {
+      referrerUserId: referrer.id,
+      referredUserId: referredUser.id,
+      productSlug: slug,
+      amountCents,
+    });
+    return { recorded: true, reward, amountCents };
+  });
+}
+
+/**
+ * What an account has earned from flat-reward products, one entry per
+ * product, for the account page.
+ */
+export async function flatReferralSummary(userId, trx = db) {
+  const slugs = Object.keys(FLAT_REFERRAL_REWARDS);
+  if (!userId) return [];
+  const rows = await trx("reward_queue")
+    .select("product_slug", "status")
+    .sum({ cents: "reward_amount_cents" })
+    .count({ count: "id" })
+    .where({ user_id: userId })
+    .whereIn("product_slug", slugs)
+    .groupBy("product_slug", "status");
+
+  return slugs.map((slug) => {
+    const mine = rows.filter((row) => row.product_slug === slug);
+    const counted = mine.filter((row) => !["canceled", "rejected"].includes(row.status));
+    return {
+      productSlug: slug,
+      rewardAmountCents: FLAT_REFERRAL_REWARDS[slug],
+      referredCustomers: counted.reduce((sum, row) => sum + Number(row.count || 0), 0),
+      earnedCents: counted.reduce((sum, row) => sum + Number(row.cents || 0), 0),
+      paidCents: mine
+        .filter((row) => row.status === "paid")
+        .reduce((sum, row) => sum + Number(row.cents || 0), 0),
+    };
+  });
+}
+
+/**
+ * A refunded, disputed or failed payment cancels the flat reward it queued,
+ * as long as that reward has not been paid out yet.
+ */
+export async function cancelFlatProductReferral({
+  paymentIntentId = "",
+  reason = "refunded",
+  providerEventId = "",
+} = {}) {
+  const pi = normalizeReferralValue(paymentIntentId);
+  if (!pi) return { canceled: 0, reason: "missing_payment_intent" };
+  const slugs = Object.keys(FLAT_REFERRAL_REWARDS);
+
+  return db.transaction(async (trx) => {
+    const rewards = await trx("reward_queue")
+      .whereIn("product_slug", slugs)
+      .whereIn("status", ["pending", "approved"])
+      .whereRaw("metadata->>'payment_intent' = ?", [pi])
+      .forUpdate();
+
+    for (const reward of rewards) {
+      await trx("reward_queue")
+        .where({ id: reward.id })
+        .update({
+          status: "canceled",
+          admin_note: "Automatically canceled because the referred purchase was refunded or disputed.",
+          metadata: {
+            ...(reward.metadata || {}),
+            canceled_at: new Date().toISOString(),
+            cancellation_reason: reason,
+            provider_event_id: providerEventId || null,
+          },
+          updated_at: trx.fn.now(),
+        });
+    }
+
+    await trx("referral_events")
+      .whereIn("product_slug", slugs)
+      .where({ event_type: "purchase" })
+      .whereIn("status", ["pending", "verified"])
+      .whereRaw("metadata->>'payment_intent' = ?", [pi])
+      .update({ status: reason, updated_at: trx.fn.now() });
+
+    return { canceled: rewards.length };
   });
 }
 

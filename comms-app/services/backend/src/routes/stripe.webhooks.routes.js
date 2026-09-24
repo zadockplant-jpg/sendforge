@@ -19,10 +19,17 @@ import {
   TABFORGE_SYNC_PRODUCT_SLUG,
 } from "../services/tabforgeBilling.service.js";
 import {
+  cancelFlatProductReferral,
   disqualifyReferralPurchaseForStripe,
+  flatReferralRewardCents,
+  recordFlatProductReferral,
   recordReferralPurchase,
   recordSyncSubscriptionShare,
 } from "../services/referrals/referral.service.js";
+import {
+  recordSeatPurchase,
+  reverseSeatPurchases,
+} from "../services/productSeats.service.js";
 import {
   markInmateRecordsOrderPaidFromStripe,
 } from "../services/inmate.records/orders.service.js";
@@ -311,6 +318,20 @@ async function revokeFailedCheckoutEntitlements(session) {
     reason: "payment_failed",
     providerEventId: String(session?.id || ""),
   });
+
+  // After the source_ref revoke above: the seat recount decides whether the
+  // per-device entitlement stays, because seats from earlier purchases may
+  // still be paid for.
+  await reverseSeatPurchases({
+    paymentIntentId: stripeObjectId(session?.payment_intent),
+    reason: "payment_failed",
+    providerEventId: String(session?.id || ""),
+  });
+  await cancelFlatProductReferral({
+    paymentIntentId: stripeObjectId(session?.payment_intent),
+    reason: "payment_failed",
+    providerEventId: String(session?.id || ""),
+  });
 }
 
 async function cancelLocalStripeSubscription(subscriptionId, session = {}) {
@@ -462,6 +483,58 @@ async function grantCheckoutEntitlements({
       continue;
     }
 
+    // A per-device product: the purchase grants the entitlement and adds one
+    // seat per device bought. Seats are keyed on the payment, so a replayed
+    // event cannot add them twice.
+    if (kind === "device_seat") {
+      const seats = Math.max(1, Number(item?.quantity || 1));
+      await grantProductEntitlement({
+        userId,
+        productSlug: entitlementSlug,
+        source: "stripe",
+        sourceRef,
+        metadata: {
+          checkout_session_id: checkoutSessionId,
+          customer_id: customerId || null,
+          payment_intent: paymentIntent || null,
+          checkout_item_kind: kind,
+          checkout_item_slug: slug || entitlementSlug,
+          checkout_item_display_name: item?.displayName || null,
+          last_quantity_purchased: seats,
+        },
+      });
+      await recordSeatPurchase({
+        userId,
+        productSlug: slug || entitlementSlug,
+        purchaseRef: `${sourceRef}:${slug || entitlementSlug}`,
+        quantity: seats,
+        // A seat checkout carries this one item, so the session's net total
+        // is what was paid for it, after any promotion code.
+        amountCents: referralNetPaidCents,
+        paymentIntent: paymentIntent || null,
+        checkoutSessionId,
+        metadata: {
+          customer_id: customerId || null,
+          list_amount_cents: Number(item?.amountCents || 0),
+        },
+      });
+
+      if (referralNetPaidCents > 0 && flatReferralRewardCents(entitlementSlug) > 0) {
+        await recordFlatProductReferral({
+          referredUserId: userId,
+          productSlug: entitlementSlug,
+          purchaseRef: `${sourceRef}:${entitlementSlug}`,
+          netPaidCents: referralNetPaidCents,
+          metadata: {
+            checkout_session_id: checkoutSessionId,
+            payment_intent: paymentIntent || null,
+            devices: seats,
+          },
+        });
+      }
+      continue;
+    }
+
     if (kind === "page_quantity") {
       const quantityPurchased = Math.max(1, Number(item?.quantity || 1));
       const existing = await getExistingEntitlement(userId, entitlementSlug);
@@ -551,7 +624,8 @@ async function grantCheckoutEntitlements({
   }
 }
 
-async function handleCheckoutSessionCompleted(session, stripe) {
+// Exported for the seat tests, which drive a real checkout through it.
+export async function handleCheckoutSessionCompleted(session, stripe) {
   const customerId = stripeObjectId(session.customer);
   const subscriptionId = stripeObjectId(session.subscription);
   const paymentIntentId = stripeObjectId(session.payment_intent);
@@ -655,7 +729,7 @@ function stripeObjectId(value) {
   return typeof value === "string" ? value : String(value.id || "");
 }
 
-async function handleReferralPaymentReversal({
+export async function handleReferralPaymentReversal({
   stripe,
   event,
   disputed = false,
@@ -680,6 +754,19 @@ async function handleReferralPaymentReversal({
     paymentIntentId: stripeObjectId(charge.payment_intent),
     invoiceId: stripeObjectId(charge.invoice),
     chargeId: stripeObjectId(charge.id),
+    reason: disputed ? "disputed" : "refunded",
+    providerEventId: String(event.id || ""),
+  });
+
+  // A refunded or disputed per-device purchase takes its seats back, and
+  // cancels the $1 its referrer was owed if it has not been paid yet.
+  await reverseSeatPurchases({
+    paymentIntentId: stripeObjectId(charge.payment_intent),
+    reason: disputed ? "disputed" : "refunded",
+    providerEventId: String(event.id || ""),
+  });
+  await cancelFlatProductReferral({
+    paymentIntentId: stripeObjectId(charge.payment_intent),
     reason: disputed ? "disputed" : "refunded",
     providerEventId: String(event.id || ""),
   });
