@@ -25,6 +25,12 @@ export const DOWNLOADS = Object.freeze({
       process.env.DOWNLOAD_SOURCE_ROSE_COLORED_GLASSES ||
       "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/rose-colored-glasses/Install.Rose.Colored.Glasses.exe",
   }),
+  forgedrop: Object.freeze({
+    filename: "Install ForgeDrop.exe",
+    source:
+      process.env.DOWNLOAD_SOURCE_FORGEDROP ||
+      "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/forgedrop/Install.ForgeDrop.exe",
+  }),
 });
 
 const downloadLimiter = createRateLimiter({
