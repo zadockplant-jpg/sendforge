@@ -439,12 +439,13 @@ test("numbers issued as INV-0012 and QUO-0003 become 12 and 3, cross-references 
   assert.equal(quote.data.invoiceNumber, "12");
 });
 
-test("quotes and invoices show the Ada address, the builders license and the insurance line", async () => {
+test("quotes and invoices show the Ada address, the license number and the insurance line", async () => {
   const adminCookie = await loginAsAdmin();
   const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
   const view = await (await request(`/clients/invoice/${item.shareToken}`)).text();
   assert.match(view, /<span>6749 Fulton St E, Ste A #2333<\/span><span>Ada, MI 49301<\/span>/u);
-  assert.match(view, /Builders license number 242601116/u);
+  assert.ok(view.includes("License # 242601116"));
+  assert.doesNotMatch(view, /Builders license number/u);
   assert.ok(view.includes("$1,000,000 liability insurance provided by Next First Insurance Agency Inc"));
   assert.doesNotMatch(view, /billing-doc-from[^\n]*Muskegon, Michigan/u);
 });

@@ -19,7 +19,7 @@ const BILLING_SCRIPT = "/clients/portal/billing.js";
 
 // Printed on every quote and invoice, worded exactly as the owner gave them.
 const BUSINESS_ADDRESS = ["6749 Fulton St E, Ste A #2333", "Ada, MI 49301"];
-const BUILDER_LICENSE = "Builders license number 242601116";
+const BUILDER_LICENSE = "License # 242601116";
 const INSURANCE = "$1,000,000 liability insurance provided by Next First Insurance Agency Inc";
 
 // Addresses the portal has emailed, newest first. billing.js turns this list into the pick list

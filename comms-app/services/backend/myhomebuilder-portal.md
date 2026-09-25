@@ -65,7 +65,7 @@ to the account tables. Each record keeps its full JSON in `data`; the columns be
 for lookups and uniqueness (invoice numbers, share-link tokens).
 
 - Every quote and invoice prints the business address (6749 Fulton St E, Ste A #2333,
-  Ada, MI 49301) and "Builders license number 242601116" in its header. Its footer reads
+  Ada, MI 49301) and "License # 242601116" in its header. Its footer reads
   "$1,000,000 liability insurance provided by Next First Insurance Agency Inc". These are
   constants at the top of `pages.js`, worded exactly as the owner gave them.
 - Every address a quote, invoice or receipt is emailed to is kept in `mhb_recipients` with
