@@ -27,6 +27,7 @@ import {
   claimSentEmail,
   completeSentEmail,
   createStore,
+  deleteSentEmails,
   deleteAdminChallenge,
   deleteTemplate,
   getAdminChallenge,
@@ -79,12 +80,11 @@ import {
 } from "./email.js";
 import {
   MIN_INVOICE_CENTS,
-  PAYMENT_METHODS,
   addDays,
   isEditable,
   isPayable,
-  isValidDate,
   parseBillingForm,
+  parseManualPayment,
   todayInMichigan
 } from "./billing.js";
 import { isPdf, signDocument } from "./pdf.js";
@@ -243,7 +243,12 @@ const NOTICES = {
   "not-payable": { text: "This invoice is not open for payment.", tone: "info" },
   "online-payment-unavailable": { text: "Online payment is not available yet. Please contact My Home Builder to arrange payment.", tone: "error" },
   "checkout-failed": { text: "Stripe checkout could not be started. Please try again in a moment.", tone: "error" },
-  "not-editable": { text: "Only open quotes and invoices can be edited.", tone: "error" },
+  "not-editable": { text: "Only open quotes and invoices, and paid invoices, can be edited.", tone: "error" },
+  "payment-updated": { text: "Payment details saved. Use Resend receipt to email the corrected receipt." },
+  "payment-removed": { text: "Marked unpaid. The invoice is open for payment again." },
+  "payment-from-stripe": { text: "This payment came through Stripe, so its details stay as Stripe recorded them.", tone: "info" },
+  "payment-other-required": { text: "Type the payment method when you choose Other.", tone: "error" },
+  "payment-date-invalid": { text: "Enter the date the payment was received.", tone: "error" },
   "name-required": { text: "Enter your name to accept the quote.", tone: "error" },
   "files-not-configured": { text: "File storage is not configured, so documents cannot be stored yet.", tone: "error" }
 };
@@ -802,7 +807,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (!isEditable(item)) return redirectResponse(`${itemPath}?notice=not-editable`);
     const editorPath = `${itemPath}/edit`;
     if (isRead) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: editorValuesFromItem(item), actionPath: editorPath, backPath: itemPath, readiness, number: item.number }));
+      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: editorValuesFromItem(item), actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid: item.status === "paid" }));
     }
     if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
     const form = await readBoundedForm(context.request, MAX_BILLING_FORM_BYTES);
@@ -810,7 +815,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     form.set("kind", item.kind);
     const parsed = parseBillingForm(form);
     if (parsed.error) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number }), 400);
+      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid: item.status === "paid" }), 400);
     }
     if (item.checkoutSessionId && parsed.values.amountCents !== item.amountCents) await expireCheckoutSession(env, item.checkoutSessionId);
     const { title, description, lineItems, amountCents, dueDate } = parsed.values;
@@ -841,16 +846,15 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   if (action === "record-payment") {
     if (item.kind !== "invoice" || item.status !== "open") return redirectResponse(`${itemPath}?notice=not-payable`);
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-    const paymentMethod = String(form?.get("method") || "");
-    const reference = String(form?.get("reference") || "").trim().slice(0, 80);
-    const paidOn = String(form?.get("paidOn") || "").trim();
-    if (!PAYMENT_METHODS[paymentMethod] || !isValidDate(paidOn)) return redirectResponse(`${itemPath}?notice=invalid`);
+    const entered = parseManualPayment(form);
+    if (entered.error) return redirectResponse(`${itemPath}?notice=${entered.error}`);
     if (item.checkoutSessionId) await expireCheckoutSession(env, item.checkoutSessionId);
+    const { paidOn, ...details } = entered;
     const updated = await withShareToken(store, {
       ...item,
       status: "paid",
       paidAt: paidOn,
-      payment: { source: "manual", method: paymentMethod, label: [PAYMENT_METHODS[paymentMethod], reference].filter(Boolean).join(" "), amountCents: item.amountCents, recordedAt: new Date().toISOString() }
+      payment: { source: "manual", ...details, amountCents: item.amountCents, recordedAt: new Date().toISOString() }
     });
     await putBilling(store, updated);
     let notice = "payment-recorded";
@@ -859,6 +863,29 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
       if (receipt.ok) notice = "payment-recorded-receipt";
     }
     return redirectResponse(`${itemPath}?notice=${notice}`);
+  }
+
+  // Corrects a payment recorded by hand (method, reference or date). Stripe payments keep what
+  // Stripe recorded. The receipt is not re-sent; "Resend receipt" sends the corrected one.
+  if (action === "payment") {
+    if (item.kind !== "invoice" || item.status !== "paid") return redirectResponse(itemPath);
+    if (item.payment?.source !== "manual") return redirectResponse(`${itemPath}?notice=payment-from-stripe`);
+    const entered = parseManualPayment(await readBoundedForm(context.request, MAX_FORM_BYTES));
+    if (entered.error) return redirectResponse(`${itemPath}?notice=${entered.error}`);
+    const { paidOn, ...details } = entered;
+    await putBilling(store, { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, updatedAt: new Date().toISOString() } });
+    return redirectResponse(`${itemPath}?notice=payment-updated`);
+  }
+
+  // Undoes a payment recorded by mistake. The invoice is open (payable) again, and its receipt
+  // and payment notice are forgotten so a later payment sends fresh ones.
+  if (action === "reopen") {
+    if (item.kind !== "invoice" || item.status !== "paid") return redirectResponse(itemPath);
+    if (item.payment?.source !== "manual") return redirectResponse(`${itemPath}?notice=payment-from-stripe`);
+    const { payment: _payment, paidAt: _paidAt, ...unpaid } = item;
+    await putBilling(store, { ...unpaid, status: "open", reopenedAt: new Date().toISOString() });
+    await deleteSentEmails(store, [sentKey(item, "receipt"), sentKey(item, "paid-notice")]);
+    return redirectResponse(`${itemPath}?notice=payment-removed`);
   }
 
   // Sends the receipt again on request, to any address, and records the latest send.

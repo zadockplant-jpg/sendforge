@@ -715,6 +715,76 @@ test("a check recorded by the admin emails a receipt, and a later Stripe payment
   assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "Check for a duplicate payment on Invoice 1");
 });
 
+test("a paid invoice's payment can be corrected, including Other with a typed method, or marked unpaid", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Pre Construction Services", amount: "15,000" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  const page = await (await request(path, { headers: { Cookie: adminCookie } })).text();
+  for (const option of ["Check", "Cash", "Zelle", "Venmo", "Cash App", "PayPal", "Bank transfer (ACH)", "Wire transfer", "Credit or debit card", "Money order", "Other"]) {
+    assert.ok(page.includes(`>${option}</option>`), option);
+  }
+  assert.match(page, /data-payment-other/u);
+
+  const missing = await request(`${path}/record-payment`, form({ method: "other", methodName: " ", paidOn: "2026-09-25" }, adminCookie));
+  assert.match(missing.headers.get("Location"), /notice=payment-other-required/u);
+  assert.equal((await stored(item)).status, "open");
+
+  await request(`${path}/record-payment`, form({ method: "check", reference: "#77", paidOn: "2026-09-25" }, adminCookie));
+  assert.equal((await stored(item)).payment.label, "Check #77");
+
+  const corrected = await request(`${path}/payment`, form({ method: "zelle", reference: "", paidOn: "2026-09-24" }, adminCookie));
+  assert.match(corrected.headers.get("Location"), /notice=payment-updated/u);
+  let paid = await stored(item);
+  assert.equal(paid.status, "paid");
+  assert.equal(paid.payment.label, "Zelle");
+  assert.equal(paid.paidAt, "2026-09-24");
+  assert.match(await (await request(`/clients/invoice/${item.shareToken}`)).text(), /Paid Sep 24, 2026 · Zelle/u);
+
+  await request(`${path}/payment`, form({ method: "other", methodName: "Trade credit", reference: "Lumber swap", paidOn: "2026-09-24" }, adminCookie));
+  paid = await stored(item);
+  assert.equal(paid.payment.label, "Trade credit Lumber swap");
+  assert.equal(paid.payment.methodName, "Trade credit");
+  const edited = await (await request(path, { headers: { Cookie: adminCookie } })).text();
+  assert.match(edited, /<option value="other" selected>Other<\/option>/u);
+  assert.match(edited, /value="Trade credit"/u);
+  assert.match(edited, /Payment details changed/u);
+
+  const editor = await request(`${path}/edit`, { headers: { Cookie: adminCookie } });
+  assert.equal(editor.status, 200, "paid invoices can still be edited");
+  assert.match(await editor.text(), /This invoice is marked paid/u);
+
+  const reopened = await request(`${path}/reopen`, form({}, adminCookie));
+  assert.match(reopened.headers.get("Location"), /notice=payment-removed/u);
+  const open = await stored(item);
+  assert.equal(open.status, "open");
+  assert.equal(open.payment, undefined);
+  assert.match(await (await request(`/clients/invoice/${item.shareToken}`)).text(), /I&#39;m paying by check/u);
+});
+
+test("a reopened invoice paid later through Stripe gets a fresh receipt, and Stripe payments cannot be edited by hand", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "again@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  const receipts = () => deliveredTo("again@example.com").filter((message) => message.subject.startsWith("Receipt")).length;
+
+  await request(`${path}/record-payment`, form({ method: "cash", paidOn: "2026-09-25", sendReceipt: "yes" }, adminCookie));
+  assert.equal(receipts(), 1);
+  await request(`${path}/reopen`, form({}, adminCookie));
+  assert.equal(await sentEmail(`muskegon-addition:${item.id}:receipt`), undefined);
+
+  await request(`/clients/pay/${item.shareToken}`);
+  const session = payStripeSession([...stripe.sessions.keys()].at(-1), { amount_total: 50000 });
+  assert.equal((await signedWebhook("checkout.session.completed", session)).status, 200);
+  assert.equal((await stored(item)).payment.source, "stripe");
+  assert.equal(receipts(), 2);
+
+  assert.match((await request(`${path}/payment`, form({ method: "zelle", paidOn: "2026-09-25" }, adminCookie))).headers.get("Location"), /notice=payment-from-stripe/u);
+  assert.match((await request(`${path}/reopen`, form({}, adminCookie))).headers.get("Location"), /notice=payment-from-stripe/u);
+  assert.equal((await stored(item)).status, "paid");
+  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Paid online through Stripe/u);
+});
+
 test("templates are saved, listed, used for a new quote, edited and deleted", async () => {
   const adminCookie = await loginAsAdmin();
   const invalid = await request("/clients/admin/templates", form({ kind: "quote", title: "Deck", ...lines(["Decking", "1", "10"]) }, adminCookie));

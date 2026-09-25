@@ -672,7 +672,7 @@ function lineRow(line, index) {
 }
 
 // One editor serves new quotes and invoices, edits to open ones, and saved templates.
-export function billingEditorPage({ mode, client = null, values, error = "", notice = null, actionPath, backPath, templates = [], readiness = {}, number = "" }) {
+export function billingEditorPage({ mode, client = null, values, error = "", notice = null, actionPath, backPath, templates = [], readiness = {}, number = "", paid = false }) {
   const template = mode === "template-new" || mode === "template-edit";
   const creating = mode === "create";
   const lines = values.lineItems || [];
@@ -726,6 +726,7 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
       ${loadTemplate}
       <form class="portal-form admin-form billing-editor" action="${escapeAttribute(actionPath)}" method="post">
         ${error ? `<p class="portal-error" role="alert">${escapeHtml(error)}</p>` : ""}
+        ${paid ? '<p class="portal-notice">This invoice is marked paid. Changing its lines changes its total; the recorded payment stays as it is.</p>' : ""}
         ${template ? `<label for="template-name">Template name
           <input id="template-name" name="templateName" type="text" maxlength="80" required value="${escapeAttribute(values.templateName || "")}" placeholder="Framing draw">
         </label>` : ""}
@@ -793,11 +794,34 @@ function activity(item, receipt) {
     item.acceptedAt ? [`Accepted${item.acceptedBy ? ` by ${item.acceptedBy}` : ""}`, item.acceptedAt] : null,
     item.processingAt ? ["Bank payment started", item.processingAt] : null,
     item.paymentFailedAt ? ["Bank payment failed", item.paymentFailedAt] : null,
+    item.reopenedAt ? ["Marked unpaid", item.reopenedAt] : null,
     item.paidAt ? [`Paid${item.payment?.label ? ` · ${item.payment.label}` : ""}`, item.paidAt] : null,
+    item.payment?.updatedAt ? ["Payment details changed", item.payment.updatedAt] : null,
     receipt ? [`Receipt emailed to ${receipt.to}`, receipt.sentAt] : null,
     item.voidedAt ? ["Voided", item.voidedAt] : null
   ].filter(Boolean);
   return `<ol class="admin-activity">${entries.map(([label, when]) => `<li><span>${escapeHtml(label)}</span><time datetime="${escapeAttribute(when)}">${dateText(when)}</time></li>`).join("")}</ol>`;
+}
+
+// Method, the name when the method is Other, reference and date: shared by "Record a payment"
+// and "Edit payment". billing.js shows the Other box only when Other is chosen.
+function paymentFields(prefix, { payment = null, date }) {
+  const chosen = payment?.method && Object.hasOwn(PAYMENT_METHODS, payment.method) ? payment.method : "check";
+  const methods = Object.entries(PAYMENT_METHODS)
+    .map(([value, label]) => `<option value="${value}"${value === chosen ? " selected" : ""}>${label}</option>`)
+    .join("");
+  return `<label for="${prefix}-method">Paid by
+              <select id="${prefix}-method" name="method" data-payment-method>${methods}</select>
+            </label>
+            <label for="${prefix}-other" data-payment-other>Other method (when Other is chosen)
+              <input id="${prefix}-other" name="methodName" type="text" maxlength="60" value="${escapeAttribute(payment?.methodName || "")}" placeholder="How it was paid">
+            </label>
+            <label for="${prefix}-reference">Reference (optional)
+              <input id="${prefix}-reference" name="reference" type="text" maxlength="80" value="${escapeAttribute(payment?.reference || "")}" placeholder="Check #1042 or confirmation number">
+            </label>
+            <label for="${prefix}-date">Received on
+              <input id="${prefix}-date" name="paidOn" type="date" value="${escapeAttribute(date)}" required>
+            </label>`;
 }
 
 export function adminBillingPage({ client, item, links, receipt = null, recipients = [], readiness, notice = null }) {
@@ -831,26 +855,40 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   }
 
   if (invoice && item.status === "open") {
-    const methods = Object.entries(PAYMENT_METHODS).map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
     cards.push(`<section class="admin-card">
           <h2>Record a payment</h2>
-          <p class="admin-meta">For checks, cash or transfers received outside Stripe.</p>
+          <p class="admin-meta">For checks, Zelle, cash and other payments received outside Stripe.</p>
           <form class="admin-stack-form" action="${base}/record-payment" method="post">
-            <label for="payment-method">Method
-              <select id="payment-method" name="method">${methods}</select>
-            </label>
-            <label for="payment-reference">Reference (optional)
-              <input id="payment-reference" name="reference" type="text" maxlength="80" placeholder="Check #1042">
-            </label>
-            <label for="payment-date">Received on
-              <input id="payment-date" name="paidOn" type="date" value="${escapeAttribute(links.today)}" required>
-            </label>
+            ${paymentFields("payment", { date: links.today })}
             ${readiness.email && client.email ? `<label class="portal-check" for="payment-receipt">
               <input id="payment-receipt" name="sendReceipt" type="checkbox" value="yes" checked>
               <span>Email a receipt to ${escapeHtml(client.email)}</span>
             </label>` : ""}
             <button class="button button-solid" type="submit">Mark as paid</button>
           </form>
+        </section>`);
+  }
+
+  if (invoice && item.status === "paid") {
+    const payment = item.payment || {};
+    const summary = [payment.label || "Payment", formatDate(item.paidAt), money(payment.amountCents ?? item.amountCents, item.currency)].filter(Boolean).join(" · ");
+    cards.push(payment.source === "manual"
+      ? `<section class="admin-card">
+          <h2>Payment</h2>
+          <p class="admin-meta">Recorded as ${escapeHtml(summary)}.</p>
+          <form class="admin-stack-form" action="${base}/payment" method="post">
+            ${paymentFields("edit-payment", { payment, date: String(item.paidAt || links.today).slice(0, 10) })}
+            <button class="button button-solid" type="submit">Save payment</button>
+          </form>
+          <form class="admin-danger" action="${base}/reopen" method="post">
+            <button class="portal-logout-button" type="submit">Mark as unpaid</button>
+            <p class="portal-security-note">Reopens the invoice for payment if it was marked paid by mistake.</p>
+          </form>
+        </section>`
+      : `<section class="admin-card">
+          <h2>Payment</h2>
+          <p class="admin-meta">Paid online through Stripe: ${escapeHtml(summary)}.</p>
+          <p class="portal-security-note">Stripe payments keep the details Stripe recorded.</p>
         </section>`);
   }
 

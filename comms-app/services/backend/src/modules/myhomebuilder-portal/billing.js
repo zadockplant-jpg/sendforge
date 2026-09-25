@@ -9,12 +9,22 @@ export const MAX_TEMPLATE_NAME = 80;
 export const MAX_TOTAL_CENTS = 99999999;
 export const MIN_INVOICE_CENTS = 50;
 
+// Ways a payment arrives outside Stripe. For "other" the admin types the method's name.
 export const PAYMENT_METHODS = {
   check: "Check",
   cash: "Cash",
-  bank: "Bank transfer",
+  zelle: "Zelle",
+  venmo: "Venmo",
+  cashapp: "Cash App",
+  paypal: "PayPal",
+  bank: "Bank transfer (ACH)",
+  wire: "Wire transfer",
+  card: "Credit or debit card",
+  money_order: "Money order",
   other: "Other"
 };
+export const MAX_METHOD_NAME = 60;
+export const MAX_PAYMENT_REFERENCE = 80;
 
 const MONEY_PATTERN = /^(-)?(\d{1,7})(?:\.(\d{1,2}))?$/u;
 const QUANTITY_PATTERN = /^(\d{1,6})(?:\.(\d{1,2}))?$/u;
@@ -206,6 +216,29 @@ export function isPayable(item) {
   return item.kind === "invoice" && item.status === "open";
 }
 
+// Open quotes and invoices can be edited, and so can paid invoices (to correct a title, a line
+// or the notes). Void ones and bank payments still clearing cannot.
 export function isEditable(item) {
-  return item.status === "open";
+  return item.status === "open" || (item.kind === "invoice" && item.status === "paid");
+}
+
+// Reads the record-payment and edit-payment forms. Returns the payment fields and the label shown
+// on the invoice ("Zelle", "Check #1042", or the typed name for Other), or { error } with a notice code.
+export function parseManualPayment(form) {
+  const method = String(form?.get("method") || "");
+  const methodName = String(form?.get("methodName") || "").trim().replaceAll(/\s+/gu, " ");
+  const reference = String(form?.get("reference") || "").trim().replaceAll(/\s+/gu, " ");
+  const paidOn = String(form?.get("paidOn") || "").trim();
+  if (!Object.hasOwn(PAYMENT_METHODS, method)) return { error: "invalid" };
+  if (method === "other" && !methodName) return { error: "payment-other-required" };
+  if (methodName.length > MAX_METHOD_NAME || reference.length > MAX_PAYMENT_REFERENCE) return { error: "invalid" };
+  if (!isValidDate(paidOn)) return { error: "payment-date-invalid" };
+  const name = method === "other" ? methodName : PAYMENT_METHODS[method];
+  return {
+    method,
+    methodName: method === "other" ? methodName : "",
+    reference,
+    paidOn,
+    label: [name, reference].filter(Boolean).join(" ")
+  };
 }

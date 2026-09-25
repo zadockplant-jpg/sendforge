@@ -229,6 +229,11 @@ export async function getSentEmail(store, key) {
   return sentRecord(row);
 }
 
+// Forgets sends, so a later payment of a reopened invoice gets a fresh receipt and notice.
+export async function deleteSentEmails(store, keys) {
+  if (keys.length) await store.db("mhb_sent_emails").whereIn("key", keys).del().timeout(QUERY_TIMEOUT_MS);
+}
+
 // Records a send made on request (for example "Resend receipt"), replacing the earlier record.
 export async function putSentEmail(store, key, record) {
   await store.db("mhb_sent_emails")

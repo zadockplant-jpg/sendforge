@@ -72,6 +72,14 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   invoice link and in the client portal) also has an "I'm paying by check" button. It reveals
   the check mailing address, 5899 1/2 White Rd, Muskegon, MI 49442, with payable-to and memo
   guidance. It is a native `<details>` disclosure and needs no script.
+- Payments received outside Stripe are recorded with a "Paid by" choice. The choices are
+  Check, Cash, Zelle, Venmo, Cash App, PayPal, Bank transfer (ACH), Wire transfer, Credit or
+  debit card, Money order, or Other with a typed method, plus an optional reference.
+  - A paid invoice's recorded payment can be corrected (method, reference, date) or marked
+    unpaid. Marking it unpaid reopens it and forgets its receipt and payment notice, so a
+    later payment sends fresh ones.
+  - Stripe payments keep what Stripe recorded.
+  - Paid invoices stay editable (title, lines, notes); the recorded payment is unchanged.
 - Every address a quote, invoice or receipt is emailed to is kept in `mhb_recipients` with
   its last send; builder notices and admin codes are not. The admin panel's email fields
   offer them as a pick list, newest first, eight rows tall with the rest scrolling. The list
