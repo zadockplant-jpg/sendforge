@@ -22,6 +22,7 @@ process.env.SENDGRID_API_KEY = "SG.test.key";
 const { db } = await import("../src/config/db.js");
 const { attachPglite } = await import("./helpers/pglite-db.js");
 const { up } = await import("../src/db/migrations/20260925_create_myhomebuilder_portal.js");
+const { up: plainNumbers } = await import("../src/db/migrations/20260925_myhomebuilder_portal_plain_numbers.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
 const { hmacHex } = await import("../src/modules/myhomebuilder-portal/security.js");
@@ -125,10 +126,26 @@ function deliveredTo(address) {
 const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits"];
 let server;
 let base;
+let renumbered = [];
+
+// Records made before numbers became plain, to check the second migration rewrites them.
+async function insertLegacyNumbers() {
+  const legacy = [
+    { id: "legacy-inv", kind: "invoice", number: "INV-0012", extra: { fromQuoteNumber: "QUO-0003" } },
+    { id: "legacy-quo", kind: "quote", number: "QUO-0003", extra: { invoiceNumber: "INV-0012" } }
+  ];
+  for (const record of legacy) {
+    const data = { id: record.id, clientSlug: "muskegon-addition", kind: record.kind, number: record.number, createdAt: "2026-09-24T12:00:00.000Z", ...record.extra };
+    await db("mhb_billing").insert({ id: record.id, client_slug: "muskegon-addition", kind: record.kind, number: record.number, data: JSON.stringify(data), created_at: data.createdAt });
+  }
+}
 
 before(async () => {
   await attachPglite(db);
   await up(db);
+  await insertLegacyNumbers();
+  await plainNumbers(db);
+  renumbered = await db("mhb_billing").orderBy("id").select("kind", "number", "data");
   const app = express();
   app.use("/v1/myhomebuilder/portal", myhomebuilderPortalRouter);
   server = app.listen(0, "127.0.0.1");
@@ -404,6 +421,36 @@ test("admin creates a client portal whose hashed login opens its own portal", as
 
 // ---------- Quotes, invoices and payments ----------
 
+test("numbers issued as INV-0012 and QUO-0003 become 12 and 3, cross-references included", () => {
+  const [invoice, quote] = renumbered.map((row) => ({ ...row, data: json(row.data) }));
+  assert.equal(invoice.number, "12");
+  assert.equal(invoice.data.number, "12");
+  assert.equal(invoice.data.fromQuoteNumber, "3");
+  assert.equal(quote.number, "3");
+  assert.equal(quote.data.invoiceNumber, "12");
+});
+
+test("invoices and quotes number 1, 2, 3 in separate sequences, shown as Invoice 1 and Quote 1", async () => {
+  const adminCookie = await loginAsAdmin();
+  const first = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  const second = await postInvoice(adminCookie, { title: "Framing", amount: "800" });
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  const numbers = (await billingRecords()).map((item) => `${item.kind} ${item.number}`).sort();
+  assert.deepEqual(numbers, ["invoice 1", "invoice 2", "quote 1"]);
+
+  const adminPage = await (await request(`/clients/admin/clients/muskegon-addition/billing/${second.item.id}`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(adminPage, />Invoice 2<\/h1>/u);
+  assert.match(adminPage, /<title>Invoice 2 · Framing \| My Home Builder LLC<\/title>/u);
+  const view = await (await request(`/clients/invoice/${first.item.shareToken}`)).text();
+  assert.match(view, /<span>Invoice<\/span><strong>1<\/strong>/u);
+  assert.doesNotMatch(view, /INV-|0001/u);
+
+  await request(`/clients/pay/${first.item.shareToken}`);
+  assert.equal(stripe.created.at(-1)["line_items[0][price_data][product_data][name]"], "Invoice 1 · Deposit");
+  assert.equal(stripe.created.at(-1)["payment_intent_data[description]"], "Invoice 1 · Deposit");
+  assert.equal(stripe.created.at(-1)["metadata[invoiceNumber]"], "1");
+});
+
 test("line items total with exact cent rounding, credits and fractional quantities", () => {
   const parsed = parseLineItems(new URLSearchParams([
     ["itemDescription", "Carpentry hours"], ["itemQuantity", "2.5"], ["itemUnitPrice", "$80"],
@@ -436,12 +483,12 @@ test("admin builds an itemized invoice, emails it, and the client pays from the 
     ...lines(["Framing labor", "1", "8,000"], ["Lumber package", "2", "2,250.50"], ["", "1", ""])
   });
   assert.match(response.headers.get("Location"), /notice=billing-sent/u);
-  assert.equal(item.number, "INV-0001");
+  assert.equal(item.number, "1");
   assert.equal(item.amountCents, 1250100);
   assert.equal(item.sentTo, "client@example.com");
 
   const invoiceEmail = deliveredTo("client@example.com").at(-1);
-  assert.equal(invoiceEmail.subject, "Invoice INV-0001 from My Home Builder LLC");
+  assert.equal(invoiceEmail.subject, "Invoice 1 from My Home Builder LLC");
   assert.deepEqual(invoiceEmail.from, { email: "billing@myhomebuilderllc.com", name: "My Home Builder LLC" });
   assert.deepEqual(invoiceEmail.reply_to, { email: "mb@myhomebuilderllc.com" });
   assert.deepEqual(invoiceEmail.categories, ["myhomebuilder-portal", "invoice"]);
@@ -472,9 +519,9 @@ test("admin builds an itemized invoice, emails it, and the client pays from the 
 
   assert.equal((await signedWebhook("checkout.session.completed", stripe.sessions.get("cs_test_1"))).status, 200);
   const receipt = deliveredTo("client@example.com").at(-1);
-  assert.equal(receipt.subject, "Receipt for invoice INV-0001 from My Home Builder LLC");
+  assert.equal(receipt.subject, "Receipt for invoice 1 from My Home Builder LLC");
   assert.match(receipt.html, /Visa •••• 4242/u);
-  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "INV-0001 paid: $12,501.00 from Muskegon Addition");
+  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "Invoice 1 paid: $12,501.00 from Muskegon Addition");
   assert.equal((await sentEmail(`muskegon-addition:${item.id}:receipt`)).status, "sent");
 
   const deliveredBefore = email.delivered.length;
@@ -570,7 +617,7 @@ test("bank payments stay processing until Stripe confirms them, and a failure re
 
   await signedWebhook("checkout.session.async_payment_failed", pending);
   assert.equal((await stored(item)).status, "open");
-  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "Bank payment failed for INV-0001");
+  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "Bank payment failed for Invoice 1");
 
   await request(`/clients/pay/${item.shareToken}`);
   const second = [...stripe.sessions.keys()].at(-1);
@@ -600,7 +647,7 @@ test("a check recorded by the admin emails a receipt, and a later Stripe payment
 
   await signedWebhook("checkout.session.completed", payStripeSession(openSession, { amount_total: 320000 }));
   assert.equal((await stored(item)).payment.source, "manual");
-  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "Check for a duplicate payment on INV-0001");
+  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "Check for a duplicate payment on Invoice 1");
 });
 
 test("templates are saved, listed, used for a new quote, edited and deleted", async () => {
@@ -636,7 +683,7 @@ test("a quote link lets the client accept by name, the builder is told, and the 
   const posted = await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Kitchen remodel", sendNow: "yes", ...lines(["Cabinets", "1", "18,000"], ["Counters", "1", "6,500"]) }, adminCookie));
   assert.match(posted.headers.get("Location"), /notice=billing-sent/u);
   const [quote] = await billingRecords();
-  assert.equal(quote.number, "QUO-0001");
+  assert.equal(quote.number, "1");
   assert.ok(deliveredTo("quote@example.com").at(-1).html.includes(`/clients/quote/${quote.shareToken}`));
 
   const noName = await request(`/clients/quote/${quote.shareToken}/accept`, form({ name: " " }));
@@ -644,14 +691,14 @@ test("a quote link lets the client accept by name, the builder is told, and the 
   const accepted = await request(`/clients/quote/${quote.shareToken}/accept`, form({ name: "Pat Client" }));
   assert.equal(accepted.headers.get("Location"), `/clients/quote/${quote.shareToken}?notice=accepted`);
   assert.equal((await stored(quote)).acceptedBy, "Pat Client");
-  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "QUO-0001 accepted by Muskegon Addition");
+  assert.equal(deliveredTo("mb@myhomebuilderllc.com").at(-1).subject, "Quote 1 accepted by Muskegon Addition");
 
   const converted = await request(`/clients/admin/clients/muskegon-addition/billing/${quote.id}/invoice`, form({}, adminCookie));
   assert.match(converted.headers.get("Location"), /notice=invoice-created/u);
   const invoice = (await billingRecords()).find((entry) => entry.kind === "invoice");
-  assert.equal(invoice.number, "INV-0001");
+  assert.equal(invoice.number, "1", "invoices and quotes have separate sequences");
   assert.equal(invoice.amountCents, 2450000);
-  assert.equal((await stored(quote)).invoiceNumber, "INV-0001");
+  assert.equal((await stored(quote)).invoiceNumber, "1");
   assert.equal((await request(`/clients/pay/${quote.shareToken}`)).headers.get("Location"), `/clients/quote/${quote.shareToken}`);
 });
 
@@ -691,12 +738,12 @@ test("invoice numbers are unique across client portals and each client sees only
   await request("/clients/admin/clients", form({ name: "Wolf Lake Views", slug: "wolf-lake-views", password: "wolflakeviews-login-2026" }, adminCookie));
   await postInvoice(adminCookie, { title: "Muskegon deposit", amount: "1,000" });
   await request("/clients/admin/clients/wolf-lake-views/billing", form({ kind: "invoice", title: "Wolf deposit", ...lines(["Deposit", "1", "2,000"]) }, adminCookie));
-  assert.deepEqual((await billingRecords()).map((item) => `${item.clientSlug}:${item.number}`).sort(), ["muskegon-addition:INV-0001", "wolf-lake-views:INV-0002"]);
+  assert.deepEqual((await billingRecords()).map((item) => `${item.clientSlug}:${item.number}`).sort(), ["muskegon-addition:1", "wolf-lake-views:2"]);
 
   const clientCookie = await loginAsClient();
   const home = await (await request("/clients", { headers: { Cookie: clientCookie } })).text();
-  assert.match(home, /INV-0001/u);
-  assert.doesNotMatch(home, /INV-0002/u);
+  assert.match(home, /<span class="portal-number">1<\/span>/u);
+  assert.doesNotMatch(home, /<span class="portal-number">2<\/span>/u);
   const id = home.match(/href="\/clients\/billing\/([^"]+)"/u)[1];
   assert.match(await (await request(`/clients/billing/${id}`, { headers: { Cookie: clientCookie } })).text(), /Pay \$1,000\.00 securely/u);
   const pay = await request(`/clients/billing/${id}/pay`, { method: "POST", headers: { Cookie: clientCookie } });

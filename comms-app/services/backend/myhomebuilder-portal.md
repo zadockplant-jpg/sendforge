@@ -66,7 +66,11 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
 
 - Uploaded documents, signature images and signed PDFs are stored in `mhb_files` (up to
   20 MB each).
-- Invoice numbers come from `mhb_counters` and are unique across all client portals.
+- Invoices are numbered 1, 2, 3 … with no prefix, dash or leading zeros, and quotes have
+  their own 1, 2, 3 … sequence. The counters in `mhb_counters` are shared by every client
+  portal, so a number is unique per kind across the business. Wherever a number appears
+  on its own, it is labeled "Invoice 12" or "Quote 3". Migration
+  `20260925_myhomebuilder_portal_plain_numbers.js` rewrote earlier numbers (INV-0012 became 12).
 - Automatic emails (receipts and builder notices) are claimed in `mhb_sent_emails` before
   sending, so a payment produces one receipt however many times Stripe delivers the event.
   If SendGrid fails, the claim is released and the webhook answers 500, so Stripe retries.

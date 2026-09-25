@@ -1,5 +1,5 @@
 import { constantTimeMatches, hmacHex } from "./security.js";
-import { checkoutLine } from "./billing.js";
+import { billingLabel, checkoutLine } from "./billing.js";
 
 const STRIPE_API = "https://api.stripe.com/v1";
 // Pinned so response shapes (latest_charge, customer_details) do not change with the account default.
@@ -32,7 +32,7 @@ async function stripeRequest(env, method, path, params = undefined) {
 // successUrl must contain {CHECKOUT_SESSION_ID}; Stripe fills it in when the client returns.
 export async function createCheckoutSession(env, { invoice, client, successUrl, cancelUrl }) {
   const line = checkoutLine(invoice);
-  const label = `${invoice.number} · ${invoice.title}`.slice(0, 250);
+  const label = `${billingLabel(invoice)} · ${invoice.title}`.slice(0, 250);
   return stripeRequest(env, "POST", "/checkout/sessions", {
     mode: "payment",
     "line_items[0][quantity]": "1",

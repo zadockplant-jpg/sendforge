@@ -1,4 +1,4 @@
-import { billingLineItems, isEditable, moneyInput, PAYMENT_METHODS, quantityText } from "./billing.js";
+import { billingLabel, billingLineItems, isEditable, moneyInput, PAYMENT_METHODS, quantityText } from "./billing.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 
 export { escapeHtml, money };
@@ -179,7 +179,7 @@ function billingRows(items, { basePath, viewer }) {
     const action = viewer === "client"
       ? `<a class="portal-secondary-link" href="${href}">${item.kind === "invoice" && item.status === "open" ? "View and pay" : "View"}</a>`
       : `<a class="portal-secondary-link" href="${href}">Open</a>`;
-    const note = viewer === "admin" && item.invoiceNumber ? `<small>Invoiced as ${escapeHtml(item.invoiceNumber)}</small>` : "";
+    const note = viewer === "admin" && item.invoiceNumber ? `<small>Invoiced as Invoice ${escapeHtml(item.invoiceNumber)}</small>` : "";
     return `<tr>
           <td><span class="portal-number">${escapeHtml(item.number)}</span></td>
           <td>${escapeHtml(item.title)}${item.dueDate ? `<small>${item.kind === "invoice" ? "Due" : "Valid until"} ${dateText(item.dueDate)}</small>` : ""}${note}</td>
@@ -392,7 +392,7 @@ export function billingDetailPage({ client, item, stripeReady, admin = false, no
           <a class="portal-secondary-link" href="/clients">Back to your portal</a>
         </aside>
       </div>
-    </div>`, { authenticated: true, admin, title: `${item.number} ${item.title}`, scripts: [BILLING_SCRIPT] });
+    </div>`, { authenticated: true, admin, title: `${billingLabel(item)} · ${item.title}`, scripts: [BILLING_SCRIPT] });
 }
 
 // Public page behind an unguessable link, so clients can pay or accept straight from an email.
@@ -646,7 +646,7 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
   const kind = values.kind === "quote" ? "quote" : "invoice";
 
   const heading = mode === "edit"
-    ? `Edit ${number}`
+    ? `Edit ${kind === "invoice" ? "invoice" : "quote"} ${number}`
     : mode === "template-new" ? "New template" : mode === "template-edit" ? "Edit template" : `New ${kind}`;
   const kicker = template ? "Quote and invoice templates" : client ? escapeHtml(client.name) : "";
 
@@ -836,7 +836,7 @@ export function adminBillingPage({ client, item, links, receipt = null, readines
     cards.push(`<section class="admin-card">
           <h2>Invoice</h2>
           ${item.invoiceNumber
-            ? `<p class="admin-meta">Invoiced as <a class="portal-inline-link" href="/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.invoiceId)}">${escapeHtml(item.invoiceNumber)}</a>.</p>`
+            ? `<p class="admin-meta">Invoiced as <a class="portal-inline-link" href="/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.invoiceId)}">Invoice ${escapeHtml(item.invoiceNumber)}</a>.</p>`
             : `<form action="${base}/invoice" method="post">
             <button class="button button-solid" type="submit">Create invoice from this quote</button>
           </form>
@@ -864,7 +864,7 @@ export function adminBillingPage({ client, item, links, receipt = null, readines
           ${cards.join("\n        ")}
         </div>
       </div>
-    </div>`, { title: `${item.number} ${item.title}`, scripts: [BILLING_SCRIPT] });
+    </div>`, { title: `${billingLabel(item)} · ${item.title}`, scripts: [BILLING_SCRIPT] });
 }
 
 export function adminTemplatesPage({ templates, notice = null }) {

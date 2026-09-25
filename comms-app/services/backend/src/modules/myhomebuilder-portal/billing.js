@@ -186,14 +186,20 @@ export function todayInMichigan(now = new Date()) {
 export function checkoutLine(item) {
   const names = billingLineItems(item).map((line) => line.description).join(", ");
   return {
-    name: `${item.number} · ${item.title}`.slice(0, 250),
+    name: `${billingLabel(item)} · ${item.title}`.slice(0, 250),
     description: names.length > 500 ? `${names.slice(0, 497)}...` : names,
     unitCents: item.amountCents
   };
 }
 
-export function billingNumber(kind, sequence) {
-  return `${kind === "invoice" ? "INV" : "QUO"}-${String(sequence).padStart(4, "0")}`;
+// Invoices and quotes are numbered 1, 2, 3 … in their own sequences: no prefix, dash or leading zeros.
+export function billingNumber(sequence) {
+  return String(sequence);
+}
+
+// The name used wherever a number appears on its own: "Invoice 12", "Quote 3".
+export function billingLabel(item) {
+  return `${item.kind === "invoice" ? "Invoice" : "Quote"} ${item.number}`;
 }
 
 export function isPayable(item) {

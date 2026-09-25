@@ -101,14 +101,15 @@ export async function putBilling(store, item) {
     .timeout(QUERY_TIMEOUT_MS);
 }
 
-// Quote and invoice numbers run across every client portal, so each number is unique to the business.
+// Invoice numbers (and, separately, quote numbers) run 1, 2, 3 … across every client portal,
+// so each is unique to the business.
 export async function nextBillingNumber(store, kind) {
   const result = await store.db.raw(
     `INSERT INTO mhb_counters (name, value) VALUES (?, 1)
      ON CONFLICT (name) DO UPDATE SET value = mhb_counters.value + 1 RETURNING value`,
     [kind]
   ).timeout(QUERY_TIMEOUT_MS);
-  return billingNumber(kind, Number(result.rows[0].value));
+  return billingNumber(Number(result.rows[0].value));
 }
 
 // The share token is saved with the quote or invoice itself (unique column), so there is nothing extra to store.

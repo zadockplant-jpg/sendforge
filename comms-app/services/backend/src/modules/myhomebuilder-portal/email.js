@@ -1,4 +1,4 @@
-import { billingLineItems, quantityText } from "./billing.js";
+import { billingLabel, billingLineItems, quantityText } from "./billing.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 
 export const ADMIN_EMAIL = "mb@myhomebuilderllc.com";
@@ -277,7 +277,7 @@ export function paymentReceiptMessage({ item, client, viewUrl }) {
   ].join("\n");
   return {
     subject: `Receipt for invoice ${item.number} from My Home Builder LLC`,
-    html: layout({ title: `Receipt for ${item.number}`, preheader: `${paid} received${paidOn ? ` on ${paidOn}` : ""}. Thank you.`, kicker: `Receipt · Invoice ${item.number}`, heading: "Thank you for your payment.", body }),
+    html: layout({ title: `Receipt for invoice ${item.number}`, preheader: `${paid} received${paidOn ? ` on ${paidOn}` : ""}. Thank you.`, kicker: `Receipt · Invoice ${item.number}`, heading: "Thank you for your payment.", body }),
     text: joinText([
       `My Home Builder LLC received your payment for ${item.title}. Thank you.`,
       "",
@@ -299,6 +299,7 @@ export function paymentReceiptMessage({ item, client, viewUrl }) {
 }
 
 export function adminPaidMessage({ item, client, adminUrl, receiptTo }) {
+  const label = billingLabel(item);
   const payment = item.payment || {};
   const paid = money(payment.amountCents ?? item.amountCents, item.currency);
   const mismatch = Number.isInteger(payment.amountCents) && payment.amountCents !== item.amountCents
@@ -306,17 +307,17 @@ export function adminPaidMessage({ item, client, adminUrl, receiptTo }) {
     : "";
   const receiptLine = receiptTo ? `Receipt emailed to ${receiptTo}.` : "No client email is on file, so no receipt was emailed. Add one on the client panel and use Resend receipt.";
   const body = [
-    paragraph(`${escapeHtml(client.name)} paid <strong>${escapeHtml(item.number)} · ${escapeHtml(item.title)}</strong>.`),
+    paragraph(`${escapeHtml(client.name)} paid <strong>${escapeHtml(label)} · ${escapeHtml(item.title)}</strong>.`),
     facts([["Amount paid", paid], ["Paid on", formatDate(item.paidAt)], ["Payment method", payment.label || ""], ["Client", client.name]]),
     mismatch ? paragraph(escapeHtml(mismatch), "color:#085858;font-weight:bold;") : "",
     paragraph(escapeHtml(receiptLine), "font-size:13px;color:#555555;"),
     button(adminUrl, "Open in the admin panel")
   ].join("\n");
   return {
-    subject: `${item.number} paid: ${paid} from ${client.name}`,
-    html: layout({ title: `${item.number} paid`, preheader: `${paid} from ${client.name}`, kicker: "Payment received", heading: `${item.number} is paid.`, body, forClient: false }),
+    subject: `${label} paid: ${paid} from ${client.name}`,
+    html: layout({ title: `${label} paid`, preheader: `${paid} from ${client.name}`, kicker: "Payment received", heading: `${label} is paid.`, body, forClient: false }),
     text: joinText([
-      `${client.name} paid ${item.number} · ${item.title}.`,
+      `${client.name} paid ${label} · ${item.title}.`,
       "",
       `Amount paid: ${paid}`,
       `Paid on: ${formatDate(item.paidAt)}`,
@@ -330,19 +331,20 @@ export function adminPaidMessage({ item, client, adminUrl, receiptTo }) {
 }
 
 export function quoteAcceptedMessage({ item, client, adminUrl }) {
+  const label = billingLabel(item);
   const total = money(item.amountCents, item.currency);
   const by = item.acceptedBy ? `${item.acceptedBy} (${client.name})` : client.name;
   const body = [
-    paragraph(`${escapeHtml(by)} accepted <strong>${escapeHtml(item.number)} · ${escapeHtml(item.title)}</strong>.`),
+    paragraph(`${escapeHtml(by)} accepted <strong>${escapeHtml(label)} · ${escapeHtml(item.title)}</strong>.`),
     facts([["Quote total", total], ["Accepted on", formatDate(item.acceptedAt)], ["Accepted by", item.acceptedBy || ""], ["Client", client.name]]),
     paragraph("Open the quote in the admin panel to create the invoice from it.", "font-size:13px;color:#555555;"),
     button(adminUrl, "Open the quote")
   ].join("\n");
   return {
-    subject: `${item.number} accepted by ${client.name}`,
-    html: layout({ title: `${item.number} accepted`, preheader: `${total} · ${item.title}`, kicker: "Quote accepted", heading: `${item.number} was accepted.`, body, forClient: false }),
+    subject: `${label} accepted by ${client.name}`,
+    html: layout({ title: `${label} accepted`, preheader: `${total} · ${item.title}`, kicker: "Quote accepted", heading: `${label} was accepted.`, body, forClient: false }),
     text: joinText([
-      `${by} accepted ${item.number} · ${item.title}.`,
+      `${by} accepted ${label} · ${item.title}.`,
       "",
       `Quote total: ${total}`,
       `Accepted on: ${formatDate(item.acceptedAt)}`,
@@ -354,18 +356,19 @@ export function quoteAcceptedMessage({ item, client, adminUrl }) {
 }
 
 export function duplicatePaymentMessage({ item, client, session, adminUrl }) {
+  const label = billingLabel(item);
   const amount = money(Number.isInteger(session.amount_total) ? session.amount_total : item.amountCents, item.currency);
   const reference = session.payment_intent ? String(session.payment_intent) : String(session.id || "");
   const body = [
-    paragraph(`Stripe received another payment of <strong>${escapeHtml(amount)}</strong> from ${escapeHtml(client.name)} for <strong>${escapeHtml(item.number)} · ${escapeHtml(item.title)}</strong>, which was already marked paid.`),
+    paragraph(`Stripe received another payment of <strong>${escapeHtml(amount)}</strong> from ${escapeHtml(client.name)} for <strong>${escapeHtml(label)} · ${escapeHtml(item.title)}</strong>, which was already marked paid.`),
     paragraph(`Check the Stripe dashboard for payment ${escapeHtml(reference)} and refund it if it is a duplicate.`, "font-size:13px;color:#555555;"),
     button(adminUrl, "Open the invoice")
   ].join("\n");
   return {
-    subject: `Check for a duplicate payment on ${item.number}`,
-    html: layout({ title: `Duplicate payment on ${item.number}`, preheader: `${amount} from ${client.name}`, kicker: "Duplicate payment", heading: `${item.number} was paid again.`, body, forClient: false }),
+    subject: `Check for a duplicate payment on ${label}`,
+    html: layout({ title: `Duplicate payment on ${label}`, preheader: `${amount} from ${client.name}`, kicker: "Duplicate payment", heading: `${label} was paid again.`, body, forClient: false }),
     text: joinText([
-      `Stripe received another payment of ${amount} from ${client.name} for ${item.number} · ${item.title}, which was already marked paid.`,
+      `Stripe received another payment of ${amount} from ${client.name} for ${label} · ${item.title}, which was already marked paid.`,
       `Check the Stripe dashboard for payment ${reference} and refund it if it is a duplicate.`,
       "",
       `Admin panel: ${adminUrl}`
@@ -374,16 +377,17 @@ export function duplicatePaymentMessage({ item, client, session, adminUrl }) {
 }
 
 export function paymentFailedMessage({ item, client, adminUrl }) {
+  const label = billingLabel(item);
   const body = [
-    paragraph(`The bank payment from ${escapeHtml(client.name)} for <strong>${escapeHtml(item.number)} · ${escapeHtml(item.title)}</strong> did not go through.`),
+    paragraph(`The bank payment from ${escapeHtml(client.name)} for <strong>${escapeHtml(label)} · ${escapeHtml(item.title)}</strong> did not go through.`),
     paragraph("The invoice is open again, so the client can pay with another method from the same link.", "font-size:13px;color:#555555;"),
     button(adminUrl, "Open the invoice")
   ].join("\n");
   return {
-    subject: `Bank payment failed for ${item.number}`,
-    html: layout({ title: `Payment failed for ${item.number}`, preheader: `${client.name} · ${money(item.amountCents, item.currency)}`, kicker: "Payment failed", heading: `${item.number} is unpaid.`, body, forClient: false }),
+    subject: `Bank payment failed for ${label}`,
+    html: layout({ title: `Payment failed for ${label}`, preheader: `${client.name} · ${money(item.amountCents, item.currency)}`, kicker: "Payment failed", heading: `${label} is unpaid.`, body, forClient: false }),
     text: joinText([
-      `The bank payment from ${client.name} for ${item.number} · ${item.title} did not go through.`,
+      `The bank payment from ${client.name} for ${label} · ${item.title} did not go through.`,
       "The invoice is open again, so the client can pay with another method from the same link.",
       "",
       `Admin panel: ${adminUrl}`
