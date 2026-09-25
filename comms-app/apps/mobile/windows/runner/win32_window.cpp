@@ -3,6 +3,8 @@
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
+#include <algorithm>
+
 #include "resource.h"
 
 namespace {
@@ -51,6 +53,26 @@ void EnableFullDpiSupportIfAvailable(HWND hwnd) {
     enable_non_client_dpi_scaling(hwnd);
   }
   FreeLibrary(user32_module);
+}
+
+// Keeps |frame| (physical pixels) inside the work area of |monitor|, the part of
+// the screen the taskbar and docked toolbars leave free, so no part of the window
+// opens behind the taskbar or off-screen. The window keeps its size when it fits;
+// otherwise it shrinks to the work area.
+void FitToWorkArea(HMONITOR monitor, RECT* frame) {
+  MONITORINFO info = {};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfo(monitor, &info)) {
+    return;
+  }
+  const RECT& work = info.rcWork;
+  const LONG width =
+      std::min(frame->right - frame->left, work.right - work.left);
+  const LONG height =
+      std::min(frame->bottom - frame->top, work.bottom - work.top);
+  const LONG left = std::max(work.left, std::min(frame->left, work.right - width));
+  const LONG top = std::max(work.top, std::min(frame->top, work.bottom - height));
+  *frame = {left, top, left + width, top + height};
 }
 
 }  // namespace
@@ -134,11 +156,16 @@ bool Win32Window::Create(const std::wstring& title,
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
+  RECT frame = {Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
+                0, 0};
+  frame.right = frame.left + Scale(size.width, scale_factor);
+  frame.bottom = frame.top + Scale(size.height, scale_factor);
+  FitToWorkArea(monitor, &frame);
+
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
-      nullptr, nullptr, GetModuleHandle(nullptr), this);
+      window_class, title.c_str(), WS_OVERLAPPEDWINDOW, frame.left, frame.top,
+      frame.right - frame.left, frame.bottom - frame.top, nullptr, nullptr,
+      GetModuleHandle(nullptr), this);
 
   if (!window) {
     return false;
