@@ -238,6 +238,25 @@ export async function putSentEmail(store, key, record) {
     .timeout(QUERY_TIMEOUT_MS);
 }
 
+// ---------- Addresses emailed ----------
+
+// Remembers an address the portal emailed (quotes, invoices, receipts), for the admin's pick list.
+export async function rememberRecipient(store, address) {
+  const display = String(address || "").trim();
+  if (!display) return;
+  await store.db.raw(
+    `INSERT INTO mhb_recipients (email, display, send_count, last_sent_at) VALUES (?, ?, 1, now())
+     ON CONFLICT (email) DO UPDATE SET display = excluded.display, send_count = mhb_recipients.send_count + 1, last_sent_at = now()`,
+    [display.toLowerCase(), display]
+  ).timeout(QUERY_TIMEOUT_MS);
+}
+
+// Newest first.
+export async function listRecipients(store, limit = 500) {
+  const rows = await store.db("mhb_recipients").orderBy("last_sent_at", "desc").limit(limit).select("display", "last_sent_at").timeout(QUERY_TIMEOUT_MS);
+  return rows.map((row) => ({ email: row.display, lastSentAt: row.last_sent_at instanceof Date ? row.last_sent_at.toISOString() : row.last_sent_at }));
+}
+
 // ---------- Admin verification codes and rate limits ----------
 
 export async function putAdminChallenge(store, id, codeHash) {

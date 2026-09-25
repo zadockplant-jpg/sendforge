@@ -23,6 +23,7 @@ const { db } = await import("../src/config/db.js");
 const { attachPglite } = await import("./helpers/pglite-db.js");
 const { up } = await import("../src/db/migrations/20260925_create_myhomebuilder_portal.js");
 const { up: plainNumbers } = await import("../src/db/migrations/20260925_myhomebuilder_portal_plain_numbers.js");
+const { up: recipientsTable } = await import("../src/db/migrations/20260925_myhomebuilder_portal_recipients.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
 const { hmacHex } = await import("../src/modules/myhomebuilder-portal/security.js");
@@ -123,15 +124,16 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients"];
 let server;
 let base;
 let renumbered = [];
+let backfilled = [];
 
 // Records made before numbers became plain, to check the second migration rewrites them.
 async function insertLegacyNumbers() {
   const legacy = [
-    { id: "legacy-inv", kind: "invoice", number: "INV-0012", extra: { fromQuoteNumber: "QUO-0003" } },
+    { id: "legacy-inv", kind: "invoice", number: "INV-0012", extra: { fromQuoteNumber: "QUO-0003", sentTo: "Owner@Example.com", sentAt: "2026-09-24T12:30:00.000Z" } },
     { id: "legacy-quo", kind: "quote", number: "QUO-0003", extra: { invoiceNumber: "INV-0012" } }
   ];
   for (const record of legacy) {
@@ -146,6 +148,13 @@ before(async () => {
   await insertLegacyNumbers();
   await plainNumbers(db);
   renumbered = await db("mhb_billing").orderBy("id").select("kind", "number", "data");
+  // A receipt and a builder notice sent before the recipients list existed.
+  await db("mhb_sent_emails").insert([
+    { key: "muskegon-addition:legacy-inv:receipt", recipient: "payer@example.com", status: "sent", sent_at: "2026-09-24T13:00:00.000Z" },
+    { key: "muskegon-addition:legacy-inv:paid-notice", recipient: "mb@myhomebuilderllc.com", status: "sent", sent_at: "2026-09-24T13:00:01.000Z" }
+  ]);
+  await recipientsTable(db);
+  backfilled = await db("mhb_recipients").orderBy("last_sent_at", "desc").select("email", "display");
   const app = express();
   app.use("/v1/myhomebuilder/portal", myhomebuilderPortalRouter);
   server = app.listen(0, "127.0.0.1");
@@ -428,6 +437,46 @@ test("numbers issued as INV-0012 and QUO-0003 become 12 and 3, cross-references 
   assert.equal(invoice.data.fromQuoteNumber, "3");
   assert.equal(quote.number, "3");
   assert.equal(quote.data.invoiceNumber, "12");
+});
+
+test("quotes and invoices show the Ada address, the builders license and the insurance line", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  const view = await (await request(`/clients/invoice/${item.shareToken}`)).text();
+  assert.match(view, /<span>6749 Fulton St E, Ste A #2333<\/span><span>Ada, MI 49301<\/span>/u);
+  assert.match(view, /Builders license number 242601116/u);
+  assert.ok(view.includes("$1,000,000 liability insurance provided by Next First Insurance Agency Inc"));
+  assert.doesNotMatch(view, /billing-doc-from[^\n]*Muskegon, Michigan/u);
+});
+
+test("addresses already emailed are loaded into the pick list, newest first, without builder notices", () => {
+  assert.deepEqual(backfilled.map((row) => row.email), ["payer@example.com", "owner@example.com"]);
+  assert.equal(backfilled[1].display, "Owner@Example.com");
+});
+
+test("every address the admin emails joins the pick list on the admin pages, newest first", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "first@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500", sendNow: "yes" });
+  await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}/send`, form({ to: "Second@Example.com" }, adminCookie));
+  await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}/send`, form({ to: "first@example.com" }, adminCookie));
+  assert.ok(!deliveredTo("mb@myhomebuilderllc.com").some((message) => message.subject.startsWith("Invoice")), "builder notices are not part of this test");
+
+  const recipients = await db("mhb_recipients").orderBy("last_sent_at", "desc").select("email", "send_count");
+  assert.deepEqual(recipients.map((row) => row.email), ["first@example.com", "second@example.com"]);
+  assert.equal(recipients[0].send_count, 2);
+
+  const page = await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}`, { headers: { Cookie: adminCookie } });
+  const body = await page.text();
+  const listed = [...body.matchAll(/<option value="([^"]+)" label="[^"]+"><\/option>/gu)].map((match) => match[1]);
+  assert.deepEqual(listed, ["first@example.com", "Second@Example.com"]);
+  assert.match(body, /id="send-to" name="to" type="email" maxlength="254" required list="mhb-recipients" autocomplete="off" data-recipient-input/u);
+
+  const dashboard = await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } });
+  assert.match(dashboard.headers.get("Content-Security-Policy"), /script-src 'self'/u);
+  const dashboardBody = await dashboard.text();
+  assert.match(dashboardBody, /<datalist id="mhb-recipients">/u);
+  assert.match(dashboardBody, /id="client-email" name="email" type="email" maxlength="254" list="mhb-recipients"/u);
 });
 
 test("invoices and quotes number 1, 2, 3 in separate sequences, shown as Invoice 1 and Quote 1", async () => {

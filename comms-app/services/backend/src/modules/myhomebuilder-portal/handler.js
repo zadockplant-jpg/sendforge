@@ -40,6 +40,7 @@ import {
   listBilling,
   listClients,
   listDocuments,
+  listRecipients,
   listTemplates,
   nextBillingNumber,
   putAdminChallenge,
@@ -51,7 +52,8 @@ import {
   putShareLink,
   putTemplate,
   recordAdminAttempt,
-  releaseSentEmail
+  releaseSentEmail,
+  rememberRecipient
 } from "./store.js";
 import {
   createCheckoutSession,
@@ -340,13 +342,23 @@ async function saveNewBillingItem(store, item) {
   await putBilling(store, item);
 }
 
-// Emails a quote or invoice. Returns the item with sentAt/sentTo set; the caller saves it once
-// because Workers KV accepts only one write per second to the same key.
-async function emailBillingItem(env, item, client, to, origin) {
+// Emails a quote or invoice. Returns the item with sentAt/sentTo set for the caller to save.
+async function emailBillingItem(env, store, item, client, to, origin) {
   const links = shareLinks(origin, item);
   const message = billingIssuedMessage({ item, client, viewUrl: links.view, payUrl: item.kind === "invoice" && stripeConfigured(env) ? links.pay : "" });
   const delivery = await sendEmail(env, { to, ...message, ...clientSender(env), category: item.kind });
-  return delivery.ok ? { ok: true, item: { ...item, sentAt: new Date().toISOString(), sentTo: to } } : { ok: false, item };
+  if (!delivery.ok) return { ok: false, item };
+  await remember(store, to);
+  return { ok: true, item: { ...item, sentAt: new Date().toISOString(), sentTo: to } };
+}
+
+// Adds an address to the admin pick list. A failure here never fails the email it follows.
+async function remember(store, address) {
+  try {
+    await rememberRecipient(store, address);
+  } catch (error) {
+    console.error(JSON.stringify({ message: "recipient not remembered", error: error instanceof Error ? error.message : "Unknown error" }));
+  }
 }
 
 class EmailDeliveryError extends Error {}
@@ -358,7 +370,8 @@ function sentKey(item, name) {
 // Sends an automatic email once per key. The claim is atomic in Postgres, so concurrent
 // requests (a webhook and a retry of it, for example) cannot both send. A claim held by a
 // send still in progress reports not-ok, so the webhook answers 500 and Stripe retries later.
-async function sendOnce(env, store, key, message) {
+// Client-facing messages (receipts) pass remember so the address joins the admin pick list.
+async function sendOnce(env, store, key, message, { remember: rememberTo = false } = {}) {
   const claim = await claimSentEmail(store, key, message.to);
   if (!claim.claimed) return claim.status === "sent" ? { ok: true, record: claim.record } : { ok: false };
   const delivery = await sendEmail(env, message);
@@ -366,7 +379,9 @@ async function sendOnce(env, store, key, message) {
     await releaseSentEmail(store, key);
     return { ok: false };
   }
-  return { ok: true, record: await completeSentEmail(store, key, delivery.id) };
+  const record = await completeSentEmail(store, key, delivery.id);
+  if (rememberTo) await remember(store, message.to);
+  return { ok: true, record };
 }
 
 function receiptMessage(env, item, client, to, origin) {
@@ -428,7 +443,7 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
   const receiptTo = receiptRecipient(client, paid);
   let receipt = null;
   if (receiptTo) {
-    receipt = await sendOnce(env, store, sentKey(paid, "receipt"), receiptMessage(env, paid, client, receiptTo, origin));
+    receipt = await sendOnce(env, store, sentKey(paid, "receipt"), receiptMessage(env, paid, client, receiptTo, origin), { remember: true });
     if (!receipt.ok) throw new EmailDeliveryError("payment receipt");
   }
   const message = adminPaidMessage({ item: paid, client, adminUrl, receiptTo: receipt?.record.to || "" });
@@ -758,7 +773,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     let item = await buildBillingItem(store, target, parsed.values);
     let notice = "billing-added";
     if (sendNow && readiness.email && isValidEmail(target.email)) {
-      const result = await emailBillingItem(env, item, target, target.email, origin);
+      const result = await emailBillingItem(env, store, item, target, target.email, origin);
       item = result.item;
       notice = result.ok ? "billing-sent" : "billing-send-failed";
     }
@@ -779,7 +794,8 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     }
     const links = { ...shareLinks(origin, item), today };
     const receipt = item.status === "paid" ? await getSentEmail(store, sentKey(item, "receipt")) : null;
-    return scriptedHtmlResponse(adminBillingPage({ client: target, item, links, receipt, readiness, notice: noticeFromQuery(url) }));
+    const recipients = await listRecipients(store);
+    return scriptedHtmlResponse(adminBillingPage({ client: target, item, links, receipt, recipients, readiness, notice: noticeFromQuery(url) }));
   }
 
   if (action === "edit") {
@@ -809,7 +825,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
     const to = String(form?.get("to") || "").trim();
     if (!isValidEmail(to)) return redirectResponse(`${itemPath}?notice=email-invalid`);
-    const result = await emailBillingItem(env, await withShareToken(store, item), target, to, origin);
+    const result = await emailBillingItem(env, store, await withShareToken(store, item), target, to, origin);
     await putBilling(store, result.item);
     return redirectResponse(`${itemPath}?notice=${result.ok ? "sent" : "send-failed"}`);
   }
@@ -839,7 +855,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     await putBilling(store, updated);
     let notice = "payment-recorded";
     if (form.get("sendReceipt") === "yes" && readiness.email && isValidEmail(target.email)) {
-      const receipt = await sendOnce(env, store, sentKey(updated, "receipt"), receiptMessage(env, updated, target, target.email, origin));
+      const receipt = await sendOnce(env, store, sentKey(updated, "receipt"), receiptMessage(env, updated, target, target.email, origin), { remember: true });
       if (receipt.ok) notice = "payment-recorded-receipt";
     }
     return redirectResponse(`${itemPath}?notice=${notice}`);
@@ -855,7 +871,10 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const withToken = await withShareToken(store, item);
     if (withToken !== item) await putBilling(store, withToken);
     const delivery = await sendEmail(env, receiptMessage(env, withToken, target, to, origin));
-    if (delivery.ok) await putSentEmail(store, sentKey(item, "receipt"), { to, sentAt: new Date().toISOString(), messageId: delivery.id || "" });
+    if (delivery.ok) {
+      await putSentEmail(store, sentKey(item, "receipt"), { to, sentAt: new Date().toISOString(), messageId: delivery.id || "" });
+      await remember(store, to);
+    }
     return redirectResponse(`${itemPath}?notice=${delivery.ok ? "receipt-sent" : "receipt-failed"}`);
   }
 
@@ -1058,14 +1077,13 @@ export async function handlePortalRequest(context) {
         const clients = await listClients(store);
         const requested = url.searchParams.get("client");
         const selected = clients.find((entry) => entry.slug === requested) || null;
-        const [billing, documents, templates] = store
-          ? await Promise.all([
-            selected ? listBilling(store, selected.slug) : [],
-            selected ? listDocuments(store, selected.slug) : [],
-            listTemplates(store)
-          ])
-          : [[], [], []];
-        return htmlResponse(adminDashboardPage({ clients, selected, billing, documents, templates, readiness, notice: noticeFromQuery(url), authenticated }));
+        const [billing, documents, templates, recipients] = await Promise.all([
+          selected ? listBilling(store, selected.slug) : [],
+          selected ? listDocuments(store, selected.slug) : [],
+          listTemplates(store),
+          listRecipients(store)
+        ]);
+        return scriptedHtmlResponse(adminDashboardPage({ clients, selected, billing, documents, templates, recipients, readiness, notice: noticeFromQuery(url), authenticated }));
       }
 
       if (!store) return redirectResponse("/clients/admin?notice=invalid");

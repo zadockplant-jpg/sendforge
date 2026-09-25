@@ -17,6 +17,22 @@ function sizeText(bytes) {
 
 const BILLING_SCRIPT = "/clients/portal/billing.js";
 
+// Printed on every quote and invoice, worded exactly as the owner gave them.
+const BUSINESS_ADDRESS = ["6749 Fulton St E, Ste A #2333", "Ada, MI 49301"];
+const BUILDER_LICENSE = "Builders license number 242601116";
+const INSURANCE = "$1,000,000 liability insurance provided by Next First Insurance Agency Inc";
+
+// Addresses the portal has emailed, newest first. billing.js turns this list into the pick list
+// under each email field in the admin panel; without scripts the browser offers the same addresses.
+const RECIPIENT_LIST_ID = "mhb-recipients";
+const RECIPIENT_INPUT = `list="${RECIPIENT_LIST_ID}" autocomplete="off" data-recipient-input`;
+
+function recipientList(recipients) {
+  if (!recipients.length) return "";
+  const options = recipients.map((entry) => `<option value="${escapeAttribute(entry.email)}" label="${escapeAttribute(formatDate(entry.lastSentAt))}"></option>`).join("");
+  return `<datalist id="${RECIPIENT_LIST_ID}">${options}</datalist>`;
+}
+
 // The MB mark from /assets/mb-logo.svg, drawn in the current text color so it shows on the white document.
 const MB_MARK = `<svg class="billing-doc-mark" viewBox="170 95 1250 665" role="img" aria-label="My Home Builder">
             <g fill="none" stroke="currentColor" stroke-width="108" stroke-linecap="round" stroke-linejoin="round">
@@ -313,7 +329,7 @@ export function billingDocument({ item, client }) {
         <header class="billing-doc-head">
           <div class="billing-doc-brand">
           ${MB_MARK}
-            <p class="billing-doc-from"><strong>My Home Builder LLC</strong><span>Muskegon, Michigan</span><span>myhomebuilderllc.com</span></p>
+            <p class="billing-doc-from"><strong>My Home Builder LLC</strong>${BUSINESS_ADDRESS.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}<span>myhomebuilderllc.com</span><span class="billing-doc-license">${escapeHtml(BUILDER_LICENSE)}</span></p>
           </div>
           <p class="billing-doc-type"><span>${kindLabel(item)}</span><strong>${escapeHtml(item.number)}</strong></p>
         </header>
@@ -334,7 +350,10 @@ export function billingDocument({ item, client }) {
           </tfoot>
         </table>
         ${item.description ? `<section class="billing-doc-notes"><h3>Notes and terms</h3><p>${escapeHtml(item.description).replaceAll("\n", "<br>")}</p></section>` : ""}
-        <p class="billing-doc-foot">Thank you for building with My Home Builder LLC.</p>
+        <footer class="billing-doc-foot">
+          <p class="billing-doc-insurance">${escapeHtml(INSURANCE)}</p>
+          <p>Thank you for building with My Home Builder LLC.</p>
+        </footer>
       </article>`;
 }
 
@@ -524,7 +543,7 @@ function templatePicker(templates, action) {
           </form>`;
 }
 
-export function adminDashboardPage({ clients, selected, billing, documents, templates = [], readiness, notice = null, authenticated = true }) {
+export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true }) {
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
     const detail = [client.managedBySecret ? "Login managed by Cloudflare secret" : `Login: ${escapeHtml(client.slug)}`, client.email ? escapeHtml(client.email) : "No email on file"].join(" · ");
@@ -541,7 +560,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           <h2 id="selected-heading">${escapeHtml(selected.name)}</h2>
           <form class="admin-inline-form" action="${base}/profile" method="post">
             <label for="client-email">Client email for invoices and receipts
-              <input id="client-email" name="email" type="email" maxlength="254" autocomplete="off" value="${escapeAttribute(selected.email || "")}" placeholder="client@example.com">
+              <input id="client-email" name="email" type="email" maxlength="254" ${RECIPIENT_INPUT} value="${escapeAttribute(selected.email || "")}" placeholder="client@example.com">
             </label>
             <button class="portal-logout-button" type="submit">Save email</button>
           </form>
@@ -608,7 +627,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
               <input id="client-password" name="password" type="text" minlength="10" maxlength="120" autocomplete="off" required>
             </label>
             <label for="new-client-email">Client email (optional)
-              <input id="new-client-email" name="email" type="email" maxlength="254" autocomplete="off" placeholder="client@example.com">
+              <input id="new-client-email" name="email" type="email" maxlength="254" ${RECIPIENT_INPUT} placeholder="client@example.com">
             </label>
             <button class="button button-solid" type="submit">Create portal</button>
             <p class="portal-security-note">The login is hashed before it is stored. Share it with the client directly.</p>
@@ -617,7 +636,8 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
         </aside>
         ${selectedSection}
       </div>
-    </div>`, { authenticated, admin: true, bodyClass: "portal-page portal-admin", title: "Admin panel" });
+      ${recipientList(recipients)}
+    </div>`, { authenticated, admin: true, bodyClass: "portal-page portal-admin", title: "Admin panel", scripts: [BILLING_SCRIPT] });
 }
 
 function lineRow(line, index) {
@@ -764,7 +784,7 @@ function activity(item, receipt) {
   return `<ol class="admin-activity">${entries.map(([label, when]) => `<li><span>${escapeHtml(label)}</span><time datetime="${escapeAttribute(when)}">${dateText(when)}</time></li>`).join("")}</ol>`;
 }
 
-export function adminBillingPage({ client, item, links, receipt = null, readiness, notice = null }) {
+export function adminBillingPage({ client, item, links, receipt = null, recipients = [], readiness, notice = null }) {
   const base = `/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.id)}`;
   const invoice = item.kind === "invoice";
   const cards = [];
@@ -783,7 +803,7 @@ export function adminBillingPage({ client, item, links, receipt = null, readines
       ? '<p class="portal-security-note">Email delivery is not set up yet.</p>'
       : `<form class="admin-inline-form" action="${base}/send" method="post">
             <label for="send-to">Send to
-              <input id="send-to" name="to" type="email" maxlength="254" required value="${escapeAttribute(client.email || "")}" placeholder="client@example.com">
+              <input id="send-to" name="to" type="email" maxlength="254" required ${RECIPIENT_INPUT} value="${escapeAttribute(client.email || "")}" placeholder="client@example.com">
             </label>
             <button class="button button-solid" type="submit">Email ${invoice ? "invoice" : "quote"}</button>
           </form>`;
@@ -825,7 +845,7 @@ export function adminBillingPage({ client, item, links, receipt = null, readines
           ${receipt ? `<p class="admin-meta">Emailed to ${escapeHtml(receipt.to)} on ${dateText(receipt.sentAt)}.</p>` : '<p class="admin-meta">No receipt has been emailed yet.</p>'}
           <form class="admin-inline-form" action="${base}/receipt" method="post">
             <label for="receipt-to">Send to
-              <input id="receipt-to" name="to" type="email" maxlength="254" required value="${escapeAttribute(receiptTo)}">
+              <input id="receipt-to" name="to" type="email" maxlength="254" required ${RECIPIENT_INPUT} value="${escapeAttribute(receiptTo)}">
             </label>
             <button class="portal-logout-button" type="submit">${receipt ? "Resend receipt" : "Send receipt"}</button>
           </form>
@@ -864,6 +884,7 @@ export function adminBillingPage({ client, item, links, receipt = null, readines
           ${cards.join("\n        ")}
         </div>
       </div>
+      ${recipientList(recipients)}
     </div>`, { title: `${billingLabel(item)} · ${item.title}`, scripts: [BILLING_SCRIPT] });
 }
 
