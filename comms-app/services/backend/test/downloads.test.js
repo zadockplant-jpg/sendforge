@@ -27,6 +27,7 @@ let base;
 before(async () => {
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   process.env.DOWNLOAD_SOURCE_ROSE_COLORED_GLASSES = `http://127.0.0.1:${upstream.address().port}/asset`;
+  process.env.DOWNLOAD_SOURCE_FORGEDROP_UPDATE = `http://127.0.0.1:${upstream.address().port}/notice`;
   const { downloadsRouter } = await import("../src/routes/downloads.routes.js");
   const app = express();
   app.use("/v1/downloads", downloadsRouter);
@@ -59,6 +60,14 @@ test("an interrupted download can resume", async () => {
   assert.equal(res.status, 206);
   assert.equal(res.headers.get("content-range"), `bytes 100-${FILE.length - 1}/${FILE.length}`);
   assert.deepEqual(Buffer.from(await res.arrayBuffer()), FILE.subarray(100));
+});
+
+test("ForgeDrop's release notice is relayed for its updater", async () => {
+  // ForgeDrop asks /v1/downloads/forgedrop-update before falling back to GitHub.
+  const res = await fetch(`${base}/v1/downloads/forgedrop-update`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-disposition"), /filename="forgedrop-update\.json"/);
+  assert.deepEqual(Buffer.from(await res.arrayBuffer()), FILE);
 });
 
 test("only known products download", async () => {

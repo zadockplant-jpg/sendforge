@@ -31,6 +31,16 @@ export const DOWNLOADS = Object.freeze({
       process.env.DOWNLOAD_SOURCE_FORGEDROP ||
       "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/forgedrop/Install.ForgeDrop.exe",
   }),
+  // ForgeDrop's release notice (forgedrop/core/update.py in the ForgeDrop
+  // repo): the app asks here first and GitHub second. The notice is signed
+  // with a key this server never holds, so relaying it gives the server no
+  // say over what installed copies accept.
+  "forgedrop-update": Object.freeze({
+    filename: "forgedrop-update.json",
+    source:
+      process.env.DOWNLOAD_SOURCE_FORGEDROP_UPDATE ||
+      "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/forgedrop/forgedrop-update.json",
+  }),
 });
 
 const downloadLimiter = createRateLimiter({
