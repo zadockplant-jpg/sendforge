@@ -450,6 +450,21 @@ test("quotes and invoices show the Ada address, the license number and the insur
   assert.doesNotMatch(view, /billing-doc-from[^\n]*Muskegon, Michigan/u);
 });
 
+test("open invoices offer I'm paying by check, which gives the Muskegon mailing address", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  const view = await (await request(`/clients/invoice/${item.shareToken}`)).text();
+  assert.match(view, /<summary class="button button-outline">I&#39;m paying by check<\/summary>/u);
+  assert.match(view, /<address><strong>My Home Builder LLC<\/strong><br>5899 1\/2 White Rd<br>Muskegon, MI 49442<\/address>/u);
+  assert.match(view, /write Invoice 1 in the memo/u);
+
+  const clientCookie = await loginAsClient();
+  assert.match(await (await request(`/clients/billing/${item.id}`, { headers: { Cookie: clientCookie } })).text(), /I&#39;m paying by check/u);
+
+  await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}/record-payment`, form({ method: "check", paidOn: "2026-09-25" }, adminCookie));
+  assert.doesNotMatch(await (await request(`/clients/invoice/${item.shareToken}`)).text(), /paying by check/u);
+});
+
 test("addresses already emailed are loaded into the pick list, newest first, without builder notices", () => {
   assert.deepEqual(backfilled.map((row) => row.email), ["payer@example.com", "owner@example.com"]);
   assert.equal(backfilled[1].display, "Owner@Example.com");

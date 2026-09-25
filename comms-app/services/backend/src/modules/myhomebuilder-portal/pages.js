@@ -21,6 +21,20 @@ const BILLING_SCRIPT = "/clients/portal/billing.js";
 const BUSINESS_ADDRESS = ["6749 Fulton St E, Ste A #2333", "Ada, MI 49301"];
 const BUILDER_LICENSE = "License # 242601116";
 const INSURANCE = "$1,000,000 liability insurance provided by Next First Insurance Agency Inc";
+// The Ada address is a digital mailbox, so checks go to this address instead.
+const CHECK_ADDRESS = ["5899 1/2 White Rd", "Muskegon, MI 49442"];
+
+// A disclosure (no script needed): the button reveals where to mail a check.
+function checkOption(item) {
+  return `<details class="billing-check">
+          <summary class="button button-outline">I&#39;m paying by check</summary>
+          <div class="billing-check-address">
+            <p>Mail your check to:</p>
+            <address><strong>My Home Builder LLC</strong><br>${CHECK_ADDRESS.map(escapeHtml).join("<br>")}</address>
+            <p>Make it payable to My Home Builder LLC and write ${escapeHtml(billingLabel(item))} in the memo.</p>
+          </div>
+        </details>`;
+}
 
 // Addresses the portal has emailed, newest first. billing.js turns this list into the pick list
 // under each email field in the admin panel; without scripts the browser offers the same addresses.
@@ -395,6 +409,7 @@ export function billingDetailPage({ client, item, stripeReady, admin = false, no
           <p class="portal-security-note">Payments are processed by Stripe. Card and bank details are entered on Stripe's secure checkout page and never touch this website.</p>
         </form>`
       : '<p class="portal-notice">Online payment is not available yet. Please contact My Home Builder to arrange payment.</p>';
+    action += checkOption(item);
   } else if (item.kind === "quote" && item.status === "open") {
     action = acceptForm(`/clients/billing/${encodeURIComponent(item.id)}/accept`, { requireName: false });
   }
@@ -423,6 +438,7 @@ export function sharedBillingPage({ client, item, stripeReady, token, notice = n
       ? `<a class="button button-solid" href="/clients/pay/${encodeURIComponent(token)}">Pay ${money(item.amountCents, item.currency)} securely</a>
           <p class="portal-security-note">Payments are processed by Stripe. Card and bank details are entered on Stripe's secure checkout page and never touch this website.</p>`
       : '<p class="portal-notice">Online payment is not available yet. Please contact My Home Builder to arrange payment.</p>';
+    action += checkOption(item);
   } else if (!invoice && item.status === "open") {
     action = acceptForm(`/clients/quote/${encodeURIComponent(token)}/accept`, { requireName: true });
   }

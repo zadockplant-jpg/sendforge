@@ -68,6 +68,10 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   Ada, MI 49301) and "License # 242601116" in its header. Its footer reads
   "$1,000,000 liability insurance provided by Next First Insurance Agency Inc". These are
   constants at the top of `pages.js`, worded exactly as the owner gave them.
+- The Ada address is a digital mailbox, so an open invoice's payment panel (on the public
+  invoice link and in the client portal) also has an "I'm paying by check" button. It reveals
+  the check mailing address, 5899 1/2 White Rd, Muskegon, MI 49442, with payable-to and memo
+  guidance. It is a native `<details>` disclosure and needs no script.
 - Every address a quote, invoice or receipt is emailed to is kept in `mhb_recipients` with
   its last send; builder notices and admin codes are not. The admin panel's email fields
   offer them as a pick list, newest first, eight rows tall with the rest scrolling. The list
