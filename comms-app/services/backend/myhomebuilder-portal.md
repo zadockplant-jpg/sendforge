@@ -76,6 +76,13 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   - 20 sign-in or admin-code attempts and 120 form posts per visitor address per minute
   - 3 admin code requests per address and 12 overall per 10 minutes
 
+## PDF signing library
+
+`vendor/pdf-lib.js` is pdf-lib 1.17.1 bundled into one ES module, so the module adds no npm
+dependency. It was built with
+`esbuild node_modules/pdf-lib/es/index.js --bundle --format=esm --platform=neutral --main-fields=module,main --minify --legal-comments=eof`.
+To upgrade, rebuild it the same way from the new pdf-lib version and run the tests.
+
 ## Tests
 
 `test/myhomebuilder-portal.test.js` runs the handler and the Express router with the real
