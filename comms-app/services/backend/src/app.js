@@ -29,6 +29,7 @@ import { jayjeRouter } from "./modules/jayje/index.js";
 import { jayjePortalRouter } from "./modules/jayje-portal/index.js";
 import { rtsRouter } from "./modules/romancing-the-stone/index.js";
 import { forgedropLinkRouter } from "./modules/forgedrop-link/index.js";
+import { myhomebuilderPortalRouter } from "./modules/myhomebuilder-portal/index.js";
 
 export const app = express();
 
@@ -37,6 +38,10 @@ app.set("trust proxy", 1);
 // JayJe owns its parser, proxy boundary and error handling. Existing routes stay unchanged.
 app.use("/v1/jayje/portal", jayjePortalRouter);
 app.use("/v1/jayje", jayjeRouter);
+
+// My Home Builder's client portal also owns its parser (form and upload bodies), proxy
+// boundary and error pages. Off until MHB_PORTAL_ENABLED=true.
+app.use("/v1/myhomebuilder/portal", myhomebuilderPortalRouter);
 
 app.use(express.urlencoded({ extended: false }));
 
