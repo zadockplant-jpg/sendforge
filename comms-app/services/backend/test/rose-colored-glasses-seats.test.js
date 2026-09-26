@@ -49,6 +49,9 @@ const { up: devicesUp } = await import(
 const { up: seatsUp } = await import(
   "../src/db/migrations/20260924_create_product_seat_purchases.js"
 );
+const { up: identityUp } = await import(
+  "../src/db/migrations/20260927_device_identity_proof.js"
+);
 
 const RCG = "rose-colored-glasses";
 const product = licensedProduct(RCG);
@@ -166,6 +169,7 @@ before(async () => {
   });
   await devicesUp(db);
   await seatsUp(db);
+  await identityUp(db);
 });
 
 after(async () => {

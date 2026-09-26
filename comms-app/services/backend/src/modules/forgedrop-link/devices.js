@@ -14,7 +14,14 @@ export function createDeviceDirectory(db, productSlug) {
     listActive(userId) {
       return db("device_activations")
         .where({ user_id: userId, product_slug: productSlug, status: "active" })
-        .select("device_id", "device_name", "platform", "app_version", "identity_fingerprint");
+        .select(
+          "device_id",
+          "device_name",
+          "platform",
+          "app_version",
+          "identity_fingerprint",
+          "identity_verified_at"
+        );
     },
   };
 }

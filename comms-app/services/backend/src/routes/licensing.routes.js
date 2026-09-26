@@ -22,8 +22,11 @@ import {
   deactivateDevice,
   describeActivation,
   findByActivationCode,
+  recordVerifiedIdentity,
   rotateActivationCode,
 } from "../services/deviceActivation.service.js";
+import { IdentityProofError, makeChallenge, verifyProof } from "../services/identityProof.service.js";
+import { publicKeyHexFromSeed, verifyLicenseToken } from "../services/licenseToken.service.js";
 import { LICENSED_PRODUCTS, licensedProduct } from "../services/licensedProducts.js";
 import {
   countActiveSeats,
@@ -48,6 +51,36 @@ const activateLimiter = createRateLimiter({
   max: 10,
   message: "too_many_activation_attempts",
 });
+
+const identityLimiter = createRateLimiter({
+  name: "license-identity",
+  windowMs: 60 * 1000,
+  max: 30,
+  message: "too_many_identity_requests",
+});
+
+/**
+ * The key a device proved it holds, from the fields it sent beside a
+ * request, or null. Never throws: a device that sends no proof, an older
+ * app, is simply unproven.
+ */
+function provenIdentity(req, body) {
+  const { identityPublicKey, identityChallenge, identityProof } = body || {};
+  if (!identityPublicKey && !identityChallenge && !identityProof) return null;
+  try {
+    return verifyProof(env.licenseSigningKey, {
+      publicKeyHex: identityPublicKey,
+      challenge: identityChallenge,
+      proof: identityProof,
+    });
+  } catch (error) {
+    log("warn", "identity_proof_rejected", {
+      requestId: getRequestId(req),
+      code: error instanceof IdentityProofError ? error.code : String(error?.message || error),
+    });
+    return null;
+  }
+}
 
 const deviceAdminLimiter = createRateLimiter({
   name: "license-devices",
@@ -165,6 +198,10 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
     return res.status(403).json({ error: "entitlement_required", productSlug: product.slug });
   }
 
+  // A device that proves its key gets the fingerprint derived from it; one
+  // that only states a fingerprint is recorded as unproven, as before.
+  const proven = product.slug === "forgedrop" ? provenIdentity(req, req.body) : null;
+
   try {
     const result = await activateDevice({
       userId,
@@ -173,7 +210,8 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
       deviceName: clean(deviceName, 80),
       platform: clean(platform, 32),
       appVersion: clean(appVersion, 32),
-      identityFingerprint: clean(identityFingerprint, 64),
+      identityFingerprint: proven ? proven.fingerprint : clean(identityFingerprint, 64),
+      identityPublicKey: proven ? proven.publicKeyHex : null,
       deviceLimit: limitResolver(userId, product),
     });
 
@@ -185,6 +223,7 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
         issuedAt: result.issuedAt,
       },
       reactivated: result.reactivated,
+      identityVerified: result.identityVerified,
       devices: result.devices,
     });
   } catch (error) {
@@ -208,6 +247,61 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
     });
     return res.status(500).json({ error: "activation_failed" });
   }
+});
+
+/**
+ * A challenge for a ForgeDrop device to prove its identity key against, at
+ * activation or later (identityProof.service.js). Needs no account: the
+ * challenge proves nothing by itself, and it expires in ten minutes.
+ */
+licensingRouter.get("/identity-challenge", identityLimiter, (req, res) => {
+  try {
+    return res.json(makeChallenge(env.licenseSigningKey));
+  } catch {
+    log("error", "identity_proof_key_missing", { requestId: getRequestId(req) });
+    return res.status(503).json({ error: "licensing_unavailable" });
+  }
+});
+
+/**
+ * An already-activated ForgeDrop device proves its key, signing in with the
+ * offline licence it holds (the same header the phone link uses).
+ */
+licensingRouter.post("/identity", identityLimiter, async (req, res) => {
+  let publicKey;
+  try {
+    publicKey = publicKeyHexFromSeed(env.licenseSigningKey);
+  } catch {
+    return res.status(503).json({ error: "licensing_unavailable" });
+  }
+  const token = String(req.headers["x-forgedrop-license"] || "").trim();
+  const claims = token && token.length <= 4096 ? verifyLicenseToken(token, { publicKeyHex: publicKey }) : null;
+  const product = claims ? licensedProduct(claims.product) : null;
+  if (!claims || !product || product.slug !== "forgedrop" || !claims.uid || !claims.did) {
+    return res.status(401).json({ error: "licence_invalid" });
+  }
+
+  let proven;
+  try {
+    proven = verifyProof(env.licenseSigningKey, {
+      publicKeyHex: req.body?.identityPublicKey,
+      challenge: req.body?.identityChallenge,
+      proof: req.body?.identityProof,
+    });
+  } catch (error) {
+    const code = error instanceof IdentityProofError ? error.code : "identity_proof_invalid";
+    return res.status(400).json({ error: code });
+  }
+
+  const recorded = await recordVerifiedIdentity({
+    userId: claims.uid,
+    productSlug: product.slug,
+    deviceId: claims.did,
+    publicKeyHex: proven.publicKeyHex,
+    fingerprint: proven.fingerprint,
+  });
+  if (!recorded) return res.status(403).json({ error: "device_inactive" });
+  return res.json({ identityVerified: true, fingerprint: proven.fingerprint });
 });
 
 licensingRouter.get("/products", (_req, res) => {

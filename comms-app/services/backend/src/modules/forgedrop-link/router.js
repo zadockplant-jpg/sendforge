@@ -212,10 +212,16 @@ export function createForgeDropLinkRouter({
       const desktops = rows.map((row) => {
         const deviceId = canonicalUuid(String(row.device_id)) || String(row.device_id);
         const live = store.presence(userId, `desktop:${deviceId}`);
+        const fingerprint = live?.fingerprint ?? row.identity_fingerprint ?? null;
         return {
           deviceId,
           name: live?.name ?? row.device_name ?? null,
-          fingerprint: live?.fingerprint ?? row.identity_fingerprint ?? null,
+          fingerprint,
+          // Proven only when the device showed it holds that very key
+          // (identityProof.service.js); anything else is its own say-so.
+          fingerprintVerified: Boolean(
+            row.identity_verified_at && fingerprint && fingerprint === row.identity_fingerprint
+          ),
           appVersion: live?.appVersion ?? row.app_version ?? null,
           platform: row.platform ?? null,
           online: Boolean(live),

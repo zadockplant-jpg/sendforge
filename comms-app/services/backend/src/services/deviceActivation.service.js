@@ -108,6 +108,7 @@ export function presentDevice(row) {
     platform: row.platform,
     appVersion: row.app_version,
     identityFingerprint: row.identity_fingerprint,
+    identityVerified: Boolean(row.identity_verified_at),
     activatedAt: row.created_at,
     lastSeenAt: row.last_seen_at,
   };
@@ -143,6 +144,9 @@ export async function activateDevice({
   platform = null,
   appVersion = null,
   identityFingerprint = null,
+  // Set only for a key the device proved it holds (identityProof.service.js);
+  // identityFingerprint is then the one derived from it.
+  identityPublicKey = null,
   deviceLimit = DEFAULT_DEVICE_LIMIT,
 }) {
   const slug = normalizeSlug(productSlug);
@@ -171,6 +175,24 @@ export async function activateDevice({
       const resolvedDeviceId = existing?.device_id || deviceId || crypto.randomUUID();
       const issuedAt = new Date();
 
+      // A proven key replaces whatever was there. An unproven claim keeps an
+      // earlier proof only while it names the same key; a reinstall with a
+      // new key, reported without proof, is not the device that proved.
+      let proven;
+      if (identityPublicKey) {
+        proven = { identity_public_key: identityPublicKey, identity_verified_at: issuedAt };
+      } else if (
+        existing?.identity_verified_at &&
+        existing.identity_fingerprint === identityFingerprint
+      ) {
+        proven = {
+          identity_public_key: existing.identity_public_key,
+          identity_verified_at: existing.identity_verified_at,
+        };
+      } else {
+        proven = { identity_public_key: null, identity_verified_at: null };
+      }
+
       const token = signLicenseToken(
         {
           v: 1,
@@ -194,6 +216,7 @@ export async function activateDevice({
         platform,
         app_version: appVersion,
         identity_fingerprint: identityFingerprint,
+        ...proven,
         license_kid: env.licenseSigningKid,
         license_issued_at: issuedAt,
         last_seen_at: issuedAt,
@@ -210,6 +233,8 @@ export async function activateDevice({
           platform: payload.platform,
           app_version: payload.app_version,
           identity_fingerprint: payload.identity_fingerprint,
+          identity_public_key: payload.identity_public_key,
+          identity_verified_at: payload.identity_verified_at,
           license_kid: payload.license_kid,
           license_issued_at: payload.license_issued_at,
           last_seen_at: payload.last_seen_at,
@@ -225,10 +250,27 @@ export async function activateDevice({
         kid: env.licenseSigningKid,
         issuedAt,
         reactivated: Boolean(isReturning),
+        identityVerified: Boolean(proven.identity_verified_at),
         devices: { used, limit },
       };
     })
   );
+}
+
+/**
+ * Record a key an already-activated device has just proven it holds. Only an
+ * active device of the account counts; returns false when there is none.
+ */
+export async function recordVerifiedIdentity({ userId, productSlug, deviceId, publicKeyHex, fingerprint }) {
+  const updated = await db("device_activations")
+    .where({ user_id: userId, product_slug: normalizeSlug(productSlug), device_id: deviceId, status: "active" })
+    .update({
+      identity_fingerprint: fingerprint,
+      identity_public_key: publicKeyHex,
+      identity_verified_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+  return Number(updated) > 0;
 }
 
 /**

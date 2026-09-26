@@ -117,8 +117,10 @@ export async function attachPglite(db) {
 
   const { up: devicesUp } = await import("../../src/db/migrations/20260921_create_device_activations.js");
   const { up: seatsUp } = await import("../../src/db/migrations/20260924_create_product_seat_purchases.js");
+  const { up: identityUp } = await import("../../src/db/migrations/20260927_device_identity_proof.js");
   await devicesUp(db);
   await seatsUp(db);
+  await identityUp(db);
 
   return async () => {
     await db.destroy();
