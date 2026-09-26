@@ -21,8 +21,7 @@ import {
 import {
   cancelFlatProductReferral,
   disqualifyReferralPurchaseForStripe,
-  flatReferralRewardCents,
-  recordFlatProductReferral,
+  isMilestoneReferralProduct,
   recordReferralPurchase,
   recordSyncSubscriptionShare,
 } from "../services/referrals/referral.service.js";
@@ -57,8 +56,10 @@ function normalizeSlug(slug) {
     .toLowerCase();
 }
 
+// Every product with a referral programme: TabForge Pro, Rose Colored
+// Glasses and ForgeDrop.
 function isReferralQualifyingPurchase(entitlementSlug) {
-  return normalizeSlug(entitlementSlug) === "tabforge";
+  return isMilestoneReferralProduct(normalizeSlug(entitlementSlug));
 }
 
 function tabForgeSubscriptionSourceRef(subscriptionId) {
@@ -535,16 +536,19 @@ async function grantCheckoutEntitlements({
         },
       });
 
-      if (referralNetPaidCents > 0 && flatReferralRewardCents(entitlementSlug) > 0) {
-        await recordFlatProductReferral({
+      // The customer's first paid purchase is the referral; later devices
+      // add nothing (recordReferralPurchase keeps one per customer).
+      if (referralNetPaidCents > 0 && isReferralQualifyingPurchase(entitlementSlug)) {
+        await recordReferralPurchase({
           referredUserId: userId,
           productSlug: entitlementSlug,
           purchaseRef: `${sourceRef}:${entitlementSlug}`,
-          netPaidCents: referralNetPaidCents,
           metadata: {
             checkout_session_id: checkoutSessionId,
+            checkout_item_kind: kind,
             payment_intent: paymentIntent || null,
             devices: seats,
+            initial_net_paid_cents: referralNetPaidCents,
           },
         });
       }

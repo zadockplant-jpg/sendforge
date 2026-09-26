@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import { log, getRequestId } from "../utils/logger.js";
-import { recordVerifiedReferralSignup } from "../services/referrals/referral.service.js";
+import { recordVerifiedReferralPurchases, recordVerifiedReferralSignup } from "../services/referrals/referral.service.js";
 import { redeemPendingCompCodeForVerifiedUser } from "../services/compCodes.service.js";
 
 export const verificationRouter = Router();
@@ -69,6 +69,17 @@ verificationRouter.get("/verify", async (req, res) => {
         rewardsQueued: Array.isArray(referralResult?.rewards) ? referralResult.rewards.length : 0,
         reason: referralResult?.reason || null,
       });
+      // Purchases of the other products with a referral programme (Rose
+      // Colored Glasses, ForgeDrop) made before verifying count now too.
+      const productResult = await recordVerifiedReferralPurchases({ referredUserId: user.id });
+      if (productResult.promoted) {
+        log("info", "verified_referral_purchases_promoted", {
+          requestId,
+          userId: user.id,
+          promotedPurchases: productResult.promoted,
+          rewardsQueued: productResult.rewards.length,
+        });
+      }
     } catch (referralError) {
       log("error", "verified_referral_state_failed", {
         requestId,

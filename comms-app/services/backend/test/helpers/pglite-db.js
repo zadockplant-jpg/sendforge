@@ -96,6 +96,18 @@ export async function attachPglite(db) {
     t.timestamp("updated_at", { useTz: true });
     t.unique(["user_id", "product_slug", "reward_key"]);
   });
+  await db.schema.createTable("referral_programs", (t) => {
+    t.uuid("id").primary();
+    t.text("product_slug").notNullable().unique();
+    t.integer("required_purchases").notNullable().defaultTo(5);
+    t.integer("reward_amount_cents").notNullable().defaultTo(1000);
+    t.text("reward_type").notNullable().defaultTo("cashapp_manual");
+    t.integer("refund_hold_days").notNullable().defaultTo(14);
+    t.text("status").notNullable().defaultTo("active");
+    t.jsonb("metadata").notNullable().defaultTo("{}");
+    t.timestamp("created_at", { useTz: true }).defaultTo(db.fn.now());
+    t.timestamp("updated_at", { useTz: true }).defaultTo(db.fn.now());
+  });
   await db.schema.createTable("billing_checkout_attempts", (t) => {
     t.uuid("id").primary();
     t.text("stripe_checkout_session_id");

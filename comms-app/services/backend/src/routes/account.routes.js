@@ -15,7 +15,7 @@ import {
   canHoldReferralCode,
   createReferralInvite,
   ensureReferralCodeForUser,
-  flatReferralSummary,
+  productReferralSummary,
   hasReferralProgramEligibility,
   REFERRAL_REQUIRED_PRODUCT_SLUG,
   resolveReferralInviteToken,
@@ -336,9 +336,10 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
           .orderBy("updated_at", "desc")
           .first(),
       ]);
-    // referralEligible keeps meaning "earns on TabForge". Owning a product
-    // with a flat reward, such as Rose Colored Glasses, is enough for a code
-    // too; productReferrals says what that code earns there.
+    // referralEligible keeps meaning "earns on TabForge". Owning any product
+    // with a referral programme, such as Rose Colored Glasses or ForgeDrop,
+    // is enough for a code too; productReferrals says what that code earns
+    // on each of those products: its milestones, or a flat amount per sale.
     const referralEligible = await hasReferralProgramEligibility(user.id);
     const holdsReferralCode =
       referralEligible || (await canHoldReferralCode(user.id));
@@ -346,7 +347,7 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
       ? await ensureReferralCodeForUser(user)
       : null;
     const productReferrals = holdsReferralCode
-      ? await flatReferralSummary(user.id)
+      ? await productReferralSummary(user.id, referralCode)
       : [];
 
     return res.json({

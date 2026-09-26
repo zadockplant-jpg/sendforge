@@ -16,10 +16,10 @@ const {
   setAccountReferral,
   setProductGift,
 } = await import("../src/services/adminAccounts.service.js");
-const { redeemCompCodeForUser, redeemPendingCompCodeForVerifiedUser, noteCompCodeForUser } = await import(
+const { listCompCodes, redeemCompCodeForUser, redeemPendingCompCodeForVerifiedUser, noteCompCodeForUser, upsertCompCode } = await import(
   "../src/services/compCodes.service.js"
 );
-const { canHoldReferralCode, recordFlatProductReferral } = await import(
+const { canHoldReferralCode, recordReferralPurchase } = await import(
   "../src/services/referrals/referral.service.js"
 );
 const { deviceLimitFor } = await import("../src/services/productSeats.service.js");
@@ -149,21 +149,62 @@ test("referral terms: an affiliate who owns nothing, a vanity code, and a custom
   assert.equal(view.referral.flatRates[RCG].custom, true);
   assert.equal(await canHoldReferralCode(aff), true);
 
-  // Someone they refer buys: the $3 rate is what queues.
+  // An affiliate is on ForgeDrop's affiliate level without anything being set.
+  assert.equal(view.referral.flatRates.forgedrop.custom, false);
+  assert.equal(view.referral.flatRates.forgedrop.affiliateCents, 1000);
+  assert.equal(view.referral.flatRates.forgedrop.effectiveCents, 1000);
+
+  // Someone they refer buys: the $3 rate is what queues, on that first sale.
   const code = await db("referral_codes").where({ code: "SUNNY" }).first();
   const buyer = await signUp("buyer@example.com", { referred_by_user_id: aff, referral_code_id: code.id });
-  const paid = await recordFlatProductReferral({ referredUserId: buyer, productSlug: RCG, purchaseRef: "pi_buyer:rcg", netPaidCents: 500, metadata: { payment_intent: "pi_buyer" } });
+  const paid = await recordReferralPurchase({ referredUserId: buyer, productSlug: RCG, purchaseRef: "pi_buyer:rcg", metadata: { payment_intent: "pi_buyer", initial_net_paid_cents: 500 } });
   assert.equal(paid.recorded, true);
-  assert.equal(paid.amountCents, 300);
+  assert.deepEqual(paid.rewards.map((reward) => reward.reward_amount_cents), [300]);
 
-  // Back to standard terms.
+  // The same buyer's ForgeDrop pays the affiliate level: $10 on the sale.
+  const drop = await recordReferralPurchase({ referredUserId: buyer, productSlug: "forgedrop", purchaseRef: "pi_buyer2:forgedrop", metadata: { payment_intent: "pi_buyer2", initial_net_paid_cents: 2000 } });
+  assert.deepEqual(drop.rewards.map((reward) => reward.reward_amount_cents), [1000]);
+
+  // Back to standard terms: Rose Colored Glasses returns to its milestones.
   view = await setAccountReferral({ email: "affiliate@example.com", flatRates: { [RCG]: null }, tabforgePerSaleCents: null });
-  assert.equal(view.referral.flatRates[RCG].cents, 100);
+  assert.equal(view.referral.flatRates[RCG].cents, null);
+  assert.equal(view.referral.flatRates[RCG].custom, false);
+  assert.equal(view.referral.flatRates[RCG].effectiveCents, null, "null means the milestones");
   assert.equal(view.referral.tabforgePerSaleCents, null);
   assert.equal(view.referral.referredAccounts, 1);
+
+  // A rate of zero on ForgeDrop is the owner saying: nothing on ForgeDrop.
+  view = await setAccountReferral({ email: "affiliate@example.com", flatRates: { forgedrop: 0 } });
+  assert.equal(view.referral.flatRates.forgedrop.effectiveCents, 0);
 
   await assert.rejects(setAccountReferral({ email: "affiliate@example.com", code: "no spaces!" }), /invalid_referral_code/);
   await signUp("other@example.com");
   await setAccountReferral({ email: "other@example.com", affiliate: true });
   await assert.rejects(setAccountReferral({ email: "other@example.com", code: "SUNNY" }), /referral_code_taken/);
+});
+
+test("a Customer Finder comp code carries ForgeDrop's $10 affiliate level to the creator", async () => {
+  // What Customer Finder pushes for each creator it finds.
+  await upsertCompCode({ code: "COMP-CREATOR1", note: "Comp code for Creator", maxRedemptions: 1, perSaleRewardCents: 500, forgedropPerSaleRewardCents: 1000, createdBy: ADMIN });
+  const listed = (await listCompCodes()).find((item) => item.code === "COMP-CREATOR1");
+  assert.equal(listed.perSaleRewardCents, 500);
+  assert.equal(listed.forgedropPerSaleRewardCents, 1000);
+
+  const creator = await signUp("creator@example.com");
+  const result = await redeemCompCodeForUser({ userId: creator, code: "COMP-CREATOR1" });
+  assert.equal(result.granted, true);
+  assert.deepEqual(result.plan.perSaleRates, { forgedrop: 1000 });
+
+  const code = await db("referral_codes").where({ user_id: creator, status: "active" }).first();
+  assert.equal(code.metadata.commission.rewardAmountCents, 500, "$5 on every TabForge Pro sale");
+  assert.equal(code.metadata.flat_rates.forgedrop, 1000, "$10 on every ForgeDrop sale");
+
+  // Their audience buys ForgeDrop through the creator's own link.
+  const fan = await signUp("fan@example.com", { referred_by_user_id: creator, referral_code_id: code.id });
+  const bought = await recordReferralPurchase({ referredUserId: fan, productSlug: "forgedrop", purchaseRef: "pi_fan:forgedrop", metadata: { payment_intent: "pi_fan", initial_net_paid_cents: 2000 } });
+  assert.deepEqual(bought.rewards.map((reward) => reward.reward_amount_cents), [1000]);
+
+  // Taking the ForgeDrop rate off the code leaves it off new codes too.
+  await upsertCompCode({ code: "COMP-CREATOR1", forgedropPerSaleRewardCents: null });
+  assert.equal((await listCompCodes()).find((item) => item.code === "COMP-CREATOR1").forgedropPerSaleRewardCents, null);
 });

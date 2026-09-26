@@ -65,7 +65,7 @@ test("availability honours status, expiry and the redemption limit", () => {
   assert.deepEqual(compCodeAvailability({ code: "X", status: "active", metadata: {} }, 0), { available: false, reason: "unknown_code", remaining: null });
 
   const view = compCodePublicView(row, compCodeAvailability(row, 0));
-  assert.deepEqual(view, { code: "CREATOR-ABC1", valid: true, reason: null, grants: ["TabForge Pro", "Private Sync"], note: null, commission: null });
+  assert.deepEqual(view, { code: "CREATOR-ABC1", valid: true, reason: null, grants: ["TabForge Pro", "Private Sync"], note: null, commission: null, perSaleRates: {} });
   const withPlan = compCodePublicView({ ...row, metadata: { ...row.metadata, commission: { mode: "per_sale", rewardAmountCents: 500 } } }, compCodeAvailability(row, 0));
   assert.deepEqual(withPlan.commission, { mode: "per_sale", rewardAmountCents: 500 }, "the signup page can say what the affiliate earns");
 });
@@ -117,7 +117,7 @@ test("a comp-code account is on a $5 per-sale plan that the reward engine and bo
   assert.deepEqual(tiersForVerifiedCount(effectiveProgramForReferrer(programme, { metadata: {} }), 3).map((t) => t.requiredPurchases), [5], "the programme is untouched for everyone else");
 
   const referral = await src("../src/services/referrals/referral.service.js");
-  assert.match(referral, /tiersForVerifiedCount\(effectiveProgramForReferrer\(program, referralCode\), verifiedCount\)/, "the queue uses the referrer's plan");
+  assert.match(referral, /const effective = effectiveProgramForReferrer\(program, referralCode\);[\s\S]*?tiersForVerifiedCount\(effective, verifiedCount\)/, "the queue uses the referrer's plan");
   const comp = await src("../src/services/compCodes.service.js");
   assert.match(comp, /const plan = await applyCompCodeCommission\(\{ trx, userId, compRow: row \}\);/, "redeeming applies the terms");
   const account = await src("../src/routes/account.routes.js");

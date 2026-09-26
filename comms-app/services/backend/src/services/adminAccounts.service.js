@@ -20,12 +20,14 @@ import {
 import { licensedProduct } from "./licensedProducts.js";
 import { seatBreakdown, setPerkSeats } from "./productSeats.service.js";
 import {
-  FLAT_REFERRAL_REWARDS,
+  AFFILIATE_PER_SALE_CENTS,
+  PER_SALE_RATE_PRODUCTS,
   canHoldReferralCode,
   commissionPlanForReferralCode,
   ensureAffiliateReferralCode,
   ensureReferralCodeForUser,
-  flatRewardCentsForCode,
+  customPerSaleCentsForCode,
+  perSaleCentsForCode,
   hasReferralProgramEligibility,
   renameReferralCode,
   setReferralTerms,
@@ -110,13 +112,17 @@ async function referralView(user, trx = db) {
   ]);
 
   const plan = commissionPlanForReferralCode(code);
+  // Per product: the owner's own per-sale rate, if any; the affiliate level
+  // an affiliate gets without one; and what this person is paid per sale
+  // (null means the product's milestones).
   const flatRates = {};
-  for (const slug of Object.keys(FLAT_REFERRAL_REWARDS)) {
-    const custom = code?.metadata?.flat_rates?.[slug];
+  for (const slug of PER_SALE_RATE_PRODUCTS) {
+    const custom = customPerSaleCentsForCode(code, slug);
     flatRates[slug] = {
-      standardCents: FLAT_REFERRAL_REWARDS[slug],
-      cents: flatRewardCentsForCode(code, slug),
-      custom: Number.isInteger(Number(custom)),
+      cents: custom,
+      custom: custom !== null,
+      affiliateCents: AFFILIATE_PER_SALE_CENTS[slug] ?? null,
+      effectiveCents: perSaleCentsForCode(code, slug),
     };
   }
   const byStatus = {};

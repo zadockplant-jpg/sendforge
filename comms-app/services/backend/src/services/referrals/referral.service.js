@@ -2,25 +2,67 @@ import crypto from "crypto";
 import { db } from "../../config/db.js";
 import { log } from "../../utils/logger.js";
 
-const DEFAULT_PURCHASE_TIERS = [
-  { requiredPurchases: 5, rewardAmountCents: 1700 },
-  { requiredPurchases: 15, rewardAmountCents: 3500 },
-  { requiredPurchases: 25, rewardAmountCents: 4000 },
-  { requiredPurchases: 50, rewardAmountCents: 15000 },
-];
+// Every product pays its referrers on the same milestones: the 5th, 15th,
+// 25th and 50th referred customer, then every 25th after that. Only the
+// amounts differ from product to product.
+export const REFERRAL_MILESTONES = Object.freeze([5, 15, 25, 50]);
+const RECURRING_START_AFTER = 50;
+const RECURRING_EVERY = 25;
 
-const TABFORGE_PURCHASE_TIERS = [
-  { requiredPurchases: 5, rewardAmountCents: 1700 },
-  { requiredPurchases: 15, rewardAmountCents: 3500 },
-  { requiredPurchases: 25, rewardAmountCents: 4000 },
-  { requiredPurchases: 50, rewardAmountCents: 15000 },
-];
+function milestoneTiers(amountsCents) {
+  return REFERRAL_MILESTONES.map((requiredPurchases, index) => ({
+    requiredPurchases,
+    rewardAmountCents: amountsCents[index],
+  }));
+}
 
-const TABFORGE_RECURRING_PURCHASE_TIER = {
-  startAfterPurchases: 50,
-  everyPurchases: 25,
-  rewardAmountCents: 15000,
-};
+function recurringTier(rewardAmountCents) {
+  return { startAfterPurchases: RECURRING_START_AFTER, everyPurchases: RECURRING_EVERY, rewardAmountCents };
+}
+
+// The public referral programme of each product.
+//
+// Rose Colored Glasses pays $1 per referral, settled at the milestones rather
+// than one dollar at a time: $5 for the first 5, $10 for the next 10, $10 for
+// the 10 after that, $25 for the next 25, and $25 for every 25 beyond. Paid
+// out, it is always exactly $1 per referred customer.
+export const PRODUCT_REFERRAL_PROGRAMS = Object.freeze({
+  tabforge: Object.freeze({
+    label: "TabForge Pro",
+    tiers: milestoneTiers([1700, 3500, 4000, 15000]),
+    recurringTier: recurringTier(15000),
+  }),
+  "rose-colored-glasses": Object.freeze({
+    label: "Rose Colored Glasses",
+    perReferralCents: 100,
+    tiers: milestoneTiers([500, 1000, 1000, 2500]),
+    recurringTier: recurringTier(2500),
+  }),
+  forgedrop: Object.freeze({
+    label: "ForgeDrop",
+    tiers: milestoneTiers([2500, 5000, 6000, 17500]),
+    recurringTier: recurringTier(17500),
+  }),
+});
+
+export const MILESTONE_REFERRAL_PRODUCTS = Object.freeze(Object.keys(PRODUCT_REFERRAL_PROGRAMS));
+
+export function isMilestoneReferralProduct(productSlug) {
+  return Boolean(PRODUCT_REFERRAL_PROGRAMS[normalizeProductSlug(productSlug)]);
+}
+
+const TABFORGE_PURCHASE_TIERS = PRODUCT_REFERRAL_PROGRAMS.tabforge.tiers;
+const TABFORGE_RECURRING_PURCHASE_TIER = PRODUCT_REFERRAL_PROGRAMS.tabforge.recurringTier;
+// A product without a programme of its own keeps the TabForge amounts.
+const DEFAULT_PURCHASE_TIERS = TABFORGE_PURCHASE_TIERS;
+
+export function defaultProgramTiers(productSlug) {
+  return (PRODUCT_REFERRAL_PROGRAMS[normalizeProductSlug(productSlug)] || PRODUCT_REFERRAL_PROGRAMS.tabforge).tiers;
+}
+
+export function defaultProgramRecurringTier(productSlug) {
+  return PRODUCT_REFERRAL_PROGRAMS[normalizeProductSlug(productSlug)]?.recurringTier || null;
+}
 
 const INVITE_TTL_DAYS = 30;
 
@@ -51,26 +93,29 @@ const REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS = [
   "tabforge-pro",
 ];
 
-// Products that pay the referrer a flat amount, once per customer they bring
-// in, instead of the TabForge milestone tiers. Rose Colored Glasses pays $1.
-//
-// Owning one of these is also enough to hold a referral code. It is the same
-// code TabForge uses - one link per person - but it earns only on products
-// whose own gate the referrer passes: the TabForge tiers still check TabForge
-// Pro on every payout, so owning Rose Colored Glasses alone never pays on a
-// TabForge sale.
-export const FLAT_REFERRAL_REWARDS = Object.freeze({
-  "rose-colored-glasses": 100,
-});
+// Products whose per-person rate can be set on a referral code: a flat amount
+// on every sale, in place of the milestones. The rate lives in the code's
+// metadata.flat_rates; zero means the person earns nothing on that product.
+// (TabForge keeps its own per-sale field, metadata.commission.)
+export const PER_SALE_RATE_PRODUCTS = Object.freeze(["rose-colored-glasses", "forgedrop"]);
 
+// The affiliate level. An affiliate is paid a flat amount on every sale of
+// these products, unless the owner set a different rate on their code.
+// TabForge's affiliate rate is the one their comp code or the owner set.
+export const AFFILIATE_PER_SALE_CENTS = Object.freeze({ forgedrop: 1000 });
+
+// Rose Colored Glasses rewards queued before it moved onto milestones: one
+// flat dollar per customer. They still stand, and a refund still cancels them.
+const LEGACY_FLAT_REFERRAL_PRODUCTS = Object.freeze(["rose-colored-glasses"]);
+
+// Owning any product with a referral programme is enough to hold a referral
+// code. It is the same code on every product - one link per person - but it
+// earns only on products whose own gate the referrer passes: the TabForge
+// tiers still check TabForge Pro on every payout, so owning Rose Colored
+// Glasses alone never pays on a TabForge sale.
 const REFERRAL_CODE_ENTITLEMENT_SLUGS = [
-  ...REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS,
-  ...Object.keys(FLAT_REFERRAL_REWARDS),
+  ...new Set([...REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS, ...MILESTONE_REFERRAL_PRODUCTS]),
 ];
-
-export function flatReferralRewardCents(productSlug) {
-  return FLAT_REFERRAL_REWARDS[normalizeProductSlug(productSlug)] || 0;
-}
 
 export function normalizeReferralValue(value) {
   return String(value || "").trim();
@@ -149,29 +194,66 @@ export async function canHoldReferralCode(userId, trx = db) {
 }
 
 /**
- * What a flat-reward product pays this referrer per new customer: the rate
- * the owner set on their code, or the product's standard reward. A rate of
- * zero is allowed and means this person earns nothing on the product.
+ * Whether a referral code is on affiliate terms: the owner made it an
+ * affiliate, or a comp code or the owner gave it a per-sale TabForge rate.
  */
-export function flatRewardCentsForCode(referralCode, productSlug) {
+export function isAffiliateReferralCode(referralCode) {
+  return referralCode?.metadata?.affiliate === true || Boolean(commissionPlanForReferralCode(referralCode));
+}
+
+/**
+ * The rate the owner set on this code for a product, or null when none is set.
+ */
+export function customPerSaleCentsForCode(referralCode, productSlug) {
   const slug = normalizeProductSlug(productSlug);
-  const standard = flatReferralRewardCents(slug);
-  if (!standard) return 0;
+  if (!PER_SALE_RATE_PRODUCTS.includes(slug)) return null;
   const rates = referralCode?.metadata?.flat_rates;
-  const custom = rates && typeof rates === "object" ? Number(rates[slug]) : NaN;
-  return Number.isInteger(custom) && custom >= 0 ? custom : standard;
+  const custom = rates && typeof rates === "object" ? rates[slug] : undefined;
+  const cents = Number(custom);
+  return custom !== null && custom !== undefined && custom !== "" && Number.isInteger(cents) && cents >= 0 ? cents : null;
+}
+
+/**
+ * What this referrer is paid on every sale of a product, or null when they
+ * are paid on the product's milestones. The owner's own rate wins; otherwise
+ * an affiliate gets the affiliate level for the product. Zero means the
+ * person earns nothing on that product.
+ */
+export function perSaleCentsForCode(referralCode, productSlug) {
+  const slug = normalizeProductSlug(productSlug);
+  if (slug === REFERRAL_REQUIRED_PRODUCT_SLUG) {
+    return commissionPlanForReferralCode(referralCode)?.rewardAmountCents ?? null;
+  }
+  const custom = customPerSaleCentsForCode(referralCode, slug);
+  if (custom !== null) return custom;
+  if (AFFILIATE_PER_SALE_CENTS[slug] && isAffiliateReferralCode(referralCode)) {
+    return AFFILIATE_PER_SALE_CENTS[slug];
+  }
+  return null;
+}
+
+/**
+ * Whether this account earns referral rewards on a product at all. TabForge,
+ * and the Private Sync share that rides on it, need TabForge Pro. Every other
+ * product with a programme needs the referrer to hold a referral code: to own
+ * one of our products, or to be an affiliate.
+ */
+export async function productReferralEligibility(userId, productSlug, trx = db) {
+  const slug = normalizeProductSlug(productSlug);
+  if (!userId) return false;
+  if (slug === REFERRAL_REQUIRED_PRODUCT_SLUG || slug === SYNC_SHARE_PRODUCT_SLUG) {
+    return hasReferralProgramEligibility(userId, REFERRAL_REQUIRED_PRODUCT_SLUG, trx);
+  }
+  if (isMilestoneReferralProduct(slug)) return canHoldReferralCode(userId, trx);
+  return false;
 }
 
 /**
  * Whether a queued reward may be approved and paid, by the product it was
- * earned on. A flat-reward product needs its referrer to still be a customer;
- * TabForge rewards, including Private Sync shares, need TabForge Pro.
+ * earned on: the referrer must still pass that product's gate.
  */
 export async function rewardPayoutEligibility(userId, productSlug, trx = db) {
-  const slug = normalizeProductSlug(productSlug);
-  if (flatReferralRewardCents(slug) > 0) return canHoldReferralCode(userId, trx);
-  const programSlug = slug === SYNC_SHARE_PRODUCT_SLUG ? REFERRAL_REQUIRED_PRODUCT_SLUG : slug;
-  return hasReferralProgramEligibility(userId, programSlug, trx);
+  return productReferralEligibility(userId, productSlug, trx);
 }
 
 function hashInviteToken(token) {
@@ -267,8 +349,9 @@ export async function ensureAffiliateReferralCode(user, { source = "admin" } = {
 
 /**
  * The per-person referral terms the owner sets: a flat amount per TabForge
- * sale (null returns them to the milestone tiers) and a rate per flat-reward
- * product (null returns that product to its standard reward).
+ * sale (null returns them to the milestone tiers) and a flat amount per sale
+ * of another product (null returns that product to its milestones, or to the
+ * affiliate level for an affiliate).
  */
 export async function setReferralTerms(codeRow, { tabforgePerSaleCents, flatRates } = {}, trx = db) {
   if (!codeRow?.id) return null;
@@ -292,7 +375,7 @@ export async function setReferralTerms(codeRow, { tabforgePerSaleCents, flatRate
     const rates = { ...(metadata.flat_rates || {}) };
     for (const [slug, value] of Object.entries(flatRates)) {
       const key = normalizeProductSlug(slug);
-      if (!FLAT_REFERRAL_REWARDS[key]) continue;
+      if (!PER_SALE_RATE_PRODUCTS.includes(key)) continue;
       const cents = Number(value);
       if (value === null || !Number.isInteger(cents) || cents < 0) delete rates[key];
       else rates[key] = cents;
@@ -781,9 +864,9 @@ export function tiersFromProgram(program) {
   }
 
   const slug = normalizeProductSlug(program?.product_slug);
-  const defaults = slug === "tabforge" ? TABFORGE_PURCHASE_TIERS : DEFAULT_PURCHASE_TIERS;
+  const defaults = PRODUCT_REFERRAL_PROGRAMS[slug]?.tiers || DEFAULT_PURCHASE_TIERS;
 
-  return (tiers.length ? tiers : defaults)
+  return [...(tiers.length ? tiers : defaults)]
     .sort((a, b) => a.requiredPurchases - b.requiredPurchases);
 }
 
@@ -791,7 +874,7 @@ export function recurringTierFromProgram(program) {
   const slug = normalizeProductSlug(program?.product_slug);
   const meta = program?.metadata && typeof program.metadata === "object" ? program.metadata : {};
   const raw = meta.recurringTier && typeof meta.recurringTier === "object" ? meta.recurringTier : null;
-  const fallback = slug === "tabforge" ? TABFORGE_RECURRING_PURCHASE_TIER : null;
+  const fallback = defaultProgramRecurringTier(slug);
   const source = raw || fallback;
   if (!source) return null;
 
@@ -830,10 +913,11 @@ export function tiersForVerifiedCount(program, verifiedCount = 0) {
   return tiers.sort((a, b) => a.requiredPurchases - b.requiredPurchases);
 }
 
-// A per-referrer plan overrides the programme's tiers. Today there is one
-// kind: a flat amount on every qualified sale, which is what a comp-code
-// affiliate signs up to. It lives on the referrer's referral code, so the
-// programme row stays the default for everyone else.
+// A per-referrer plan overrides the programme's tiers: a flat amount on every
+// qualified sale, which is what an affiliate signs up to. It lives on the
+// referrer's referral code, so the programme row stays the default for
+// everyone else. This is the TabForge one; perSaleCentsForCode covers every
+// product.
 export function commissionPlanForReferralCode(referralCode) {
   const meta = referralCode?.metadata && typeof referralCode.metadata === "object" ? referralCode.metadata : {};
   const plan = meta.commission && typeof meta.commission === "object" ? meta.commission : null;
@@ -844,17 +928,41 @@ export function commissionPlanForReferralCode(referralCode) {
 }
 
 export function effectiveProgramForReferrer(program, referralCode) {
-  const plan = commissionPlanForReferralCode(referralCode);
-  if (!plan || !program) return program;
+  if (!program) return program;
+  const cents = perSaleCentsForCode(referralCode, program.product_slug);
+  if (cents === null) return program;
   return {
     ...program,
     metadata: {
       ...(program.metadata && typeof program.metadata === "object" ? program.metadata : {}),
       plan: "per_sale",
-      tiers: [{ requiredPurchases: 1, rewardAmountCents: plan.rewardAmountCents }],
-      recurringTier: { startAfterPurchases: 1, everyPurchases: 1, rewardAmountCents: plan.rewardAmountCents },
+      perSaleRewardCents: cents,
+      tiers: [{ requiredPurchases: 1, rewardAmountCents: cents }],
+      recurringTier: cents > 0
+        ? { startAfterPurchases: 1, everyPurchases: 1, rewardAmountCents: cents }
+        : { enabled: false },
     },
   };
+}
+
+function dollars(cents) {
+  const value = Number(cents || 0) / 100;
+  return Number.isInteger(value) ? `$${value}` : `$${value.toFixed(2)}`;
+}
+
+export function programDescription(productSlug) {
+  const slug = normalizeProductSlug(productSlug);
+  const program = PRODUCT_REFERRAL_PROGRAMS[slug];
+  if (!program) return "Default manual Cash App purchase referral tiers.";
+  const steps = program.tiers.map((tier) => `${dollars(tier.rewardAmountCents)} at ${tier.requiredPurchases}`).join(", ");
+  const every = `then ${dollars(program.recurringTier.rewardAmountCents)} for each additional ${program.recurringTier.everyPurchases}`;
+  if (slug === "tabforge") {
+    return `The referrer must own TabForge Pro. Only completed TabForge Pro purchases made through the referral link count: ${steps}, ${every} qualified purchases.`;
+  }
+  const lead = program.perReferralCents
+    ? `${dollars(program.perReferralCents)} per referred customer, paid at the milestones: `
+    : "";
+  return `${program.label}: ${lead}${steps}, ${every} referred customers who bought it.`;
 }
 
 export async function getReferralProgram(productSlug, trx = db) {
@@ -865,28 +973,26 @@ export async function getReferralProgram(productSlug, trx = db) {
 
   if (!program) {
     const isTabForge = slug === "tabforge";
-    const tiers = isTabForge ? TABFORGE_PURCHASE_TIERS : DEFAULT_PURCHASE_TIERS;
+    const tiers = defaultProgramTiers(slug);
     const [created] = await trx("referral_programs")
       .insert({
         id: crypto.randomUUID(),
         product_slug: slug,
-        required_purchases: 5,
-        reward_amount_cents: 1700,
+        required_purchases: tiers[0].requiredPurchases,
+        reward_amount_cents: tiers[0].rewardAmountCents,
         reward_type: "cashapp_manual",
         refund_hold_days: 0,
         status: "active",
         metadata: {
           qualification: "verified_purchase",
           tiers,
-          recurringTier: isTabForge ? TABFORGE_RECURRING_PURCHASE_TIER : null,
+          recurringTier: defaultProgramRecurringTier(slug),
           referrer_purchase_required: isTabForge,
           required_referrer_product_slug: isTabForge
             ? REFERRAL_REQUIRED_PRODUCT_SLUG
             : null,
           referred_purchase_required: true,
-          description: isTabForge
-            ? "The referrer must own TabForge Pro. Only completed TabForge Pro purchases made through the referral link count: $17 at 5, $35 at 15, $40 at 25, $150 at 50, then $150 for each additional 25 qualified purchases."
-            : "Default manual Cash App purchase referral tiers.",
+          description: programDescription(slug),
         },
         updated_at: trx.fn.now(),
       })
@@ -910,8 +1016,13 @@ async function queueRewardsForVerifiedCount({
   qualificationRef,
 }) {
   const rewards = [];
-  // The referrer's own plan, when they have one, decides the tiers.
-  const tiers = tiersForVerifiedCount(effectiveProgramForReferrer(program, referralCode), verifiedCount);
+  // The referrer's own plan, when they have one, decides the tiers. A per-sale
+  // rate of zero is the owner saying this person earns nothing here.
+  const effective = effectiveProgramForReferrer(program, referralCode);
+  if (effective?.metadata?.plan === "per_sale" && !(Number(effective.metadata.perSaleRewardCents) > 0)) {
+    return rewards;
+  }
+  const tiers = tiersForVerifiedCount(effective, verifiedCount);
 
   for (const tier of tiers) {
     if (verifiedCount < tier.requiredPurchases) continue;
@@ -962,29 +1073,35 @@ async function queueRewardsForVerifiedCount({
   return rewards;
 }
 
+/**
+ * How many customers this referrer brought to a product: distinct accounts
+ * with a verified, paid purchase through their link. Rose Colored Glasses
+ * customers already paid a flat dollar each before it moved onto milestones
+ * are left out, so nobody is paid twice for the same customer.
+ */
+export async function countQualifiedReferrals(referrerUserId, productSlug, trx = db) {
+  if (!referrerUserId) return 0;
+  const row = await trx("referral_events")
+    .where({
+      referrer_user_id: referrerUserId,
+      product_slug: normalizeProductSlug(productSlug),
+      event_type: "purchase",
+      status: "verified",
+    })
+    .whereRaw("metadata->>'initial_net_paid_cents' ~ '^[1-9][0-9]*$'")
+    .whereRaw("coalesce(metadata->>'qualification', '') <> 'flat_referral'")
+    .countDistinct({ count: "referred_user_id" })
+    .first();
+  return Number(row?.count || 0);
+}
+
 async function queuePurchaseRewardsForReferrer({ trx, referrer, referralCode, productSlug, qualificationRef }) {
-  const eligible = await hasReferralProgramEligibility(
-    referrer?.id,
-    productSlug,
-    trx
-  );
+  const eligible = await productReferralEligibility(referrer?.id, productSlug, trx);
   if (!eligible) {
     return { verifiedCount: 0, rewards: [], eligible: false };
   }
 
-  const verifiedCountResult = await trx("referral_events")
-    .where({
-      referrer_user_id: referrer.id,
-      product_slug: productSlug,
-      event_type: "purchase",
-      status: "verified",
-    })
-    .whereRaw(
-      "metadata->>'initial_net_paid_cents' ~ '^[1-9][0-9]*$'"
-    )
-    .countDistinct({ count: "referred_user_id" })
-    .first();
-  const verifiedCount = Number(verifiedCountResult?.count || 0);
+  const verifiedCount = await countQualifiedReferrals(referrer.id, productSlug, trx);
 
   const program = await getReferralProgram(productSlug, trx);
   const qualification = referralProgramQualification(program);
@@ -1103,13 +1220,58 @@ export async function recordVerifiedReferralSignup({ referredUserId, productSlug
   });
 }
 
+/**
+ * Verifying an email promotes that customer's already-completed purchases of
+ * every product other than TabForge (recordVerifiedReferralSignup handles
+ * TabForge, and its signup record) and queues whatever their referrer earned.
+ */
+export async function recordVerifiedReferralPurchases({ referredUserId }) {
+  if (!referredUserId) return { promoted: 0, rewards: [] };
+  return db.transaction(async (trx) => {
+    const referredUser = await trx("users").where({ id: referredUserId }).first();
+    if (!referredUser?.email_verified || !referredUser.referred_by_user_id) return { promoted: 0, rewards: [] };
+    if (referredUser.referred_by_user_id === referredUser.id) return { promoted: 0, rewards: [] };
+    const referrer = await trx("users").where({ id: referredUser.referred_by_user_id }).first();
+    if (!referrer) return { promoted: 0, rewards: [] };
+    const referralCode = referredUser.referral_code_id
+      ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
+      : await ensureReferralCodeForUser(referrer, trx);
+
+    let promoted = 0;
+    const rewards = [];
+    for (const slug of MILESTONE_REFERRAL_PRODUCTS.filter((item) => item !== "tabforge")) {
+      const pending = await trx("referral_events").where({
+        referred_user_id: referredUser.id,
+        product_slug: slug,
+        event_type: "purchase",
+        status: "pending",
+      });
+      if (!pending.length) continue;
+      await trx("referral_events")
+        .whereIn("id", pending.map((row) => row.id))
+        .update({ status: "verified", updated_at: trx.fn.now() });
+      promoted += pending.length;
+      const queued = await queuePurchaseRewardsForReferrer({
+        trx,
+        referrer,
+        referralCode,
+        productSlug: slug,
+        qualificationRef: pending[pending.length - 1].purchase_ref,
+      });
+      rewards.push(...queued.rewards);
+    }
+    return { promoted, rewards };
+  });
+}
+
 export async function recordReferralPurchase({ referredUserId, productSlug, purchaseRef, metadata = {} }) {
   const slug = normalizeProductSlug(productSlug);
   const ref = normalizeReferralValue(purchaseRef);
   if (!referredUserId || !slug || !ref) return { recorded: false, reason: "missing_input" };
-  // Only a qualifying TabForge Pro purchase earns referral credit. Add-ons, pages,
-  // collections, and skin bundles remain normal purchases but never advance payout tiers.
-  if (slug !== "tabforge") return { recorded: false, reason: "not_qualifying_product" };
+  // Only a product with a referral programme earns referral credit: TabForge
+  // Pro, Rose Colored Glasses and ForgeDrop. Add-ons, pages, collections and
+  // skin bundles remain normal purchases but never advance payout tiers.
+  if (!isMilestoneReferralProduct(slug)) return { recorded: false, reason: "not_qualifying_product" };
   const initialNetPaidCents = Number(metadata?.initial_net_paid_cents || 0);
   if (!Number.isFinite(initialNetPaidCents) || initialNetPaidCents <= 0) {
     return { recorded: false, reason: "no_positive_initial_payment" };
@@ -1124,29 +1286,29 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
 
     const referrer = await trx("users").where({ id: referredUser.referred_by_user_id }).first();
     if (!referrer) return { recorded: false, reason: "referrer_missing" };
-    if (!(await hasReferralProgramEligibility(referrer.id, slug, trx))) {
-      return { recorded: false, reason: "referrer_tabforge_pro_required" };
+    if (!(await productReferralEligibility(referrer.id, slug, trx))) {
+      return {
+        recorded: false,
+        reason: slug === "tabforge" ? "referrer_tabforge_pro_required" : "referrer_not_a_customer",
+      };
     }
 
     const referralCode = referredUser.referral_code_id
       ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
       : await ensureReferralCodeForUser(referrer, trx);
 
-    const existingQuery = trx("referral_events")
+    // One referral per customer per product. A second Rose Colored Glasses
+    // device, or anything else the same customer buys later, adds nothing.
+    const existing = await trx("referral_events")
       .where({
         referred_user_id: referredUser.id,
         product_slug: slug,
         event_type: "purchase",
-      });
-    if (slug !== "tabforge") existingQuery.andWhere({ purchase_ref: ref });
-    const existing = await existingQuery.first();
+      })
+      .first();
 
     if (existing) {
-      return {
-        recorded: false,
-        reason: slug === "tabforge" ? "duplicate_referred_customer" : "duplicate_purchase",
-        event: existing,
-      };
+      return { recorded: false, reason: "duplicate_referred_customer", event: existing };
     }
 
     const purchaseStatus = referredUser.email_verified ? "verified" : "pending";
@@ -1269,112 +1431,12 @@ export async function recordSyncSubscriptionShare({
 }
 
 /**
- * A flat-reward product pays the referrer once per customer they brought in,
- * on that customer's first paid purchase. Extra devices the same customer
- * buys later pay nothing more: their $1 discount already is the referral.
- *
- * Keyed on the referred customer, so neither a replayed webhook nor a second
- * purchase can queue a second reward.
+ * Each product's referral standing for the account page: how many customers
+ * the account brought in, whether it is paid per sale or on milestones, the
+ * next milestones, and what it has earned and been paid.
  */
-export async function recordFlatProductReferral({
-  referredUserId,
-  productSlug,
-  purchaseRef,
-  netPaidCents,
-  metadata = {},
-}) {
-  const slug = normalizeProductSlug(productSlug);
-  const ref = normalizeReferralValue(purchaseRef);
-  if (!flatReferralRewardCents(slug)) return { recorded: false, reason: "not_flat_referral_product" };
-  if (!referredUserId || !ref) return { recorded: false, reason: "missing_input" };
-  if (!(Number(netPaidCents) > 0)) return { recorded: false, reason: "no_positive_payment" };
-
-  return db.transaction(async (trx) => {
-    const referredUser = await trx("users").where({ id: referredUserId }).first();
-    if (!referredUser) return { recorded: false, reason: "customer_missing" };
-
-    const referrerId = referredUser.referred_by_user_id;
-    if (!referrerId) return { recorded: false, reason: "no_referrer" };
-    if (referrerId === referredUser.id) return { recorded: false, reason: "self_referral" };
-
-    const referrer = await trx("users").where({ id: referrerId }).first();
-    if (!referrer) return { recorded: false, reason: "referrer_missing" };
-    if (!(await canHoldReferralCode(referrer.id, trx))) {
-      return { recorded: false, reason: "referrer_not_a_customer" };
-    }
-
-    const referralCode = referredUser.referral_code_id
-      ? await trx("referral_codes").where({ id: referredUser.referral_code_id }).first()
-      : await ensureReferralCodeForUser(referrer, trx);
-
-    // The referrer's own rate, when the owner set one, decides the amount.
-    const amountCents = flatRewardCentsForCode(referralCode, slug);
-    if (amountCents <= 0) return { recorded: false, reason: "referrer_rate_zero" };
-
-    const [reward] = await trx("reward_queue")
-      .insert({
-        id: crypto.randomUUID(),
-        referral_code_id: referralCode?.id || null,
-        user_id: referrer.id,
-        email: normalizeEmail(referrer.email),
-        product_slug: slug,
-        reward_key: `first_purchase:${referredUser.id}`,
-        reward_amount_cents: amountCents,
-        reward_type: "cashapp_manual",
-        cashapp_handle: normalizeCashAppTag(referrer.cash_app_tag || referralCode?.cashapp_handle),
-        status: "pending",
-        metadata: {
-          ...metadata,
-          kind: "flat_referral",
-          purchase_ref: ref,
-          net_paid_cents: Number(netPaidCents) || 0,
-          referred_user_id: referredUser.id,
-          referred_email: normalizeEmail(referredUser.email),
-        },
-        updated_at: trx.fn.now(),
-      })
-      .onConflict(["user_id", "product_slug", "reward_key"])
-      .ignore()
-      .returning("*");
-
-    if (!reward) return { recorded: false, reason: "duplicate_referred_customer" };
-
-    await trx("referral_events")
-      .insert({
-        id: crypto.randomUUID(),
-        referral_code_id: referralCode?.id || null,
-        referrer_user_id: referrer.id,
-        referred_user_id: referredUser.id,
-        product_slug: slug,
-        purchase_ref: ref,
-        event_type: "purchase",
-        status: "verified",
-        metadata: {
-          ...metadata,
-          qualification: "flat_referral",
-          initial_net_paid_cents: Number(netPaidCents) || 0,
-        },
-        updated_at: trx.fn.now(),
-      })
-      .onConflict(["referral_code_id", "purchase_ref"])
-      .ignore();
-
-    log("info", "flat_referral_queued", {
-      referrerUserId: referrer.id,
-      referredUserId: referredUser.id,
-      productSlug: slug,
-      amountCents,
-    });
-    return { recorded: true, reward, amountCents };
-  });
-}
-
-/**
- * What an account has earned from flat-reward products, one entry per
- * product, for the account page.
- */
-export async function flatReferralSummary(userId, trx = db) {
-  const slugs = Object.keys(FLAT_REFERRAL_REWARDS);
+export async function productReferralSummary(userId, referralCode = null, trx = db) {
+  const slugs = MILESTONE_REFERRAL_PRODUCTS.filter((slug) => slug !== "tabforge");
   if (!userId) return [];
   const rows = await trx("reward_queue")
     .select("product_slug", "status")
@@ -1384,24 +1446,43 @@ export async function flatReferralSummary(userId, trx = db) {
     .whereIn("product_slug", slugs)
     .groupBy("product_slug", "status");
 
-  return slugs.map((slug) => {
+  const summaries = [];
+  for (const slug of slugs) {
+    const program = await getReferralProgram(slug, trx);
+    const referredCustomers = await countQualifiedReferrals(userId, slug, trx);
+    const perSaleCents = perSaleCentsForCode(referralCode, slug);
+    const tiers = perSaleCents === null
+      ? tiersForVerifiedCount(program, referredCustomers).map((tier) => ({
+          requiredPurchases: tier.requiredPurchases,
+          rewardAmountCents: tier.rewardAmountCents,
+          recurring: Boolean(tier.recurring),
+          reached: referredCustomers >= tier.requiredPurchases,
+          remaining: Math.max(0, tier.requiredPurchases - referredCustomers),
+        }))
+      : [];
     const mine = rows.filter((row) => row.product_slug === slug);
     const counted = mine.filter((row) => !["canceled", "rejected"].includes(row.status));
-    return {
+    summaries.push({
       productSlug: slug,
-      rewardAmountCents: FLAT_REFERRAL_REWARDS[slug],
-      referredCustomers: counted.reduce((sum, row) => sum + Number(row.count || 0), 0),
+      label: PRODUCT_REFERRAL_PROGRAMS[slug].label,
+      mode: perSaleCents === null ? "milestones" : "per_sale",
+      perSaleCents,
+      perReferralCents: PRODUCT_REFERRAL_PROGRAMS[slug].perReferralCents || null,
+      referredCustomers,
+      tiers,
       earnedCents: counted.reduce((sum, row) => sum + Number(row.cents || 0), 0),
       paidCents: mine
         .filter((row) => row.status === "paid")
         .reduce((sum, row) => sum + Number(row.cents || 0), 0),
-    };
-  });
+    });
+  }
+  return summaries;
 }
 
 /**
- * A refunded, disputed or failed payment cancels the flat reward it queued,
- * as long as that reward has not been paid out yet.
+ * A refunded, disputed or failed payment cancels a flat dollar queued for a
+ * Rose Colored Glasses customer before it moved onto milestones, as long as
+ * that reward has not been paid out yet.
  */
 export async function cancelFlatProductReferral({
   paymentIntentId = "",
@@ -1410,7 +1491,7 @@ export async function cancelFlatProductReferral({
 } = {}) {
   const pi = normalizeReferralValue(paymentIntentId);
   if (!pi) return { canceled: 0, reason: "missing_payment_intent" };
-  const slugs = Object.keys(FLAT_REFERRAL_REWARDS);
+  const slugs = [...LEGACY_FLAT_REFERRAL_PRODUCTS];
 
   return db.transaction(async (trx) => {
     const rewards = await trx("reward_queue")
@@ -1439,6 +1520,7 @@ export async function cancelFlatProductReferral({
       .whereIn("product_slug", slugs)
       .where({ event_type: "purchase" })
       .whereIn("status", ["pending", "verified"])
+      .whereRaw("metadata->>'qualification' = 'flat_referral'")
       .whereRaw("metadata->>'payment_intent' = ?", [pi])
       .update({ status: reason, updated_at: trx.fn.now() });
 
@@ -1464,10 +1546,9 @@ export async function disqualifyReferralPurchaseForStripe({
 
   return db.transaction(async (trx) => {
     const query = trx("referral_events")
-      .where({
-        product_slug: "tabforge",
-        event_type: "purchase",
-      })
+      .whereIn("product_slug", MILESTONE_REFERRAL_PRODUCTS)
+      .where({ event_type: "purchase" })
+      .whereRaw("coalesce(metadata->>'qualification', '') <> 'flat_referral'")
       .whereIn("status", ["pending", "verified"])
       .andWhere((builder) => {
         let hasCondition = false;
@@ -1521,28 +1602,24 @@ export async function disqualifyReferralPurchaseForStripe({
         });
     }
 
-    const referrerIds = [
-      ...new Set(events.map((event) => event.referrer_user_id).filter(Boolean)),
-    ];
-    for (const referrerId of referrerIds) {
-      const countRow = await trx("referral_events")
-        .where({
-          referrer_user_id: referrerId,
-          product_slug: "tabforge",
-          event_type: "purchase",
-          status: "verified",
-        })
-        .whereRaw(
-          "metadata->>'initial_net_paid_cents' ~ '^[1-9][0-9]*$'"
-        )
-        .countDistinct({ count: "referred_user_id" })
-        .first();
-      const verifiedCount = Number(countRow?.count || 0);
+    // Recount each referrer on each product the refunded purchases were for,
+    // and cancel any unpaid milestone the new count no longer reaches.
+    const affected = new Map();
+    for (const event of events) {
+      if (!event.referrer_user_id) continue;
+      affected.set(`${event.referrer_user_id}:${event.product_slug}`, {
+        referrerId: event.referrer_user_id,
+        productSlug: event.product_slug,
+      });
+    }
+    for (const { referrerId, productSlug } of affected.values()) {
+      const verifiedCount = await countQualifiedReferrals(referrerId, productSlug, trx);
       const unpaidRewards = await trx("reward_queue")
         .where({
           user_id: referrerId,
-          product_slug: "tabforge",
+          product_slug: productSlug,
         })
+        .whereRaw("coalesce(metadata->>'kind', '') <> 'flat_referral'")
         .whereIn("status", ["pending", "approved"])
         .forUpdate();
       for (const reward of unpaidRewards) {

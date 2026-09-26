@@ -10,6 +10,7 @@ import { db } from "../config/db.js";
 import { log } from "../utils/logger.js";
 import { grantProductEntitlement } from "./entitlement.service.js";
 import {
+  PER_SALE_RATE_PRODUCTS,
   ensureAffiliateReferralCode,
   ensureReferralCodeForUser,
   setReferralTerms,
@@ -95,6 +96,19 @@ export function compCodeCommission(row) {
   return Number.isInteger(cents) && cents > 0 ? { mode: "per_sale", rewardAmountCents: cents } : null;
 }
 
+// The per-sale rates a comp code hands out on products other than TabForge,
+// such as ForgeDrop's affiliate level, keyed by product.
+export function compCodePerSaleRates(row) {
+  const rates = row?.metadata?.flat_rates;
+  if (!rates || typeof rates !== "object") return {};
+  const out = {};
+  for (const slug of PER_SALE_RATE_PRODUCTS) {
+    const cents = Number(rates[slug]);
+    if (rates[slug] !== null && rates[slug] !== undefined && Number.isInteger(cents) && cents >= 0) out[slug] = cents;
+  }
+  return out;
+}
+
 export function compCodePublicView(row, availability) {
   return {
     code: row.code,
@@ -105,19 +119,26 @@ export function compCodePublicView(row, availability) {
       : [...COMP_GRANT_LABELS],
     note: row.metadata?.note || null,
     commission: compCodeCommission(row),
+    perSaleRates: compCodePerSaleRates(row),
   };
 }
 
 // Copy the code's terms onto the account's own referral code, which is
-// where the reward engine reads a per-referrer plan from.
+// where the reward engine reads a per-referrer plan from: the per-sale
+// TabForge rate, and the per-sale rate on each other product it names.
 export async function applyCompCodeCommission({ trx = db, userId, compRow }) {
   const plan = compCodeCommission(compRow);
-  if (!plan || !userId) return null;
+  const rates = compCodePerSaleRates(compRow);
+  if ((!plan && !Object.keys(rates).length) || !userId) return null;
   const code = await trx("referral_codes").where({ user_id: userId, status: "active" }).orderBy("created_at", "asc").first();
   if (!code) return null;
-  const metadata = { ...(code.metadata || {}), commission: { ...plan, source: "comp_code", code: compRow.code, applied_at: new Date().toISOString() } };
+  const metadata = { ...(code.metadata || {}) };
+  if (plan) metadata.commission = { ...plan, source: "comp_code", code: compRow.code, applied_at: new Date().toISOString() };
+  if (Object.keys(rates).length) metadata.flat_rates = { ...(metadata.flat_rates || {}), ...rates };
   await trx("referral_codes").where({ id: code.id }).update({ metadata, updated_at: trx.fn.now() });
-  return { ...plan, referralCode: code.code };
+  return plan
+    ? { ...plan, perSaleRates: rates, referralCode: code.code }
+    : { mode: "per_sale_products", perSaleRates: rates, referralCode: code.code };
 }
 
 export function compCodeSignupLink(code, email = null) {
@@ -324,6 +345,7 @@ export async function listCompCodes(trx = db) {
       createdAt: row.created_at,
       link: compCodeSignupLink(row.code, row.metadata?.email || null),
       perSaleRewardCents: compCodeCommission(row)?.rewardAmountCents ?? null,
+      forgedropPerSaleRewardCents: compCodePerSaleRates(row).forgedrop ?? null,
       email: row.metadata?.email || null,
       grants: isPersonalInvite(row) ? compCodeGrants(row) : [...COMP_GRANT_SLUGS],
       invite: isPersonalInvite(row),
@@ -410,7 +432,7 @@ export async function listInvitesForEmail(email, trx = db) {
   }));
 }
 
-export async function upsertCompCode({ code, note, maxRedemptions, status, createdBy, perSaleRewardCents } = {}, trx = db) {
+export async function upsertCompCode({ code, note, maxRedemptions, status, createdBy, perSaleRewardCents, forgedropPerSaleRewardCents } = {}, trx = db) {
   const normalized = normalizeCompCode(code);
   if (!normalized || normalized.length < 3) throw Object.assign(new Error("invalid_comp_code"), { statusCode: 400 });
   const existing = await trx("referral_codes").where({ code: normalized }).first();
@@ -431,6 +453,16 @@ export async function upsertCompCode({ code, note, maxRedemptions, status, creat
   if (perSaleRewardCents !== undefined) {
     const cents = Number(perSaleRewardCents);
     metadata.commission = Number.isInteger(cents) && cents > 0 ? { mode: "per_sale", rewardAmountCents: cents } : null;
+  }
+  // ForgeDrop's affiliate level on this code: a flat amount per ForgeDrop
+  // sale, applied to the account that redeems it. Null takes it off.
+  if (forgedropPerSaleRewardCents !== undefined) {
+    const cents = Number(forgedropPerSaleRewardCents);
+    const rates = { ...(metadata.flat_rates || {}) };
+    if (forgedropPerSaleRewardCents !== null && Number.isInteger(cents) && cents > 0) rates.forgedrop = cents;
+    else delete rates.forgedrop;
+    if (Object.keys(rates).length) metadata.flat_rates = rates;
+    else delete metadata.flat_rates;
   }
   const payload = { status: status || existing?.status || "active", metadata, updated_at: trx.fn.now() };
   if (existing) {
