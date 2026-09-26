@@ -8,9 +8,15 @@
  *
  *   POST /desktop/poll     desktop  long-poll for messages, and be online
  *   POST /desktop/offline  desktop  stop being online, now
+ *   GET  /desktop/peers    desktop  the account's other ForgeDrop machines
  *   GET  /desktops         phone    the account's ForgeDrop machines
  *   POST /phone/poll       phone    long-poll for messages, and be present
- *   POST /signal           either   send an offer, answer or bye
+ *   POST /signal           either   send an offer, answer or bye; between
+ *                                   two desktops, a dial, its answer or bye
+ *
+ * Desktops of one account also swap connection candidates here to reach each
+ * other across the internet (ForgeDrop 1.4); the files then go directly
+ * between them, never through this server.
  *
  * A desktop signs in with its offline licence (auth.js), a phone with the
  * customer's Bearer token. Either way the account must own ForgeDrop.
@@ -22,15 +28,19 @@ import { licensedProduct } from "../../services/licensedProducts.js";
 import { createDesktopAuth, hasLicenceHeader } from "./auth.js";
 import { createDeviceDirectory } from "./devices.js";
 import {
+  answersPhones,
   canonicalUuid,
   cleanText,
+  DESKTOP_TO_DESKTOP_TYPES,
   isClientId,
   isPlainObject,
   isSession,
   LINK_LIMITS,
   parseAddress,
+  parseCaps,
   parseWait,
   SENDABLE_TYPES,
+  takesDials,
 } from "./shapes.js";
 import { createLinkStore } from "./store.js";
 
@@ -185,6 +195,7 @@ export function createForgeDropLinkRouter({
       name: cleanText(body.name, 64),
       fingerprint: cleanText(body.fingerprint, 32),
       appVersion: cleanText(body.appVersion, 32),
+      caps: parseCaps(body.caps),
     });
   });
 
@@ -192,6 +203,42 @@ export function createForgeDropLinkRouter({
     store.drop(req.link.userId, req.link.address);
     res.status(204).end();
   });
+
+  // The account's other desktops, for one to dial another across the
+  // internet. Online only while it polls saying it takes dials. The
+  // fingerprint is the proven one where there is one: that is what the app
+  // matches against the computers it paired with.
+  router.get(
+    "/desktop/peers",
+    desktopAuth,
+    desktopsLimiter,
+    wrap(async (req, res) => {
+      const { userId, address } = req.link;
+      let rows;
+      try {
+        rows = await devices.listActive(userId);
+      } catch (error) {
+        return unavailable(res, "forgedrop_link_device_list_failed", error);
+      }
+      const desktops = rows
+        .map((row) => {
+          const deviceId = canonicalUuid(String(row.device_id)) || String(row.device_id);
+          const live = store.presence(userId, `desktop:${deviceId}`);
+          const proven = Boolean(row.identity_verified_at && row.identity_fingerprint);
+          return {
+            deviceId,
+            address: `desktop:${deviceId}`,
+            name: live?.name ?? row.device_name ?? null,
+            fingerprint: proven ? row.identity_fingerprint : live?.fingerprint ?? row.identity_fingerprint ?? null,
+            fingerprintVerified: proven,
+            appVersion: live?.appVersion ?? row.app_version ?? null,
+            online: takesDials(live),
+          };
+        })
+        .filter((desktop) => desktop.address !== address);
+      return res.json({ desktops });
+    })
+  );
 
   // --------------------------------------------------------------- phone
 
@@ -211,7 +258,10 @@ export function createForgeDropLinkRouter({
 
       const desktops = rows.map((row) => {
         const deviceId = canonicalUuid(String(row.device_id)) || String(row.device_id);
-        const live = store.presence(userId, `desktop:${deviceId}`);
+        // A desktop polling only to take dials from its other desktops does
+        // not answer phones: to a phone it is offline.
+        const polled = store.presence(userId, `desktop:${deviceId}`);
+        const live = answersPhones(polled) ? polled : null;
         const fingerprint = live?.fingerprint ?? row.identity_fingerprint ?? null;
         return {
           deviceId,
@@ -259,7 +309,13 @@ export function createForgeDropLinkRouter({
       const userId = sender.userId;
 
       const to = parseAddress(body.to);
-      if (!to || to.kind === sender.kind) return res.status(400).json({ error: "bad_recipient" });
+      if (!to) return res.status(400).json({ error: "bad_recipient" });
+      // Phone to phone never; desktop to desktop only to dial (below), and
+      // never to itself.
+      const betweenDesktops = sender.kind === "desktop" && to.kind === "desktop";
+      if ((to.kind === sender.kind && !betweenDesktops) || to.address === sender.address) {
+        return res.status(400).json({ error: "bad_recipient" });
+      }
 
       let from = sender.address;
       if (sender.kind === "phone") {
@@ -269,7 +325,8 @@ export function createForgeDropLinkRouter({
       }
 
       if (!isSession(body.session)) return res.status(400).json({ error: "bad_session" });
-      if (!SENDABLE_TYPES[sender.kind].has(body.type)) return res.status(400).json({ error: "bad_type" });
+      const allowed = betweenDesktops ? DESKTOP_TO_DESKTOP_TYPES : SENDABLE_TYPES[sender.kind];
+      if (!allowed.has(body.type)) return res.status(400).json({ error: "bad_type" });
 
       const data = body.data === undefined ? {} : body.data;
       if (!isPlainObject(data)) return res.status(400).json({ error: "bad_data" });
@@ -281,6 +338,12 @@ export function createForgeDropLinkRouter({
       // desktop or phone is simply not there to find.
       if (to.kind === "desktop") {
         if (!store.isPresent(userId, to.address)) return res.status(404).json({ error: "desktop_offline" });
+        // Dialled only while it says it takes dials; answered phones only
+        // while it says it answers phones.
+        const live = store.presence(userId, to.address);
+        if (betweenDesktops ? !takesDials(live) : !answersPhones(live)) {
+          return res.status(404).json({ error: "desktop_offline" });
+        }
         let active;
         try {
           active = await devices.findActive(userId, to.id);

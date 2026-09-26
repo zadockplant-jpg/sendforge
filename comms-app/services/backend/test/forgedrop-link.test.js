@@ -33,7 +33,7 @@ const { activateDevice, deactivateDevice } = await import("../src/services/devic
 const { signLicenseToken } = await import("../src/services/licenseToken.service.js");
 const { createForgeDropLinkRouter, LINK_LIMITS } = await import("../src/modules/forgedrop-link/router.js");
 const { createLinkStore } = await import("../src/modules/forgedrop-link/store.js");
-const { canonicalUuid, parseWait, cleanText } = await import("../src/modules/forgedrop-link/shapes.js");
+const { canonicalUuid, parseCaps, parseWait, cleanText } = await import("../src/modules/forgedrop-link/shapes.js");
 const { forgedropLinkRouter, loadForgeDropLink } = await import("../src/modules/forgedrop-link/index.js");
 
 const src = (rel) => readFile(new URL(rel, import.meta.url), "utf8");
@@ -700,7 +700,8 @@ test("bad to, from, session, type and data are refused", async () => {
 
   const fromDesktop = (patch) =>
     desktopSignal(studio, { to: `phone:${phone}`, session: newSession(), type: "answer", data: {}, ...patch });
-  await expect(fromDesktop({ to: laptop.address }), 400, "bad_recipient", "desktop to desktop");
+  await expect(fromDesktop({ to: laptop.address }), 400, "bad_type", "desktops only dial each other");
+  await expect(fromDesktop({ to: studio.address, type: "dial" }), 400, "bad_recipient", "not to itself");
   await expect(fromDesktop({ to: undefined }), 400, "bad_recipient");
   await expect(fromDesktop({ type: "offer" }), 400, "bad_type");
 
@@ -943,4 +944,136 @@ test("app.js mounts the link before the shared 25 MB parser, and a broken module
 
 test("no poll is left waiting once its answer has gone out", () => {
   assert.equal(store.stats().waiters, 0);
+});
+
+// ------------------------------------------------ desktop to desktop (1.4)
+
+// Their own machines: earlier tests free and rename the shared ones.
+let dialers;
+async function dialDesktops() {
+  if (!dialers) {
+    dialers = {
+      spare: await activate("dial-home", people.alice, { name: "Home PC" }),
+      fresh: await activate("dial-away", people.alice, { name: "Away laptop" }),
+      basement: await activate("dial-phones-only", people.alice, { name: "Den PC" }),
+      bobs: await activate("dial-bob", people.bob, { name: "Bob's other PC" }),
+    };
+  }
+  return dialers;
+}
+
+const dial = (to, session, extra = {}) => ({
+  to: to.address,
+  session,
+  type: "dial",
+  data: { candidates: { tcp: ["[2001:db8::7]:47021"], udp: ["203.0.113.7:61000"] }, token: "AAAA" },
+  ...extra,
+});
+
+test("one desktop dials another of the same account, and hears its answer", async () => {
+  const { spare, fresh } = await dialDesktops();
+  await desktopPoll(spare, { caps: ["internet"] });
+  await desktopPoll(fresh, { caps: ["phone-link", "internet"] });
+  const session = newSession();
+
+  const sent = await desktopSignal(spare, dial(fresh, session));
+  assert.equal(sent.status, 202, JSON.stringify(sent.body));
+  const heard = await desktopPoll(fresh, { caps: ["phone-link", "internet"] });
+  assert.equal(heard.body.messages.length, 1);
+  assert.equal(heard.body.messages[0].from, spare.address);
+  assert.equal(heard.body.messages[0].type, "dial");
+  assert.deepEqual(heard.body.messages[0].data.candidates.udp, ["203.0.113.7:61000"]);
+
+  const answered = await desktopSignal(fresh, {
+    to: spare.address,
+    session,
+    type: "dial-answer",
+    data: { candidates: { udp: ["198.51.100.4:62000"] } },
+  });
+  assert.equal(answered.status, 202);
+  const back = await desktopPoll(spare, { caps: ["internet"] });
+  assert.equal(back.body.messages[0].type, "dial-answer");
+  assert.equal(back.body.messages[0].from, fresh.address);
+});
+
+test("a desktop that is not taking dials is offline to its other desktops", async () => {
+  const { spare, basement } = await dialDesktops();
+  await desktopPoll(spare, { caps: ["internet"] });
+  await desktopPoll(basement, { caps: ["phone-link"] });            // phones only
+  const res = await desktopSignal(spare, dial(basement, newSession()));
+  assert.deepEqual([res.status, res.body], [404, { error: "desktop_offline" }]);
+  // An app from before 1.4 says nothing about capabilities: phones only.
+  await desktopPoll(basement);
+  const again = await desktopSignal(spare, dial(basement, newSession()));
+  assert.equal(again.status, 404);
+});
+
+test("a desktop polling only for dials is offline to phones", async () => {
+  const alice = people.alice;
+  const { spare } = await dialDesktops();
+  await desktopPoll(spare, { caps: ["internet"] });
+  const listed = await call("/desktops", { method: "GET", bearer: alice.bearer });
+  assert.equal(listed.body.desktops.find((d) => d.deviceId === spare.deviceId).online, false);
+  const phone = newClientId();
+  const res = await phoneSignal(alice, offer(phone, newSession(), spare.address));
+  assert.deepEqual([res.status, res.body], [404, { error: "desktop_offline" }]);
+});
+
+test("a desktop lists its account's other desktops, online ones taking dials", async () => {
+  const { spare, fresh, basement, bobs } = await dialDesktops();
+  await desktopPoll(spare, { caps: ["internet"] });
+  await desktopPoll(fresh, { caps: ["internet"], name: "Fresh (live)" });
+  await desktopPoll(basement, { caps: ["phone-link"] });
+  const res = await call("/desktop/peers", { method: "GET", licence: spare.token });
+  assert.equal(res.status, 200);
+  const ids = res.body.desktops.map((d) => d.deviceId);
+  assert.equal(ids.includes(spare.deviceId), false, "not itself");
+  assert.equal(ids.includes(bobs.deviceId), false, "not another account's");
+  const byId = Object.fromEntries(res.body.desktops.map((d) => [d.deviceId, d]));
+  assert.equal(byId[fresh.deviceId].online, true);
+  assert.equal(byId[fresh.deviceId].name, "Fresh (live)");
+  assert.equal(byId[fresh.deviceId].address, fresh.address);
+  assert.equal(byId[basement.deviceId].online, false, "phones only is not taking dials");
+  assert.equal(typeof byId[fresh.deviceId].fingerprintVerified, "boolean");
+  // Phones have no business here.
+  assert.equal((await call("/desktop/peers", { method: "GET", bearer: people.alice.bearer })).status, 401);
+});
+
+test("the peer list prefers a proven fingerprint over what the desktop says", async () => {
+  const { fresh, spare } = await dialDesktops();
+  await db("device_activations")
+    .where({ device_id: fresh.deviceId })
+    .update({ identity_fingerprint: "1234-abcd-1234-abcd", identity_verified_at: db.fn.now() });
+  await desktopPoll(fresh, { caps: ["internet"], fingerprint: "ffff-ffff-ffff-ffff" });
+  const res = await call("/desktop/peers", { method: "GET", licence: spare.token });
+  const listed = res.body.desktops.find((d) => d.deviceId === fresh.deviceId);
+  assert.equal(listed.fingerprint, "1234-abcd-1234-abcd");
+  assert.equal(listed.fingerprintVerified, true);
+  await db("device_activations")
+    .where({ device_id: fresh.deviceId })
+    .update({ identity_verified_at: null });
+});
+
+test("dials never cross accounts, and phones cannot dial", async () => {
+  const { spare, bobs } = await dialDesktops();
+  await desktopPoll(bobs, { caps: ["internet"] });
+  await desktopPoll(spare, { caps: ["internet"] });
+  // Bob's desktop is online and taking dials, but not in Alice's account.
+  const res = await desktopSignal(spare, dial(bobs, newSession()));
+  assert.deepEqual([res.status, res.body], [404, { error: "desktop_offline" }]);
+  const phone = newClientId();
+  const fromPhone = await phoneSignal(people.alice, {
+    to: spare.address,
+    from: `phone:${phone}`,
+    session: newSession(),
+    type: "dial",
+    data: {},
+  });
+  assert.deepEqual([fromPhone.status, fromPhone.body], [400, { error: "bad_type" }]);
+});
+
+test("capabilities are read generously but only known ones count", () => {
+  assert.deepEqual(parseCaps(["internet", "internet", "phone-link", "teleport", 7]), ["internet", "phone-link"]);
+  assert.equal(parseCaps("internet"), null);
+  assert.equal(parseCaps(undefined), null);
 });

@@ -35,6 +35,31 @@ export const SENDABLE_TYPES = Object.freeze({
   desktop: new Set(["answer", "bye"]),
 });
 
+// Between two desktops of one account (ForgeDrop 1.4, sending over the
+// internet): one dials with its connection candidates, the other answers
+// with its own, and either may say bye. The data is ForgeDrop's to read;
+// here it is only relayed, like SDP.
+export const DESKTOP_TO_DESKTOP_TYPES = new Set(["dial", "dial-answer", "bye"]);
+
+// What a desktop is polling for. Absent means an older app: the phone link.
+const KNOWN_CAPS = new Set(["phone-link", "internet"]);
+
+/** The capabilities a desktop's poll declares, or null for none given. */
+export function parseCaps(value) {
+  if (!Array.isArray(value)) return null;
+  return [...new Set(value.filter((cap) => typeof cap === "string" && KNOWN_CAPS.has(cap)))].sort();
+}
+
+/** Whether a desktop's presence says it answers phones (older apps always did). */
+export function answersPhones(live) {
+  return Boolean(live) && (!Array.isArray(live.caps) || live.caps.includes("phone-link"));
+}
+
+/** Whether a desktop's presence says it takes dials from its other desktops. */
+export function takesDials(live) {
+  return Boolean(live) && Array.isArray(live.caps) && live.caps.includes("internet");
+}
+
 const CLIENT_ID = /^[A-Za-z0-9_-]{22,64}$/;
 const SESSION = /^[A-Za-z0-9_-]{16,64}$/;
 
