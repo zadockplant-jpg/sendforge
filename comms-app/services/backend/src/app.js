@@ -29,6 +29,7 @@ import { jayjeRouter } from "./modules/jayje/index.js";
 import { jayjePortalRouter } from "./modules/jayje-portal/index.js";
 import { rtsRouter } from "./modules/romancing-the-stone/index.js";
 import { forgedropLinkRouter } from "./modules/forgedrop-link/index.js";
+import { forgedropPickupRouter } from "./modules/forgedrop-pickup/index.js";
 import { myhomebuilderPortalRouter } from "./modules/myhomebuilder-portal/index.js";
 
 export const app = express();
@@ -61,6 +62,12 @@ app.use("/v1/rts", rtsRouter);
 // mounts here for the same reason as RTS. If the module cannot load, its
 // routes answer 503 and the rest of the API still starts (see its index.js).
 app.use("/v1/forgedrop/link", forgedropLinkRouter);
+
+// ForgeDrop Cloud pickup: presigned R2 links for files a desktop sealed and
+// left for another computer. It owns its JSON parser (4 MiB) and error
+// responses, like the link. Without R2's settings, or if the module cannot
+// load, its routes answer 503 and the rest of the API still starts.
+app.use("/v1/forgedrop/pickup", forgedropPickupRouter);
 
 app.use(
   express.json({

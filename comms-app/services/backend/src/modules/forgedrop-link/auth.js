@@ -10,6 +10,8 @@
  *
  * Only tokens whose signature verified are cached, so a stranger cannot fill
  * the cache with junk, and a database error is never cached.
+ *
+ * Cloud pickup (../forgedrop-pickup) signs desktops in with this too.
  */
 
 import { publicKeyHexFromSeed, verifyLicenseToken } from "../../services/licenseToken.service.js";
@@ -31,6 +33,9 @@ export function createDesktopAuth({
   ttlMs,
   maxEntries = 10_000,
   log = () => {},
+  // Cloud pickup signs desktops in the same way, and answers its own 503.
+  unavailableError = "link_unavailable",
+  logPrefix = "forgedrop_link",
 }) {
   /** token -> { expiresAt, verdict: Promise<{ ok, userId, deviceId } | { status, error }> } */
   const verdicts = new Map();
@@ -45,7 +50,7 @@ export function createDesktopAuth({
         try {
           hex = publicKeyHexFromSeed(seed);
         } catch (error) {
-          log("error", "forgedrop_link_signing_key_invalid", { message: String(error?.message || error) });
+          log("error", `${logPrefix}_signing_key_invalid`, { message: String(error?.message || error) });
         }
       }
       key = { seed, hex };
@@ -92,7 +97,7 @@ export function createDesktopAuth({
 
   return async function desktopAuth(req, res, next) {
     const publicKey = publicKeyHex();
-    if (!publicKey) return res.status(503).json({ error: "link_unavailable" });
+    if (!publicKey) return res.status(503).json({ error: unavailableError });
 
     const token = String(req.headers[LICENCE_HEADER] || "").trim();
     if (!token || token.length > MAX_TOKEN_CHARS) {
@@ -115,8 +120,8 @@ export function createDesktopAuth({
       verdict = await entry.verdict;
     } catch (error) {
       if (verdicts.get(token) === entry) verdicts.delete(token);
-      log("error", "forgedrop_link_licence_check_failed", { message: String(error?.message || error) });
-      return res.status(503).json({ error: "link_unavailable" });
+      log("error", `${logPrefix}_licence_check_failed`, { message: String(error?.message || error) });
+      return res.status(503).json({ error: unavailableError });
     }
     if (!verdict.ok) return res.status(verdict.status).json({ error: verdict.error });
 

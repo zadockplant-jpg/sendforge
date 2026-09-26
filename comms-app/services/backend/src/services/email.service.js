@@ -544,6 +544,76 @@ If you did not request this, secure your account immediately.`;
   });
 }
 
+function forgeDropComputerName(value) {
+  const name = String(value || "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return Array.from(name).slice(0, 64).join("").trim();
+}
+
+/**
+ * ForgeDrop Cloud pickup: files were left for one of this account's
+ * computers. Names the sending computer and the date they are deleted,
+ * never a file: the server has no file names, the list travels sealed.
+ * The wording is a first draft for the owner to approve.
+ */
+export async function sendForgeDropPickupWaitingEmail({
+  to,
+  fromName,
+  expiresAt,
+  pickupId = null,
+  requestId = null,
+}) {
+  const subject = "Files are waiting for you in ForgeDrop";
+  const sender = forgeDropComputerName(fromName) || "another ForgeDrop computer";
+  // "October 3, 2026 at 2:05 PM UTC". ICU puts a narrow no-break space
+  // before PM; plain-text mail gets an ordinary one.
+  const deletedOn = `${new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    dateStyle: "long",
+    timeStyle: "short",
+  })
+    .format(new Date(expiresAt))
+    .replace(/[\u202f\u00a0]/g, " ")} UTC`;
+
+  const text = `Files are waiting for you in ForgeDrop.
+
+From: ${sender}
+Deleted: as soon as they're picked up, or on ${deletedOn} if they aren't.
+
+Open ForgeDrop on your computer to receive them. They were encrypted on the sending computer, so only your computer can open them.
+
+You're getting this because a computer on your SendForge account uses ForgeDrop. Need help? Contact ${supportEmail()}.`;
+
+  const html = `
+    <div style="margin:0;padding:24px;background:#f5f7fb;color:#172033;font-family:Arial,sans-serif;line-height:1.55;">
+      <div style="max-width:580px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
+        <p style="margin:0 0 8px;color:#52627a;font-size:13px;font-weight:700;">FORGEDROP CLOUD PICKUP</p>
+        <h1 style="margin:0 0 16px;font-size:26px;line-height:1.2;color:#172033;">Files are waiting for you in ForgeDrop</h1>
+        <p style="margin:0 0 6px;"><strong>From:</strong> ${escapeHtml(sender)}</p>
+        <p style="margin:0 0 18px;"><strong>Deleted:</strong> as soon as they're picked up, or on ${escapeHtml(deletedOn)} if they aren't.</p>
+        <p style="margin:0 0 18px;color:#52627a;">Open ForgeDrop on your computer to receive them. They were encrypted on the sending computer, so only your computer can open them.</p>
+        <hr style="margin:22px 0;border:0;border-top:1px solid #e3e8f0;">
+        <p style="margin:0;color:#7b8799;font-size:12px;">You're getting this because a computer on your SendForge account uses ForgeDrop. Need help? Contact ${escapeHtml(supportEmail())}.</p>
+      </div>
+    </div>
+  `;
+
+  return sendEmailViaSendGrid({
+    to,
+    subject,
+    text,
+    html,
+    requestId,
+    fromEmail: accountFromEmail(),
+    fromName: "ForgeDrop",
+    messageKind: "forgedrop-pickup-waiting",
+    messageRef: pickupId || requestId,
+    disableSubscriptionTracking: true,
+  });
+}
+
 
 export async function sendReferralInviteEmail({
   to,
