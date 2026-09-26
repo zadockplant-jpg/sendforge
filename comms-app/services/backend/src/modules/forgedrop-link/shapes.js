@@ -41,6 +41,62 @@ export const SENDABLE_TYPES = Object.freeze({
 // here it is only relayed, like SDP.
 export const DESKTOP_TO_DESKTOP_TYPES = new Set(["dial", "dial-answer", "bye"]);
 
+// Codes (ForgeDrop 1.5, ForgeDrop/docs/codes.md): sending to someone who is
+// not one of your own computers. codes.js holds the nameplates and sessions.
+export const CODE_LIMITS = Object.freeze({
+  // A code is open for an hour unless its sender asks otherwise; a day at most.
+  defaultMinutes: 60,
+  minMinutes: 1,
+  maxMinutes: 1440,
+  nameplatesPerDesktop: 4,
+  // Once a code is claimed, its two computers have an hour and 64 messages
+  // to finish. An exchange usually takes fewer than ten.
+  sessionMs: 60 * 60_000,
+  sessionMessages: 64,
+  rate: Object.freeze({
+    // Per desktop.
+    codeOpenPerMinute: 20,
+    // Per account, whichever of its desktops claims. Any claim of someone
+    // else's code could be a guess at its words, so guessing costs.
+    codeClaimPerMinute: 5,
+    // Per account, the same allowance as /signal, counted apart from it.
+    codeSignalPerMinute: LINK_LIMITS.rate.signalPerMinute,
+  }),
+});
+
+// What the two computers of a code session say to each other: the PAKE and
+// its proof, then a dial and its answer as between one's own computers
+// (docs/internet.md), and bye. Either side may send any of them. Here they
+// are only relayed; the apps check them, and a dial is signed with the pair
+// key of the identities the PAKE vouched for.
+export const CODE_TYPES = new Set(["pake", "proof", "dial", "dial-answer", "bye"]);
+
+const NAMEPLATE = /^[0-9]{1,9}$/;
+const CODE_SESSION = /^[A-Za-z0-9_-]{22}$/;
+
+/** A nameplate, "7" or 7, as a number from 1; else null. "007" is 7. */
+export function parseNameplate(value) {
+  let text;
+  if (typeof value === "string") text = value.trim();
+  else if (Number.isSafeInteger(value)) text = String(value);
+  else return null;
+  if (!NAMEPLATE.test(text)) return null;
+  const number = Number(text);
+  return number >= 1 ? number : null;
+}
+
+/** How long a code stays open: absent means an hour, out of range is clamped. */
+export function parseMinutes(value) {
+  if (value === undefined || value === null) return CODE_LIMITS.defaultMinutes;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.min(CODE_LIMITS.maxMinutes, Math.max(CODE_LIMITS.minMinutes, value));
+}
+
+/** A session id as the code relay makes them: 22 base64url characters. */
+export function isCodeSession(value) {
+  return typeof value === "string" && CODE_SESSION.test(value);
+}
+
 // What a desktop is polling for. Absent means an older app: the phone link.
 const KNOWN_CAPS = new Set(["phone-link", "internet"]);
 

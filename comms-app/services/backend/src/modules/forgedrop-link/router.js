@@ -13,10 +13,18 @@
  *   POST /phone/poll       phone    long-poll for messages, and be present
  *   POST /signal           either   send an offer, answer or bye; between
  *                                   two desktops, a dial, its answer or bye
+ *   POST /code/open        desktop  open a code: the number at its front
+ *   POST /code/claim       desktop  claim someone's code, starting a session
+ *   POST /code/signal      desktop  a message to the session's other side
+ *   POST /code/close       desktop  withdraw a code, or end a session
  *
  * Desktops of one account also swap connection candidates here to reach each
  * other across the internet (ForgeDrop 1.4); the files then go directly
  * between them, never through this server.
+ *
+ * Codes (ForgeDrop 1.5) introduce two desktops that need not share an
+ * account, for sending to someone who is not one of your own computers.
+ * codes.js explains how; the files still go directly, never through here.
  *
  * A desktop signs in with its offline licence (auth.js), a phone with the
  * customer's Bearer token. Either way the account must own ForgeDrop.
@@ -26,25 +34,45 @@ import express from "express";
 import { createRateLimiter } from "../../middleware/rateLimit.js";
 import { licensedProduct } from "../../services/licensedProducts.js";
 import { createDesktopAuth, hasLicenceHeader } from "./auth.js";
+import { createCodeStore } from "./codes.js";
 import { createDeviceDirectory } from "./devices.js";
 import {
   answersPhones,
   canonicalUuid,
   cleanText,
+  CODE_LIMITS,
+  CODE_TYPES,
   DESKTOP_TO_DESKTOP_TYPES,
   isClientId,
+  isCodeSession,
   isPlainObject,
   isSession,
   LINK_LIMITS,
   parseAddress,
   parseCaps,
+  parseMinutes,
+  parseNameplate,
   parseWait,
   SENDABLE_TYPES,
   takesDials,
 } from "./shapes.js";
 import { createLinkStore } from "./store.js";
 
-export { LINK_LIMITS };
+export { CODE_LIMITS, LINK_LIMITS };
+
+// How the code store's refusals reach the client. A 404 is the same answer
+// whether the thing never existed, has run out or belongs to someone else.
+// The caps are 409, not 429: waiting does not lift them, only closing a code
+// does, and a session's messages never come back.
+const CODE_REFUSALS = Object.freeze({
+  code_unknown: 404,
+  code_gone: 404,
+  too_many_codes: 409,
+  too_many_messages: 409,
+});
+
+/** Whether a body field was given at all; null counts as not given. */
+const given = (value) => value !== undefined && value !== null;
 
 /** A body only counts once it has bytes in it; an empty POST is fine. */
 function sentBody(req) {
@@ -59,6 +87,7 @@ export function createForgeDropLinkRouter({
   signingKey,
   now = Date.now,
   store: givenStore = null,
+  codes: givenCodes = null,
   rate = {},
   rateLimitPrefix = "forgedrop-link",
   log = () => {},
@@ -73,7 +102,17 @@ export function createForgeDropLinkRouter({
       onError: (error) =>
         log("error", "forgedrop_link_reply_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
-  const limits = { ...LINK_LIMITS.rate, ...rate };
+  // Code messages travel in the same mailboxes as everything else, so a
+  // desktop reads them in the poll it already makes.
+  const codes =
+    givenCodes ||
+    createCodeStore({
+      now,
+      deliver: (userId, address, message) => store.deliver(userId, address, message),
+      onError: (error) =>
+        log("error", "forgedrop_link_code_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
+    });
+  const limits = { ...LINK_LIMITS.rate, ...CODE_LIMITS.rate, ...rate };
   const devices = createDeviceDirectory(db, product.slug);
   const owns = (userId) => hasProductEntitlement(userId, product.entitlementSlug || product.slug);
   const router = express.Router();
@@ -148,6 +187,16 @@ export function createForgeDropLinkRouter({
     (req) => `${req.link.userId}:phone:${String(req.body?.clientId ?? "")}`
   );
   const desktopsLimiter = limiter("desktops", limits.desktopsPerMinute, (req) => req.link.userId);
+  const codeOpenLimiter = limiter(
+    "code-open",
+    limits.codeOpenPerMinute,
+    (req) => `${req.link.userId}:${req.link.address}`
+  );
+  // Per account, not per desktop: a second licence does not buy a second
+  // allowance of guesses. Every claim counts, whatever its answer.
+  const codeClaimLimiter = limiter("code-claim", limits.codeClaimPerMinute, (req) => req.link.userId);
+  const codeSignalLimiter = limiter("code-signal", limits.codeSignalPerMinute, (req) => req.link.userId);
+  const refuse = (res, error) => res.status(CODE_REFUSALS[error] || 400).json({ error });
 
   function longPoll(res, userId, address, waitSeconds, info) {
     if (res.destroyed) return;
@@ -370,6 +419,67 @@ export function createForgeDropLinkRouter({
       return res.status(202).json({ ok: true });
     })
   );
+
+  // --------------------------------------------------------------- codes
+  //
+  // Desktops only: only activated ForgeDrop computers can open or claim a
+  // code, so guessing at scale costs licences. The two sides of a code may
+  // belong to different accounts; codes.js keeps each one's mail in its own.
+
+  router.post("/code/open", desktopAuth, codeOpenLimiter, (req, res) => {
+    const body = req.body || {};
+    const minutes = parseMinutes(body.minutes);
+    if (minutes === null) return res.status(400).json({ error: "bad_minutes" });
+    const opened = codes.open(req.link, { minutes, name: cleanText(body.name, 64) });
+    if (!opened.ok) return refuse(res, opened.error);
+    return res.json({ nameplate: opened.nameplate, expiresAt: new Date(opened.expiresAt).toISOString() });
+  });
+
+  router.post("/code/claim", desktopAuth, codeClaimLimiter, (req, res) => {
+    const number = parseNameplate((req.body || {}).nameplate);
+    if (number === null) return res.status(400).json({ error: "bad_nameplate" });
+    const claimed = codes.claim(req.link, number);
+    if (!claimed.ok) return refuse(res, claimed.error);
+    // Something to show while the PAKE runs: the name the creator gave with
+    // its code, else what its poll says. Only a label; the name the app
+    // believes arrives in the PAKE, vouched for by the code.
+    const { userId, address } = claimed.creator;
+    const name = claimed.name ?? store.presence(userId, address)?.name ?? null;
+    return res.json({ session: claimed.session, peer: { name } });
+  });
+
+  router.post("/code/signal", desktopAuth, codeSignalLimiter, (req, res) => {
+    const body = req.body || {};
+    if (!isCodeSession(body.session)) return res.status(400).json({ error: "bad_session" });
+    if (!CODE_TYPES.has(body.type)) return res.status(400).json({ error: "bad_type" });
+    const data = body.data === undefined ? {} : body.data;
+    if (!isPlainObject(data)) return res.status(400).json({ error: "bad_data" });
+    if (Buffer.byteLength(JSON.stringify(data), "utf8") > LINK_LIMITS.dataBytes) {
+      return res.status(413).json({ error: "data_too_large" });
+    }
+    const sent = codes.signal(req.link, body.session, body.type, data);
+    if (!sent.ok) return refuse(res, sent.error);
+    return res.status(202).json({ ok: true });
+  });
+
+  // One of the two, never both: a nameplate nobody has claimed yet, or a
+  // session. A 404 here says it was already over, or never this desktop's.
+  router.post("/code/close", desktopAuth, (req, res) => {
+    const body = req.body || {};
+    const bySession = given(body.session);
+    if (bySession === given(body.nameplate)) return res.status(400).json({ error: "bad_request" });
+    let closed;
+    if (bySession) {
+      if (!isCodeSession(body.session)) return res.status(400).json({ error: "bad_session" });
+      closed = codes.closeSession(req.link, body.session);
+    } else {
+      const number = parseNameplate(body.nameplate);
+      if (number === null) return res.status(400).json({ error: "bad_nameplate" });
+      closed = codes.closeNameplate(req.link, number);
+    }
+    if (!closed.ok) return refuse(res, closed.error);
+    return res.status(204).end();
+  });
 
   router.use((_req, res) => res.status(404).json({ error: "not_found" }));
 
