@@ -50,7 +50,9 @@ const { handleStripeEvent } = await import("../src/routes/stripe.webhooks.routes
 const { CLOUD_PICKUP_TIERS, cloudPickupTierByKey, GB, tierFromEntitlements } = await import(
   "../src/modules/forgedrop-pickup/plans.js"
 );
-const { cloudPickupInvoice, isCloudPickupSubscription } = await import("../src/modules/forgedrop-pickup/billing.js");
+const { cloudPickupInvoice, cloudPickupSubscriptionIsEnding, isCloudPickupSubscription } = await import(
+  "../src/modules/forgedrop-pickup/billing.js"
+);
 const { createForgeDropPickupRouter } = await import("../src/modules/forgedrop-pickup/router.js");
 const {
   cloudPickupShareCents,
@@ -71,7 +73,6 @@ const CATALOG_ROUTE = "/v1/billing/catalog/checkout-session";
 // The catalog checkout's own return URLs, as it builds them for every product.
 const SUCCESS_URL = `${SITE}/account/index.html?purchase_context=forgedrop-cloud-pickup&checkout=success&session_id=%7BCHECKOUT_SESSION_ID%7D#forgedrop`;
 const CANCEL_URL = `${SITE}/products/forgedrop/index.html?checkout=cancelled#cloud-pickup`;
-const PORTAL_RETURN_URL = `${SITE}/products/forgedrop/index.html#cloud-pickup`;
 const DAY = 24 * 60 * 60 * 1000;
 const tierOf = (key) => cloudPickupTierByKey(key);
 
@@ -169,6 +170,13 @@ function fakeStripe() {
     },
     setStatus(id, status) {
       state.subscriptions.get(id).status = status;
+    },
+    /** Cancelled in the billing portal: it stays active, and ends with its period. */
+    setEnding(id) {
+      const subscription = state.subscriptions.get(id);
+      subscription.cancel_at_period_end = true;
+      subscription.cancel_at = subscription.current_period_end;
+      subscription.canceled_at = Math.floor(Date.now() / 1000);
     },
     subscription(id) {
       return present(state.subscriptions.get(id));
@@ -553,53 +561,74 @@ test("only a ForgeDrop owner can buy a plan: anyone else is forgedrop_required, 
   assert.deepEqual(stripe.state.sessions.map(({ config }) => config.line_items[0].price_data.unit_amount), [2500]);
 });
 
-test("one plan per account: the same tier is already_subscribed, another tier opens the billing portal", async () => {
+/** The 409 the catalog gives an account whose plan runs on. */
+function alreadySubscribed(requested, current) {
+  const label = tierOf(current).label;
+  return {
+    status: 409,
+    body: {
+      error: "already_subscribed",
+      productSlug: tierOf(requested).slug,
+      currentProductSlug: tierOf(current).slug,
+      message:
+        requested === current
+          ? `This account already has Cloud pickup ${label}. Manage it from Account.`
+          : `This account has Cloud pickup ${label}. To change plans, cancel it under Account and choose the new one.`,
+    },
+  };
+}
+
+test("one plan per account: while a plan runs on, any tier is already_subscribed; once it is cancelled, another is bought at once", async () => {
   useStripe();
   const ray = await signUp("ray", { owns: ["forgedrop"] });
   const opened = await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" });
   // Paid, and no webhook yet: Stripe's own list of the customer's subscriptions still counts.
   const { subscription, completed } = completeCheckout(stripe, opened.body.sessionId);
-  const customer = subscription.customer;
   const sessionsBefore = stripe.state.sessions.length;
 
-  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" }), {
-    status: 409,
-    body: {
-      error: "already_subscribed",
-      productSlug: "forgedrop-cloud-pickup-100gb",
-      message: "This account already has Cloud pickup 100 GB. Manage it from Account.",
-    },
-  });
-
-  const other = await checkout(ray, { productSlug: "forgedrop-cloud-pickup-1tb" });
-  const portal = stripe.state.portals.at(-1);
-  assert.deepEqual(other, {
-    status: 200,
-    body: {
-      ok: true,
-      url: portal.url,
-      portal: true,
-      productSlug: "forgedrop-cloud-pickup-1tb",
-      currentProductSlug: "forgedrop-cloud-pickup-100gb",
-    },
-  });
-  assert.deepEqual(portal.params, { customer, return_url: PORTAL_RETURN_URL });
+  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" }), alreadySubscribed("100gb", "100gb"));
+  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-1tb" }), alreadySubscribed("1tb", "100gb"));
+  assert.equal(
+    alreadySubscribed("1tb", "100gb").body.message,
+    "This account has Cloud pickup 100 GB. To change plans, cancel it under Account and choose the new one."
+  );
   assert.equal(stripe.state.sessions.length, sessionsBefore, "never a second Checkout");
 
-  // Once the webhook has run, a subscription under a Stripe customer the
-  // account no longer uses still counts, from the subscriptions table.
+  // Once the webhook has run, a plan under a Stripe customer the account no
+  // longer uses still counts, from the subscriptions table.
   await handleStripeEvent(completed, stripe);
+  const original = subscription.customer;
   const replacement = await stripe.customers.create({ email: ray.email });
   await db("users").where({ id: ray.id }).update({ stripe_customer_id: replacement.id });
-  assert.equal((await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" })).body.error, "already_subscribed");
-  const elsewhere = await checkout(ray, { productSlug: "forgedrop-cloud-pickup-250gb" });
-  assert.deepEqual([elsewhere.body.portal, elsewhere.body.currentProductSlug], [true, "forgedrop-cloud-pickup-100gb"]);
-  assert.deepEqual(stripe.state.portals.at(-1).params, { customer: replacement.id, return_url: PORTAL_RETURN_URL });
-  assert.equal(stripe.state.sessions.length, sessionsBefore);
+  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-250gb" }), alreadySubscribed("250gb", "100gb"));
+  await db("users").where({ id: ray.id }).update({ stripe_customer_id: original });
+
+  // Ray cancels under Account. The plan runs to the end of its period, and
+  // no longer holds the account to it.
+  stripe.setEnding(subscription.id);
+  await handleStripeEvent(event("customer.subscription.updated", stripe.subscription(subscription.id)), stripe);
+  assert.equal(cloudPickupSubscriptionIsEnding(stripe.subscription(subscription.id)), true);
+  assert.equal(await heldTier(ray.id), "100gb", "still his until the period ends");
+  // The same tier is his until then: nothing to buy.
+  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" }), alreadySubscribed("100gb", "100gb"));
+  // Another tier is bought straight away.
+  const bigger = await checkout(ray, { productSlug: "forgedrop-cloud-pickup-1tb" });
+  assert.equal(bigger.status, 200, JSON.stringify(bigger.body));
+  assert.equal(stripe.state.sessions.at(-1).config.line_items[0].price_data.unit_amount, 2500);
+  const { completed: biggerPaid } = completeCheckout(stripe, bigger.body.sessionId);
+  await handleStripeEvent(biggerPaid, stripe);
+  // Now the 1 TB plan is the one that runs on.
+  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-250gb" }), alreadySubscribed("250gb", "1tb"));
+  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-1tb" }), alreadySubscribed("1tb", "1tb"));
+  assert.deepEqual(stripe.state.calls.filter(([name]) => name.startsWith("billingPortal")), [], "no billing portal on the way");
+
+  assert.equal(cloudPickupSubscriptionIsEnding({ cancel_at_period_end: true }), true);
+  assert.equal(cloudPickupSubscriptionIsEnding({ cancel_at: 1790000000 }), true);
+  assert.equal(cloudPickupSubscriptionIsEnding({ cancel_at_period_end: false, cancel_at: null }), false);
 
   // A tier granted by hand is not bought again; another tier still can be.
   const hal = await signUp("hal", { owns: ["forgedrop", "forgedrop-cloud-pickup-250gb"] });
-  assert.equal((await checkout(hal, { productSlug: "forgedrop-cloud-pickup-250gb" })).body.error, "already_subscribed");
+  assert.deepEqual(await checkout(hal, { productSlug: "forgedrop-cloud-pickup-250gb" }), alreadySubscribed("250gb", "250gb"));
   assert.equal((await checkout(hal, { productSlug: "forgedrop-cloud-pickup-1tb" })).status, 200);
 });
 
@@ -711,19 +740,21 @@ test("a tier granted by hand is left alone when a subscription ends", async () =
   ]);
 });
 
-test("the pickup allowance sees the plan the webhook granted, and loses it when the plan ends", async () => {
-  useStripe();
-  const lee = await signUp("lee", { owns: ["forgedrop"] });
+/**
+ * A licensed desktop of `person`'s, and what leaving a link pickup of `bytes`
+ * (plus a 100-byte manifest) answers through the real pickup router.
+ */
+async function desktopOf(person) {
   const desktop = await activateDevice({
-    userId: lee.id,
+    userId: person.id,
     productSlug: "forgedrop",
     deviceId: randomUUID(),
-    deviceName: "Lee PC",
+    deviceName: "Test PC",
     platform: "windows",
     appVersion: "1.6.0",
     deviceLimit: 5,
   });
-  const leave = async (bytes) => {
+  return async (bytes) => {
     const response = await fetch(`${origin}/v1/forgedrop/pickup`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-ForgeDrop-License": desktop.token },
@@ -731,6 +762,12 @@ test("the pickup allowance sees the plan the webhook granted, and loses it when 
     });
     return { status: response.status, body: await response.json() };
   };
+}
+
+test("the pickup allowance sees the plan the webhook granted, and loses it when the plan ends", async () => {
+  useStripe();
+  const lee = await signUp("lee", { owns: ["forgedrop"] });
+  const leave = await desktopOf(lee);
 
   assert.deepEqual(await leave(1000), { status: 402, body: { error: "plan_required" } });
 
@@ -751,6 +788,58 @@ test("the pickup allowance sees the plan the webhook granted, and loses it when 
   stripe.setStatus(sub.id, "canceled");
   await handleStripeEvent(event("customer.subscription.deleted", stripe.subscription(sub.id)), stripe);
   assert.deepEqual(await leave(1000), { status: 402, body: { error: "plan_required" } });
+});
+
+test("while a cancelled plan runs out beside the new one, the allowance is the larger of the two", async () => {
+  useStripe();
+  const end = async (sub) => {
+    stripe.setStatus(sub.id, "canceled");
+    await handleStripeEvent(event("customer.subscription.deleted", stripe.subscription(sub.id)), stripe);
+  };
+  const cancelUnderAccount = async (sub) => {
+    stripe.setEnding(sub.id);
+    await handleStripeEvent(event("customer.subscription.updated", stripe.subscription(sub.id)), stripe);
+  };
+
+  // Up: 100 GB cancelled, 1 TB bought at once. The 1 TB allowance applies straight away.
+  const uma = await signUp("uma", { owns: ["forgedrop"] });
+  const umaLeaves = await desktopOf(uma);
+  const small = await subscribed(uma, "100gb");
+  assert.deepEqual(await umaLeaves(100 * GB), {
+    status: 403,
+    body: { error: "allowance_used", allowance: { bytes: 100 * GB, used: 0 } },
+  });
+  await cancelUnderAccount(small);
+  await subscribed(uma, "1tb");
+  assert.deepEqual(await pickupPlans(uma.id), [
+    ["forgedrop-cloud-pickup-100gb", "active"],
+    ["forgedrop-cloud-pickup-1tb", "active"],
+  ]);
+  assert.equal(await heldTier(uma.id), "1tb");
+  assert.equal((await umaLeaves(100 * GB)).status, 201, "the larger plan's allowance");
+  // The cancelled plan's period ends; the new plan is what is left.
+  await end(small);
+  assert.deepEqual(await pickupPlans(uma.id), [
+    ["forgedrop-cloud-pickup-100gb", "revoked"],
+    ["forgedrop-cloud-pickup-1tb", "active"],
+  ]);
+  assert.equal(await heldTier(uma.id), "1tb");
+
+  // Down: 1 TB cancelled, 100 GB bought. The 1 TB allowance holds until its
+  // period is over, then 100 GB, against what was already sent this month.
+  const dan = await signUp("dan", { owns: ["forgedrop"] });
+  const danLeaves = await desktopOf(dan);
+  const big = await subscribed(dan, "1tb");
+  await cancelUnderAccount(big);
+  await subscribed(dan, "100gb");
+  assert.equal(await heldTier(dan.id), "1tb");
+  assert.equal((await danLeaves(150 * GB)).status, 201, "still the 1 TB allowance");
+  await end(big);
+  assert.equal(await heldTier(dan.id), "100gb");
+  assert.deepEqual(await danLeaves(1000), {
+    status: 403,
+    body: { error: "allowance_used", allowance: { bytes: 100 * GB, used: 150 * GB + 100 } },
+  });
 });
 
 // ----------------------------------------------------------- affiliate share

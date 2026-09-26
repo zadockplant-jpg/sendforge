@@ -50,8 +50,9 @@ import {
 import {
   buildCloudPickupCheckoutOptions,
   CLOUD_PICKUP_CATALOG,
+  cloudPickupSubscriptionIsEnding,
   cloudPickupTierForSubscription,
-  findCloudPickupSubscription,
+  liveCloudPickupSubscriptions,
 } from "../modules/forgedrop-pickup/billing.js";
 import { cloudPickupTier } from "../modules/forgedrop-pickup/plans.js";
 import { log } from "../utils/logger.js";
@@ -1086,10 +1087,9 @@ billingRouter.post("/donations/checkout-session", async (req, res) => {
  * - retired collection/skin direct checkout returns explicit errors
  * - ForgeDrop Cloud pickup, productSlug "forgedrop-cloud-pickup-100gb",
  *   -250gb, -500gb or -1tb: a monthly subscription for ForgeDrop owners
- *   (403 forgedrop_required otherwise), one plan per account: the same tier
- *   again is 409 already_subscribed, and another tier answers
- *   { ok, url, portal: true, productSlug, currentProductSlug } with a Stripe
- *   billing portal url instead of a second subscription
+ *   (403 forgedrop_required otherwise), one plan per account: while a plan
+ *   runs on, any tier is 409 already_subscribed; once the customer has
+ *   cancelled it under Account, another tier can be bought at once
  */
 async function catalogCheckoutSession(req, res, stripeClient = getStripe) {
   const parsed = CatalogCheckoutSchema.safeParse(req.body);
@@ -1326,36 +1326,29 @@ async function catalogCheckoutSession(req, res, stripeClient = getStripe) {
     const successPath = sanitizeRelativePath(parsed.data.successPath, defaultSuccessPath);
     const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, defaultCancelPath);
 
-    // ForgeDrop Cloud pickup: one plan per account. The same tier again is
-    // already_subscribed. Another tier opens Stripe's billing portal, where
-    // the plan the account has can be managed or cancelled, rather than a
-    // second subscription beside it.
+    // ForgeDrop Cloud pickup: one plan per account, never a second
+    // subscription beside one that runs on. A plan the customer has cancelled
+    // under Account (set to end with its period) no longer counts: another
+    // tier can be bought at once, and until the old plan's period is over the
+    // allowance is the larger of the two. The same tier is never bought twice.
     if (product?.cloudPickup) {
-      const current = await findCloudPickupSubscription({
+      const requested = cloudPickupTier(product.entitlementSlug);
+      const running = await liveCloudPickupSubscriptions({
         stripe,
         customerId,
         userId: user.id,
       });
-      if (current) {
-        const currentTier = cloudPickupTierForSubscription(current);
-        if (!currentTier || currentTier.slug === product.entitlementSlug) {
-          return cloudPickupAlreadySubscribed(res, currentTier);
-        }
-        const portal = await stripe.billingPortal.sessions.create({
-          customer: customerId,
-          return_url: buildSiteUrl(cancelPath),
-        });
-        return res.json({
-          ok: true,
-          url: portal.url,
-          portal: true,
-          productSlug: product.slug,
-          currentProductSlug: currentTier.slug,
-        });
+      const kept = running.find((sub) => !cloudPickupSubscriptionIsEnding(sub));
+      if (kept) {
+        return cloudPickupAlreadySubscribed(res, requested, cloudPickupTierForSubscription(kept));
       }
-      // The same tier granted by hand: nothing to buy.
-      if (await userHasEntitlement(user.id, product.entitlementSlug)) {
-        return cloudPickupAlreadySubscribed(res, cloudPickupTier(product.entitlementSlug));
+      // Still in the last period of a cancelled plan of this tier, or given it
+      // by hand: nothing to buy.
+      const holdsRequested =
+        running.some((sub) => cloudPickupTierForSubscription(sub)?.slug === requested.slug) ||
+        (await userHasEntitlement(user.id, requested.slug));
+      if (holdsRequested) {
+        return cloudPickupAlreadySubscribed(res, requested, requested);
       }
     }
 
@@ -1513,13 +1506,23 @@ export function createCatalogCheckoutHandler({ getStripe: stripeClient = getStri
 
 billingRouter.post("/catalog/checkout-session", requireAuth, createCatalogCheckoutHandler());
 
-function cloudPickupAlreadySubscribed(res, heldTier) {
+/**
+ * 409 already_subscribed for a Cloud pickup tier: `requested` is the tier
+ * asked for, `held` the plan the account keeps (null when nothing on it names
+ * a tier), and the message says what to do.
+ */
+function cloudPickupAlreadySubscribed(res, requested, held) {
+  let message = "This account already has a Cloud pickup plan. Manage it from Account.";
+  if (held && held.slug !== requested.slug) {
+    message = `This account has Cloud pickup ${held.label}. To change plans, cancel it under Account and choose the new one.`;
+  } else if (held) {
+    message = `This account already has Cloud pickup ${held.label}. Manage it from Account.`;
+  }
   return res.status(409).json({
     error: "already_subscribed",
-    productSlug: heldTier?.slug || null,
-    message: heldTier
-      ? `This account already has Cloud pickup ${heldTier.label}. Manage it from Account.`
-      : "This account already has a Cloud pickup plan. Manage it from Account.",
+    productSlug: requested.slug,
+    currentProductSlug: held?.slug || null,
+    message,
   });
 }
 

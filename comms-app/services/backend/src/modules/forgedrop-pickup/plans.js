@@ -5,8 +5,9 @@
  *
  * A tier is held as a product entitlement, the way TabForge Private Sync is:
  * one row in product_entitlements per account and tier slug, active while
- * the subscription is. An account holding more than one (an upgrade whose
- * old tier has not been revoked yet) gets the biggest.
+ * the subscription is. An account holding more than one gets the biggest:
+ * a plan the customer cancelled runs to the end of its period beside the one
+ * they chose next, and the allowance is the larger of the two until then.
  *
  * Each tier is sold as a product of the shared catalog checkout, under its
  * slug, at `monthlyCents` a month (billing.js builds the catalog entries from
@@ -66,8 +67,10 @@ export function cloudPickupTierByKey(key) {
 }
 
 /**
- * The biggest tier among an account's entitlement rows, or null for none.
- * `rows` are active entitlements (entitlement.service listProductEntitlements).
+ * The biggest tier among an account's entitlement rows, or null for none:
+ * what the monthly allowance is held to. `rows` are active entitlements
+ * (entitlement.service listProductEntitlements), so a cancelled plan still in
+ * its last period counts beside a new one, and stops counting when it ends.
  */
 export function tierFromEntitlements(rows) {
   let best = null;

@@ -19,8 +19,12 @@
  *    item's product is granted while the subscription is active, and every
  *    other tier it granted is revoked. A cancellation, or an end without
  *    payment, removes it;
- *  - one plan per account: the same tier again is already_subscribed, and
- *    another tier opens Stripe's billing portal, never a second subscription;
+ *  - one plan per account: while a plan runs on, choosing any tier is
+ *    already_subscribed, never a second subscription. A plan the customer
+ *    cancelled under Account (set to end with its period) no longer counts:
+ *    it runs to the end of what was paid for, and another tier can be bought
+ *    beside it at once. While both run, the allowance is the larger of the
+ *    two (plans.js tierFromEntitlements);
  *  - a paid invoice for one of the tiers is what the affiliate share is paid
  *    on (referral.service.js recordCloudPickupShare).
  *
@@ -212,40 +216,53 @@ export function buildCloudPickupCheckoutOptions({ userId, tier, checkoutItems = 
 }
 
 /**
- * The account's Cloud pickup subscription that is still running, if any:
- * from Stripe first, which knows one whose webhook has not arrived yet, then
- * from the subscriptions table, which knows one under a Stripe customer the
- * account no longer uses.
+ * Whether the customer has set a subscription to end: cancelled under
+ * Account, in Stripe's billing portal, it keeps running to the end of the
+ * period that was paid for and then stops. It is not the plan they keep.
  */
-export async function findCloudPickupSubscription({ stripe, customerId, userId, database = db }) {
+export function cloudPickupSubscriptionIsEnding(subscription) {
+  return subscription?.cancel_at_period_end === true || Boolean(subscription?.cancel_at);
+}
+
+/**
+ * The account's Cloud pickup subscriptions that are still running: from
+ * Stripe first, which knows one whose webhook has not arrived yet, then from
+ * the subscriptions table, which knows one under a Stripe customer the
+ * account no longer uses. A subscription Stripe listed at all is taken as
+ * Stripe has it, whatever the table still says.
+ */
+export async function liveCloudPickupSubscriptions({ stripe, customerId, userId, database = db }) {
+  const listedIds = new Set();
+  const live = new Map();
   if (stripe && customerId) {
     const listed = await stripe.subscriptions.list({
       customer: String(customerId),
       status: "all",
       limit: 100,
     });
-    const live = (listed?.data || []).find(
-      (sub) => CLOUD_PICKUP_LIVE_STATUSES.includes(norm(sub?.status)) && isCloudPickupSubscription(sub)
-    );
-    if (live) return live;
+    for (const sub of listed?.data || []) {
+      listedIds.add(String(sub?.id || ""));
+      if (CLOUD_PICKUP_LIVE_STATUSES.includes(norm(sub?.status)) && isCloudPickupSubscription(sub)) {
+        live.set(String(sub.id), sub);
+      }
+    }
   }
-  if (!userId) return null;
-  const row = await database("subscriptions")
-    .where({ user_id: userId, provider: "stripe" })
-    .whereIn("status", CLOUD_PICKUP_LIVE_STATUSES)
-    .andWhere((query) =>
-      query.where({ plan: CLOUD_PICKUP_PLAN }).orWhereRaw("raw->'metadata'->>'plan' = ?", [CLOUD_PICKUP_PLAN])
-    )
-    .orderBy("updated_at", "desc")
-    .first();
-  if (!row) return null;
-  const raw = row.raw && typeof row.raw === "object" ? row.raw : {};
-  return {
-    ...raw,
-    id: row.provider_subscription_id,
-    status: row.status,
-    customer: row.provider_customer_id || raw.customer || "",
-  };
+  if (userId) {
+    const rows = await database("subscriptions")
+      .where({ user_id: userId, provider: "stripe" })
+      .whereIn("status", CLOUD_PICKUP_LIVE_STATUSES)
+      .andWhere((query) =>
+        query.where({ plan: CLOUD_PICKUP_PLAN }).orWhereRaw("raw->'metadata'->>'plan' = ?", [CLOUD_PICKUP_PLAN])
+      )
+      .orderBy("updated_at", "desc");
+    for (const row of rows) {
+      const id = String(row.provider_subscription_id || "");
+      if (!id || listedIds.has(id)) continue;
+      const raw = row.raw && typeof row.raw === "object" ? row.raw : {};
+      live.set(id, { ...raw, id, status: row.status, customer: row.provider_customer_id || raw.customer || "" });
+    }
+  }
+  return [...live.values()];
 }
 
 /**
