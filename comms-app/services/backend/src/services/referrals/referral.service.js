@@ -113,6 +113,15 @@ export function isCloudPickupShareReward(row) {
   );
 }
 
+/** A queued Private Sync share: likewise earned by one paid invoice, not by a count of customers. */
+export function isSyncShareReward(row) {
+  const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
+  return (
+    normalizeProductSlug(row?.product_slug) === SYNC_SHARE_PRODUCT_SLUG &&
+    metadata.kind === "sync_share"
+  );
+}
+
 export const REFERRAL_REQUIRED_PRODUCT_SLUG = "tabforge";
 const REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS = [
   REFERRAL_REQUIRED_PRODUCT_SLUG,

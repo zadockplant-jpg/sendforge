@@ -15,6 +15,7 @@ import {
   ensureReferralCodeForUser,
   hasReferralProgramEligibility,
   isCloudPickupShareReward,
+  isSyncShareReward,
   normalizeCashAppTag,
   rewardPayoutEligibility,
 } from "../services/referrals/referral.service.js";
@@ -72,8 +73,13 @@ const writeLimiter = createRateLimiter({ name: "admin-write", windowMs: 60 * 100
 function normalizeEmail(email) { return String(email || "").trim().toLowerCase(); }
 function normalizeSlug(slug) { return String(slug || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, ""); }
 function referralPayoutHoldDays(productSlug, explicitValue = null) {
-  const value = Number(explicitValue);
-  if (Number.isInteger(value) && value >= 0 && value <= 365) return value;
+  // Only a value that was actually given counts. Number(null) is 0, which gave
+  // every reward without a programme row, the Private Sync and Cloud pickup
+  // shares among them, no review period at all.
+  if (explicitValue !== null && explicitValue !== undefined && explicitValue !== "") {
+    const value = Number(explicitValue);
+    if (Number.isInteger(value) && value >= 0 && value <= 365) return value;
+  }
   const envValue = Number(process.env.REFERRAL_PAYOUT_HOLD_DAYS || 10);
   if (Number.isInteger(envValue) && envValue >= 0 && envValue <= 365) return envValue;
   return normalizeSlug(productSlug) === "tabforge" ? 10 : 10;
@@ -610,9 +616,11 @@ async function applyRewardStatusChange(req, rewardId, data) {
           existing,
           program
         );
-        // A Cloud pickup share was earned by one paid invoice, not by a count
-        // of referred customers; the payout gate above is its qualification.
+        // A Private Sync or Cloud pickup share was earned by one paid invoice,
+        // not by a count of referred customers; the payout gate above is its
+        // qualification. Counting customers used to refuse every sync share.
         if (
+          !isSyncShareReward(existing) &&
           !isCloudPickupShareReward(existing) &&
           (!requiredPurchases || verifiedCount < requiredPurchases)
         ) {
