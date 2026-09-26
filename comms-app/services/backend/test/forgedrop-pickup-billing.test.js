@@ -44,9 +44,8 @@ const { db } = await import("../src/config/db.js");
 const { env } = await import("../src/config/env.js");
 const { issueCustomerAccessToken } = await import("../src/services/auth.service.js");
 const { requireAuth } = await import("../src/middleware/auth.js");
-const { grantProductEntitlement, hasProductEntitlement, listProductEntitlements } = await import(
-  "../src/services/entitlement.service.js"
-);
+const { grantProductEntitlement, hasProductEntitlement, listProductEntitlements, revokeProductEntitlement } =
+  await import("../src/services/entitlement.service.js");
 const { activateDevice } = await import("../src/services/deviceActivation.service.js");
 const { billingRouter, createCloudPickupCheckoutHandler } = await import("../src/routes/billing.routes.js");
 const { handleStripeEvent } = await import("../src/routes/stripe.webhooks.routes.js");
@@ -494,6 +493,47 @@ test("a tier whose price id is not set answers 503 plan_unavailable, and Stripe 
   } finally {
     process.env.STRIPE_PRICE_FORGEDROP_PICKUP_100GB = PRICES["100gb"];
   }
+});
+
+test("only a ForgeDrop owner can buy a plan: anyone else is forgedrop_required, before Stripe is asked anything", async () => {
+  useStripe();
+  const refused = {
+    status: 403,
+    body: { error: "forgedrop_required", message: "Cloud pickup is for ForgeDrop owners." },
+  };
+  const noah = await signUp("noah");
+  // Another product's licence is not ForgeDrop.
+  const rosa = await signUp("rosa", { owns: ["rose-colored-glasses"] });
+  // A ForgeDrop purchase that was taken back no longer counts.
+  const rex = await signUp("rex", { owns: ["forgedrop"] });
+  await revokeProductEntitlement(rex.id, "forgedrop");
+
+  // A price id nobody has looked up yet: had Stripe been asked about it
+  // before the ownership check, the lookup would be in the call log.
+  const saved = process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB;
+  try {
+    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB = "price_test_pickup_1tb_never_looked_up";
+    for (const person of [noah, rosa, rex]) {
+      for (const tier of ["100gb", "1tb"]) {
+        assert.deepEqual(await checkout(person, { tier }), refused, `${person.email} ${tier}`);
+      }
+    }
+    // The real route asks it too, ahead of its own Stripe key check.
+    assert.deepEqual(await checkout(noah, { tier: "1tb" }, "/v1/billing/forgedrop-pickup/checkout-session"), refused);
+  } finally {
+    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB = saved;
+  }
+  assert.deepEqual(stripe.state.calls, [], "no price lookup, no customer, no session");
+  for (const person of [noah, rosa, rex]) {
+    assert.equal((await db("users").where({ id: person.id }).first()).stripe_customer_id, null);
+    assert.equal((await db("billing_checkout_attempts").where({ user_id: person.id })).length, 0);
+  }
+
+  // Once the account owns ForgeDrop, the same request opens Checkout.
+  await grantProductEntitlement({ userId: noah.id, productSlug: "forgedrop", source: "test" });
+  const opened = await checkout(noah, { tier: "1tb" });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
+  assert.deepEqual(stripe.state.sessions.map(({ config }) => config.line_items), [[{ price: PRICES["1tb"], quantity: 1 }]]);
 });
 
 test("one plan per account: the same tier is already_subscribed, another tier is a switch in the billing portal", async () => {

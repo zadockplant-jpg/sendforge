@@ -9,7 +9,9 @@ import {
   getActivePlan,
   grantProductEntitlement,
   hasAnyProductEntitlement,
+  hasProductEntitlement,
 } from "../services/entitlement.service.js";
+import { licensedProduct } from "../services/licensedProducts.js";
 import {
   buildTabForgeProBundleCheckoutItems,
   buildTabForgeProBundleLineItems,
@@ -1478,6 +1480,9 @@ function cloudPickupAlreadySubscribed(res, heldTier) {
  *
  * ForgeDrop Cloud pickup: a monthly subscription on the tier's own Stripe
  * price (STRIPE_PRICE_FORGEDROP_PICKUP_*, see modules/forgedrop-pickup).
+ *  - 403 forgedrop_required: the account does not own ForgeDrop. Only the
+ *    desktop app can use a plan, so this is asked before anything else,
+ *    Stripe included.
  *  - 200 { ok, url, sessionId, reused, tier, checkout }: Stripe Checkout. The
  *    webhook grants the tier once it is paid.
  *  - 200 { ok, url, portal: true, tier, currentTier }: the account is on
@@ -1496,6 +1501,11 @@ export function createCloudPickupCheckoutHandler({
   getStripe: stripeClient = getStripe,
   environment = process.env,
 } = {}) {
+  // The ForgeDrop link's ownership check (modules/forgedrop-link/router.js).
+  const forgedrop = licensedProduct("forgedrop");
+  const ownsForgeDrop = (userId) =>
+    hasProductEntitlement(userId, forgedrop.entitlementSlug || forgedrop.slug);
+
   return async (req, res) => {
     const parsed = CloudPickupCheckoutSchema.safeParse(req.body || {});
     const tier = parsed.success ? cloudPickupTierByKey(parsed.data.tier) : null;
@@ -1503,18 +1513,26 @@ export function createCloudPickupCheckoutHandler({
       return res.status(400).json({ error: "invalid_input" });
     }
 
-    // A tier is on sale once the owner has set its Stripe price id.
-    const priceId = cloudPickupPriceId(tier, environment);
-    if (!priceId) {
-      return res.status(503).json({ error: "plan_unavailable", tier: tier.key });
-    }
-
-    const stripe = stripeClient();
-    if (!stripe) {
-      return res.status(500).json({ error: "stripe_not_configured" });
-    }
-
     try {
+      // Only the ForgeDrop desktop app can use a plan.
+      if (!(await ownsForgeDrop(req.user.sub))) {
+        return res.status(403).json({
+          error: "forgedrop_required",
+          message: "Cloud pickup is for ForgeDrop owners.",
+        });
+      }
+
+      // A tier is on sale once the owner has set its Stripe price id.
+      const priceId = cloudPickupPriceId(tier, environment);
+      if (!priceId) {
+        return res.status(503).json({ error: "plan_unavailable", tier: tier.key });
+      }
+
+      const stripe = stripeClient();
+      if (!stripe) {
+        return res.status(500).json({ error: "stripe_not_configured" });
+      }
+
       // A price Stripe does not know under this key (one made in test mode,
       // say) would only fail inside Checkout.
       if (!(await usableStripePriceId(stripe, priceId))) {
