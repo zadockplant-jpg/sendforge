@@ -52,6 +52,11 @@ import {
 
 export const stripeWebhooksRouter = Router();
 
+// Every subscription the webhook looks up comes with its items' products, so
+// the catalog metadata a Checkout line put there (kind, slug,
+// entitlement_slug) can be read: it is what names a Cloud pickup tier.
+const SUBSCRIPTION_EXPAND = Object.freeze(["items.data.price.product"]);
+
 function getStripe() {
   if (!env.stripeSecretKey) return null;
   return new Stripe(env.stripeSecretKey);
@@ -442,7 +447,7 @@ async function handleAsyncCheckoutPaymentFailed(session, stripe) {
   let current;
   try {
     current = await stripe.subscriptions.retrieve(subscriptionId, {
-      expand: ["latest_invoice"],
+      expand: ["latest_invoice", ...SUBSCRIPTION_EXPAND],
     });
   } catch (error) {
     if (!isStripeResourceMissing(error)) throw error;
@@ -768,7 +773,8 @@ export async function handleCheckoutSessionCompleted(session, stripe) {
   // of order, and a replay can never resurrect a canceled subscription.
   if (subscriptionId) {
     const current = await stripe.subscriptions.retrieve(
-      subscriptionId
+      subscriptionId,
+      { expand: [...SUBSCRIPTION_EXPAND] }
     );
     await upsertStripeSubscription(current);
   }
@@ -829,7 +835,9 @@ async function handleStripeSubscriptionEvent(stripe, sub, deleted = false) {
   if (!subscriptionId) return;
 
   try {
-    const current = await stripe.subscriptions.retrieve(subscriptionId);
+    const current = await stripe.subscriptions.retrieve(subscriptionId, {
+      expand: [...SUBSCRIPTION_EXPAND],
+    });
     await upsertStripeSubscription(current);
   } catch (error) {
     if (!deleted) throw error;
@@ -936,7 +944,7 @@ async function handleInvoicePaymentFailed(invoice, stripe) {
   if (subscriptionId) {
     const subscription = await stripe.subscriptions.retrieve(
       subscriptionId,
-      { expand: ["latest_invoice"] }
+      { expand: ["latest_invoice", ...SUBSCRIPTION_EXPAND] }
     );
     await upsertStripeSubscription(subscription);
   }

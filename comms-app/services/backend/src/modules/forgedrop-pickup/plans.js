@@ -8,9 +8,10 @@
  * the subscription is. An account holding more than one (an upgrade whose
  * old tier has not been revoked yet) gets the biggest.
  *
- * The Stripe subscription grants them (billing.js): each tier is one monthly
- * Stripe price, whose id the owner sets under the tier's `stripePriceEnv`.
- * A tier whose price id is not set is not on sale.
+ * Each tier is sold as a product of the shared catalog checkout, under its
+ * slug, at `monthlyCents` a month (billing.js builds the catalog entries from
+ * this table), and the Stripe subscription webhook grants it. There are no
+ * Stripe Price objects to set up: Checkout makes the monthly price inline.
  *
  * Sizes are binary, as Windows shows them, so a "100 GB" plan holds what
  * Explorer calls 100 GB. The table below is the one place to change that.
@@ -21,13 +22,13 @@ export const TB = 2 ** 40;
 
 export const CLOUD_PICKUP_TIERS = Object.freeze([
   Object.freeze({
-    // What the website asks for: POST /v1/billing/forgedrop-pickup/checkout-session { tier }.
+    // The short name kept in the subscription's metadata.
     key: "100gb",
+    // The catalog product slug and the entitlement slug alike.
     slug: "forgedrop-cloud-pickup-100gb",
     label: "100 GB",
     monthlyCents: 500,
     bytes: 100 * GB,
-    stripePriceEnv: "STRIPE_PRICE_FORGEDROP_PICKUP_100GB",
   }),
   Object.freeze({
     key: "250gb",
@@ -35,7 +36,6 @@ export const CLOUD_PICKUP_TIERS = Object.freeze([
     label: "250 GB",
     monthlyCents: 1000,
     bytes: 250 * GB,
-    stripePriceEnv: "STRIPE_PRICE_FORGEDROP_PICKUP_250GB",
   }),
   Object.freeze({
     key: "500gb",
@@ -43,7 +43,6 @@ export const CLOUD_PICKUP_TIERS = Object.freeze([
     label: "500 GB",
     monthlyCents: 1500,
     bytes: 500 * GB,
-    stripePriceEnv: "STRIPE_PRICE_FORGEDROP_PICKUP_500GB",
   }),
   Object.freeze({
     key: "1tb",
@@ -51,7 +50,6 @@ export const CLOUD_PICKUP_TIERS = Object.freeze([
     label: "1 TB",
     monthlyCents: 2500,
     bytes: 1 * TB,
-    stripePriceEnv: "STRIPE_PRICE_FORGEDROP_PICKUP_1TB",
   }),
 ]);
 
@@ -62,7 +60,7 @@ export function cloudPickupTier(slug) {
   return BY_SLUG.get(String(slug || "").trim().toLowerCase()) || null;
 }
 
-/** The tier the website names: "100gb", "250gb", "500gb" or "1tb". */
+/** The tier by its short name: "100gb", "250gb", "500gb" or "1tb". */
 export function cloudPickupTierByKey(key) {
   return BY_KEY.get(String(key || "").trim().toLowerCase()) || null;
 }
@@ -106,29 +104,4 @@ export async function bytesSentThisMonth(db, userId, at) {
     .sum({ bytes: "total_bytes" })
     .first();
   return Number(row?.bytes || 0);
-}
-
-// ---------------------------------------------------------------------------
-// Stripe price ids <-> tiers.
-//
-// The owner creates the four monthly prices in Stripe and sets each id in
-// Render under its tier's `stripePriceEnv` name. Both are read per call, so
-// nothing here is fixed at import:
-//   - the checkout (routes/billing.routes.js) sells a tier only once its
-//     price id is set (503 plan_unavailable before that);
-//   - the subscription webhook (billing.js) grants the tier of the price the
-//     subscription is on now, which after a switch in Stripe's billing portal
-//     is the new one, and revokes the other three;
-//   - a paid invoice on one of these prices pays the affiliate share.
-// ---------------------------------------------------------------------------
-
-/** The tier's Stripe price id, or "" while the owner has not set it. */
-export function cloudPickupPriceId(tier, env = process.env) {
-  return tier?.stripePriceEnv ? String(env?.[tier.stripePriceEnv] || "").trim() : "";
-}
-
-export function tierForStripePrice(priceId, env = process.env) {
-  const id = String(priceId || "").trim();
-  if (!id) return null;
-  return CLOUD_PICKUP_TIERS.find((tier) => cloudPickupPriceId(tier, env) === id) || null;
 }

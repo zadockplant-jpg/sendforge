@@ -1,13 +1,15 @@
-// ForgeDrop Cloud pickup billing: the checkout for the four monthly plans, the
-// subscription webhook that grants, moves and removes a plan, and the 5% share
-// of every paid invoice for the ForgeDrop affiliate who brought the customer.
+// ForgeDrop Cloud pickup billing: the four monthly plans sold through the
+// shared catalog checkout, the subscription webhook that grants, moves and
+// removes a plan, and the 5% share of every paid invoice for the ForgeDrop
+// affiliate who brought the customer.
 //
-// Runs the real checkout handler, the real Stripe event handling, the real
+// Runs the real catalog checkout, the real Stripe event handling, the real
 // referral service and the real Cloud pickup router against an in-process
 // Postgres (PGlite). Stripe is a stand-in that answers from memory, so nothing
-// here reaches Stripe. The allowance is checked through the pickup router
-// itself, with a desktop signed in by a real licence and an R2 that only
-// hands out links.
+// here reaches Stripe; like Stripe, it hands out a subscription item's product
+// as an id unless asked to expand it. The allowance is checked through the
+// pickup router itself, with a desktop signed in by a real licence and an R2
+// that only hands out links.
 
 import assert from "node:assert/strict";
 import crypto, { randomUUID } from "node:crypto";
@@ -18,27 +20,23 @@ import express from "express";
 
 import { attachPglite } from "./helpers/pglite-db.js";
 
-const PRICES = Object.freeze({
-  "100gb": "price_test_pickup_100gb",
-  "250gb": "price_test_pickup_250gb",
-  "500gb": "price_test_pickup_500gb",
-  "1tb": "price_test_pickup_1tb",
-});
-
 // env.js reads the environment when it is first imported, so everything that
-// touches it is imported after these are set. The price ids are read per
-// request, so a test can take one away and put it back. No Stripe key, ever:
-// the real router must stop at stripe_not_configured, never reach Stripe.
-delete process.env.STRIPE_SECRET_KEY;
-delete process.env.STRIPE_WEBHOOK_SECRET;
+// touches it is imported after these are set. No Stripe key and no price ids,
+// ever: the real router must stop at stripe_not_configured, and Cloud pickup
+// never needs a Stripe Price object.
+for (const name of [
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "STRIPE_PRICE_TABFORGE",
+  "STRIPE_PRICE_TABFORGE_SYNC",
+  "STRIPE_PRICE_FORGEDROP",
+]) {
+  delete process.env[name];
+}
 process.env.JWT_SECRET ||= "forgedrop-pickup-billing-test-secret-at-least-32-bytes";
 process.env.LICENSE_SIGNING_KEY = crypto.randomBytes(32).toString("base64");
 process.env.LICENSE_SIGNING_KID = "fd-test";
 process.env.PUBLIC_SITE_URL = "https://sendforge.test";
-process.env.STRIPE_PRICE_FORGEDROP_PICKUP_100GB = PRICES["100gb"];
-process.env.STRIPE_PRICE_FORGEDROP_PICKUP_250GB = PRICES["250gb"];
-process.env.STRIPE_PRICE_FORGEDROP_PICKUP_500GB = PRICES["500gb"];
-process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB = PRICES["1tb"];
 
 const { db } = await import("../src/config/db.js");
 const { env } = await import("../src/config/env.js");
@@ -47,9 +45,11 @@ const { requireAuth } = await import("../src/middleware/auth.js");
 const { grantProductEntitlement, hasProductEntitlement, listProductEntitlements, revokeProductEntitlement } =
   await import("../src/services/entitlement.service.js");
 const { activateDevice } = await import("../src/services/deviceActivation.service.js");
-const { billingRouter, createCloudPickupCheckoutHandler } = await import("../src/routes/billing.routes.js");
+const { billingRouter, createCatalogCheckoutHandler } = await import("../src/routes/billing.routes.js");
 const { handleStripeEvent } = await import("../src/routes/stripe.webhooks.routes.js");
-const { CLOUD_PICKUP_TIERS, GB, tierFromEntitlements } = await import("../src/modules/forgedrop-pickup/plans.js");
+const { CLOUD_PICKUP_TIERS, cloudPickupTierByKey, GB, tierFromEntitlements } = await import(
+  "../src/modules/forgedrop-pickup/plans.js"
+);
 const { cloudPickupInvoice, isCloudPickupSubscription } = await import("../src/modules/forgedrop-pickup/billing.js");
 const { createForgeDropPickupRouter } = await import("../src/modules/forgedrop-pickup/router.js");
 const {
@@ -67,10 +67,26 @@ const src = (rel) => readFile(new URL(rel, import.meta.url), "utf8");
 
 const TIER_SLUGS = CLOUD_PICKUP_TIERS.map((tier) => tier.slug);
 const SITE = "https://sendforge.test";
-const SUCCESS_URL = `${SITE}/account/index.html?purchase_context=forgedrop-cloud-pickup&checkout=success&session_id={CHECKOUT_SESSION_ID}#forgedrop`;
-const SWITCHED_URL = `${SITE}/account/index.html?purchase_context=forgedrop-cloud-pickup&checkout=plan_changed#forgedrop`;
+const CATALOG_ROUTE = "/v1/billing/catalog/checkout-session";
+// The catalog checkout's own return URLs, as it builds them for every product.
+const SUCCESS_URL = `${SITE}/account/index.html?purchase_context=forgedrop-cloud-pickup&checkout=success&session_id=%7BCHECKOUT_SESSION_ID%7D#forgedrop`;
 const CANCEL_URL = `${SITE}/products/forgedrop/index.html?checkout=cancelled#cloud-pickup`;
+const PORTAL_RETURN_URL = `${SITE}/products/forgedrop/index.html#cloud-pickup`;
 const DAY = 24 * 60 * 60 * 1000;
+const tierOf = (key) => cloudPickupTierByKey(key);
+
+/** The line the catalog checkout builds for a tier: an inline monthly price on an inline product. */
+function catalogLine(tier) {
+  return {
+    currency: "usd",
+    unit_amount: tier.monthlyCents,
+    recurring: { interval: "month" },
+    product_data: {
+      name: `ForgeDrop Cloud pickup — ${tier.label}`,
+      metadata: { kind: "subscription", slug: tier.slug, entitlement_slug: tier.slug },
+    },
+  };
+}
 
 // ------------------------------------------------------------ a stand-in Stripe
 
@@ -95,18 +111,40 @@ function fakeStripe() {
   const state = {
     calls: [],
     customers: new Map(),
+    products: new Map(),
     subscriptions: new Map(),
     sessions: [],
     portals: [],
-    // The customer portal's settings list no prices to switch to.
-    portalRefusesSwitch: false,
   };
   const called = (name, args) => state.calls.push([name, args]);
   const copy = (value) => structuredClone(value);
 
+  /** What Checkout makes of an inline price_data line: a product carrying its metadata, and a price on it. */
+  const priceFrom = (priceData) => {
+    const product = { id: next("prod_test"), object: "product", ...copy(priceData.product_data) };
+    state.products.set(product.id, product);
+    return {
+      id: next("price_test"),
+      object: "price",
+      product: product.id,
+      unit_amount: priceData.unit_amount,
+      recurring: copy(priceData.recurring),
+      metadata: {},
+    };
+  };
+
+  /** A subscription as Stripe returns it: each item's product an id, unless asked to expand it. */
+  const present = (subscription, expand = []) => {
+    const out = copy(subscription);
+    if (expand.includes("items.data.price.product")) {
+      for (const item of out.items.data) item.price.product = copy(state.products.get(item.price.product));
+    }
+    return out;
+  };
+
   return {
     state,
-    addSubscription({ customer, metadata = {}, price, status = "active" }) {
+    addSubscription({ customer, metadata = {}, priceData, status = "active" }) {
       const id = next("sub_test");
       const now = Math.floor(Date.now() / 1000);
       const subscription = {
@@ -119,21 +157,21 @@ function fakeStripe() {
         current_period_end: now + 30 * 86400,
         items: {
           object: "list",
-          data: [{ id: `si_${id}`, object: "subscription_item", quantity: 1, price: { id: price, object: "price", metadata: {} } }],
+          data: [{ id: `si_${id}`, object: "subscription_item", quantity: 1, price: priceFrom(priceData) }],
         },
       };
       state.subscriptions.set(id, subscription);
-      return copy(subscription);
+      return present(subscription);
     },
-    /** What Stripe holds for a subscription after the customer switched tier in the billing portal. */
-    setPrice(id, price) {
-      state.subscriptions.get(id).items.data[0].price = { id: price, object: "price", metadata: {} };
+    /** The item moved onto another catalog product, as the owner can do in Stripe's dashboard. */
+    moveTo(id, priceData) {
+      state.subscriptions.get(id).items.data[0].price = priceFrom(priceData);
     },
     setStatus(id, status) {
       state.subscriptions.get(id).status = status;
     },
     subscription(id) {
-      return copy(state.subscriptions.get(id));
+      return present(state.subscriptions.get(id));
     },
     customers: {
       async retrieve(id) {
@@ -156,19 +194,20 @@ function fakeStripe() {
     prices: {
       async retrieve(id) {
         called("prices.retrieve", id);
-        if (!Object.values(PRICES).includes(id)) throw missing("price", id);
-        return { id, object: "price", active: true, recurring: { interval: "month" } };
+        throw missing("price", id);
       },
     },
     subscriptions: {
       async list(params) {
         called("subscriptions.list", params);
-        return { data: [...state.subscriptions.values()].filter((sub) => sub.customer === params.customer).map(copy) };
+        return {
+          data: [...state.subscriptions.values()].filter((sub) => sub.customer === params.customer).map((sub) => present(sub)),
+        };
       },
-      async retrieve(id) {
-        called("subscriptions.retrieve", id);
+      async retrieve(id, params = {}) {
+        called("subscriptions.retrieve", [id, params]);
         if (!state.subscriptions.has(id)) throw missing("subscription", id);
-        return copy(state.subscriptions.get(id));
+        return present(state.subscriptions.get(id), params.expand || []);
       },
     },
     checkout: {
@@ -185,11 +224,6 @@ function fakeStripe() {
       sessions: {
         async create(params) {
           called("billingPortal.sessions.create", params);
-          if (params.flow_data && state.portalRefusesSwitch) {
-            throw stripeError(
-              "The price specified in flow_data.subscription_update_confirm.items[0].price is not in the configuration's features.subscription_update.products."
-            );
-          }
           const session = { id: next("bps_test"), url: `https://billing.stripe.test/p/session/${n}` };
           state.portals.push({ params: copy(params), url: session.url });
           return session;
@@ -222,7 +256,7 @@ before(async () => {
   await checkoutIntegrityUp(db);
   await pickupsUp(db);
 
-  // R2 as far as leaving a small link pickup goes: it only hands out links.
+  // R2 as far as leaving a link pickup goes: it only hands out links.
   const r2 = {
     presignPut: (key, size) => `https://r2.test/${key}?size=${size}`,
     presignUploadPart: (key, uploadId, part) => `https://r2.test/${key}?part=${part}`,
@@ -243,8 +277,9 @@ before(async () => {
   const app = express();
   app.use("/v1/forgedrop/pickup", pickupRouter);
   app.use(express.json());
-  app.post("/checkout", requireAuth, createCloudPickupCheckoutHandler({ getStripe: () => stripe }));
-  // The real router, with no Stripe key: the route is there, and says so.
+  // The catalog checkout the store calls, handed the stand-in Stripe.
+  app.post("/catalog", requireAuth, createCatalogCheckoutHandler({ getStripe: () => stripe }));
+  // The real router, with no Stripe key.
   app.use("/v1/billing", billingRouter);
   server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -292,7 +327,7 @@ async function referralCode(person, metadata = {}, status = "active") {
   return row;
 }
 
-async function checkout(person, body, path = "/checkout") {
+async function checkout(person, body, path = "/catalog") {
   const response = await fetch(`${origin}${path}`, {
     method: "POST",
     headers: {
@@ -310,13 +345,12 @@ const event = (type, object) => ({ id: `evt_test_${(events += 1)}`, type, data: 
 /** Stripe finishing a Checkout Session this backend opened: the subscription, and the event. */
 function completeCheckout(fake, sessionId) {
   const { config } = fake.state.sessions.find((session) => session.id === sessionId);
-  const price = config.line_items[0].price;
+  const priceData = config.line_items[0].price_data;
   const subscription = fake.addSubscription({
     customer: config.customer,
     metadata: config.subscription_data.metadata,
-    price,
+    priceData,
   });
-  const tier = CLOUD_PICKUP_TIERS.find((each) => PRICES[each.key] === price);
   return {
     subscription,
     completed: event("checkout.session.completed", {
@@ -327,22 +361,27 @@ function completeCheckout(fake, sessionId) {
       subscription: subscription.id,
       client_reference_id: config.client_reference_id,
       payment_status: "paid",
-      amount_total: tier.monthlyCents,
+      amount_total: priceData.unit_amount,
       metadata: config.metadata,
     }),
   };
 }
 
-/** A subscription bought and fulfilled, as the tests after the checkout ones need one. */
-async function subscribed(person, tierKey) {
-  const opened = await checkout(person, { tier: tierKey });
+/** A plan bought through the catalog and fulfilled, as the tests after the checkout ones need one. */
+async function subscribed(person, key) {
+  const opened = await checkout(person, { productSlug: tierOf(key).slug });
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
   const { subscription, completed } = completeCheckout(stripe, opened.body.sessionId);
   await handleStripeEvent(completed, stripe);
   return subscription;
 }
 
-function paidInvoice({ id, subscription, price, amountPaid, billingReason = "subscription_cycle" }) {
+/**
+ * A paid invoice as Stripe sends it to the webhook: the line's product is an
+ * id, and the line carries the subscription's metadata.
+ */
+function paidInvoice({ id, subscription, amountPaid, billingReason = "subscription_cycle" }) {
+  const item = subscription.items.data[0];
   return {
     id,
     object: "invoice",
@@ -354,7 +393,14 @@ function paidInvoice({ id, subscription, price, amountPaid, billingReason = "sub
     billing_reason: billingReason,
     lines: {
       object: "list",
-      data: [{ id: `il_${id}`, type: "subscription", price: { id: price, metadata: {} }, metadata: {} }],
+      data: [
+        {
+          id: `il_${id}`,
+          type: "subscription",
+          price: { id: item.price.id, product: item.price.product, metadata: {} },
+          metadata: { ...subscription.metadata },
+        },
+      ],
     },
   };
 }
@@ -380,21 +426,20 @@ async function shares(userId) {
 
 // ------------------------------------------------------------------ checkout
 
-test("each tier opens Stripe Checkout for a monthly subscription on its own price, with what the webhook needs", async () => {
+test("each tier is a catalog subscription at its monthly price, with the catalog's metadata and what the webhook needs", async () => {
   useStripe();
   for (const tier of CLOUD_PICKUP_TIERS) {
     const buyer = await signUp(`buyer-${tier.key}`, { owns: ["forgedrop"] });
-    const res = await checkout(buyer, { tier: tier.key });
+    const res = await checkout(buyer, { productSlug: tier.slug });
     assert.equal(res.status, 200, JSON.stringify(res.body));
 
     const { id, config, options } = stripe.state.sessions.at(-1);
     const customer = (await db("users").where({ id: buyer.id }).first()).stripe_customer_id;
     const item = {
       kind: "subscription",
-      slug: "forgedrop-cloud-pickup",
+      slug: tier.slug,
       displayName: `ForgeDrop Cloud pickup — ${tier.label}`,
       entitlementSlug: tier.slug,
-      tier: tier.key,
       unitAmountCents: tier.monthlyCents,
       quantity: 1,
     };
@@ -403,13 +448,14 @@ test("each tier opens Stripe Checkout for a monthly subscription on its own pric
       url: `https://checkout.stripe.test/c/pay/${id}`,
       sessionId: id,
       reused: false,
-      tier: tier.key,
       checkout: { items: [item] },
     });
 
     assert.equal(config.mode, "subscription");
-    assert.deepEqual(config.line_items, [{ price: PRICES[tier.key], quantity: 1 }], "the tier's own price, from its env var");
+    // The catalog's own inline monthly price: no Stripe Price object.
+    assert.deepEqual(config.line_items, [{ quantity: 1, price_data: catalogLine(tier) }]);
     assert.deepEqual(config.payment_method_types, ["card"]);
+    assert.equal(config.allow_promotion_codes, true);
     assert.ok(customer?.startsWith("cus_test_"), "the account's own Stripe customer");
     assert.equal(config.customer, customer);
     assert.equal(config.client_reference_id, buyer.id);
@@ -417,18 +463,21 @@ test("each tier opens Stripe Checkout for a monthly subscription on its own pric
     assert.equal(config.cancel_url, CANCEL_URL);
     assert.deepEqual(config.metadata, {
       user_id: buyer.id,
-      product_slug: "forgedrop-cloud-pickup",
+      product_slug: tier.slug,
       fulfillment_type: "multi_entitlement_cart",
       checkout_items: JSON.stringify([item]),
     });
-    assert.deepEqual(config.subscription_data.metadata, {
-      user_id: buyer.id,
-      product_slug: "forgedrop-cloud-pickup",
-      entitlement_slug: tier.slug,
-      plan: "forgedrop_cloud_pickup",
-      tier: tier.key,
-      fulfillment_type: "subscription_entitlement",
-      checkout_items: JSON.stringify([item]),
+    // Cloud pickup's own subscription metadata, never Private Sync's.
+    assert.deepEqual(config.subscription_data, {
+      metadata: {
+        user_id: buyer.id,
+        product_slug: tier.slug,
+        entitlement_slug: tier.slug,
+        plan: "forgedrop_cloud_pickup",
+        tier: tier.key,
+        fulfillment_type: "subscription_entitlement",
+        checkout_items: JSON.stringify([item]),
+      },
     });
     assert.equal(config.payment_method_collection, "always");
     assert.equal(
@@ -438,61 +487,23 @@ test("each tier opens Stripe Checkout for a monthly subscription on its own pric
     assert.match(options.idempotencyKey, /^tabforge-checkout-v4:[0-9a-f]{64}$/);
 
     const attempt = await db("billing_checkout_attempts").where({ stripe_checkout_session_id: id }).first();
-    assert.deepEqual([attempt.user_id, attempt.product_slug, attempt.status], [buyer.id, "forgedrop-cloud-pickup", "open"]);
+    assert.deepEqual([attempt.user_id, attempt.product_slug, attempt.status], [buyer.id, tier.slug, "open"]);
 
     // A second click on the same tier reopens the same session.
-    const again = await checkout(buyer, { tier: tier.key.toUpperCase() });
+    const again = await checkout(buyer, { productSlug: tier.slug.toUpperCase() });
     assert.deepEqual([again.body.sessionId, again.body.reused], [id, true]);
   }
   assert.equal(stripe.state.sessions.length, 4, "one Stripe session per tier, none for the repeats");
-  // "$5, $10, $15 and $25 a month for 100 GB, 250 GB, 500 GB and 1 TB sent"
   assert.deepEqual(
-    stripe.state.sessions.map(({ config }) => config.custom_text.submit.message.match(/at (\$\d+)\/month/)[1]),
-    ["$5", "$10", "$15", "$25"]
+    stripe.state.sessions.map(({ config }) => [config.line_items[0].price_data.unit_amount, config.line_items[0].price_data.product_data.name]),
+    [
+      [500, "ForgeDrop Cloud pickup — 100 GB"],
+      [1000, "ForgeDrop Cloud pickup — 250 GB"],
+      [1500, "ForgeDrop Cloud pickup — 500 GB"],
+      [2500, "ForgeDrop Cloud pickup — 1 TB"],
+    ]
   );
-});
-
-test("a tier whose price id is not set answers 503 plan_unavailable, and Stripe is not asked", async () => {
-  useStripe();
-  const kim = await signUp("kim", { owns: ["forgedrop"] });
-
-  const saved = process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB;
-  try {
-    delete process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB;
-    assert.deepEqual(await checkout(kim, { tier: "1tb" }), { status: 503, body: { error: "plan_unavailable", tier: "1tb" } });
-    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB = "   ";
-    assert.deepEqual(await checkout(kim, { tier: "1tb" }), { status: 503, body: { error: "plan_unavailable", tier: "1tb" } });
-  } finally {
-    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB = saved;
-  }
-  assert.deepEqual(stripe.state.calls, [], "no customer, no session");
-  assert.equal((await db("users").where({ id: kim.id }).first()).stripe_customer_id, null);
-
-  // A price id Stripe does not know under this key (made in test mode, say) is not on sale either.
-  const saved500 = process.env.STRIPE_PRICE_FORGEDROP_PICKUP_500GB;
-  try {
-    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_500GB = "price_made_under_the_test_key";
-    assert.deepEqual(await checkout(kim, { tier: "500gb" }), { status: 503, body: { error: "plan_unavailable", tier: "500gb" } });
-  } finally {
-    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_500GB = saved500;
-  }
-  assert.equal(stripe.state.sessions.length, 0);
-
-  // Only the four tiers, and only for someone signed in.
-  for (const body of [{}, { tier: "2tb" }, { tier: "forgedrop-cloud-pickup-100gb" }, { tier: 100 }]) {
-    assert.deepEqual(await checkout(kim, body), { status: 400, body: { error: "invalid_input" } }, JSON.stringify(body));
-  }
-  assert.equal((await checkout(null, { tier: "100gb" })).status, 401);
-
-  // The real billing router carries the route: without a Stripe key it gets as far as Stripe.
-  const path = "/v1/billing/forgedrop-pickup/checkout-session";
-  assert.deepEqual(await checkout(kim, { tier: "100gb" }, path), { status: 500, body: { error: "stripe_not_configured" } });
-  delete process.env.STRIPE_PRICE_FORGEDROP_PICKUP_100GB;
-  try {
-    assert.deepEqual(await checkout(kim, { tier: "100gb" }, path), { status: 503, body: { error: "plan_unavailable", tier: "100gb" } });
-  } finally {
-    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_100GB = PRICES["100gb"];
-  }
+  assert.deepEqual(stripe.state.calls.filter(([name]) => name === "prices.retrieve"), [], "no Stripe Price is ever looked up");
 });
 
 test("only a ForgeDrop owner can buy a plan: anyone else is forgedrop_required, before Stripe is asked anything", async () => {
@@ -508,84 +519,71 @@ test("only a ForgeDrop owner can buy a plan: anyone else is forgedrop_required, 
   const rex = await signUp("rex", { owns: ["forgedrop"] });
   await revokeProductEntitlement(rex.id, "forgedrop");
 
-  // A price id nobody has looked up yet: had Stripe been asked about it
-  // before the ownership check, the lookup would be in the call log.
-  const saved = process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB;
-  try {
-    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB = "price_test_pickup_1tb_never_looked_up";
-    for (const person of [noah, rosa, rex]) {
-      for (const tier of ["100gb", "1tb"]) {
-        assert.deepEqual(await checkout(person, { tier }), refused, `${person.email} ${tier}`);
-      }
+  for (const person of [noah, rosa, rex]) {
+    for (const tier of CLOUD_PICKUP_TIERS) {
+      assert.deepEqual(await checkout(person, { productSlug: tier.slug }), refused, `${person.email} ${tier.key}`);
     }
-    // The real route asks it too, ahead of its own Stripe key check.
-    assert.deepEqual(await checkout(noah, { tier: "1tb" }, "/v1/billing/forgedrop-pickup/checkout-session"), refused);
-  } finally {
-    process.env.STRIPE_PRICE_FORGEDROP_PICKUP_1TB = saved;
   }
-  assert.deepEqual(stripe.state.calls, [], "no price lookup, no customer, no session");
+  // The real route asks it too, ahead of its own Stripe key check.
+  assert.deepEqual(await checkout(noah, { productSlug: "forgedrop-cloud-pickup-1tb" }, CATALOG_ROUTE), refused);
+  assert.deepEqual(stripe.state.calls, [], "no customer, no subscription lookup, no session");
   for (const person of [noah, rosa, rex]) {
     assert.equal((await db("users").where({ id: person.id }).first()).stripe_customer_id, null);
     assert.equal((await db("billing_checkout_attempts").where({ user_id: person.id })).length, 0);
   }
 
+  // An owner gets as far as Stripe on the real route, which has no key here.
+  const kim = await signUp("kim", { owns: ["forgedrop"] });
+  assert.deepEqual(await checkout(kim, { productSlug: "forgedrop-cloud-pickup-1tb" }, CATALOG_ROUTE), {
+    status: 500,
+    body: { error: "stripe_not_configured" },
+  });
+  // Only the four tiers, one at a time, for someone signed in.
+  assert.deepEqual(await checkout(kim, { productSlug: "forgedrop-cloud-pickup-2tb" }), { status: 404, body: { error: "unknown_product" } });
+  assert.deepEqual(await checkout(kim, { productSlug: "forgedrop-cloud-pickup-100gb", quantity: 2 }), {
+    status: 400,
+    body: { error: "invalid_quantity" },
+  });
+  assert.equal((await checkout(null, { productSlug: "forgedrop-cloud-pickup-100gb" })).status, 401);
+
   // Once the account owns ForgeDrop, the same request opens Checkout.
   await grantProductEntitlement({ userId: noah.id, productSlug: "forgedrop", source: "test" });
-  const opened = await checkout(noah, { tier: "1tb" });
+  const opened = await checkout(noah, { productSlug: "forgedrop-cloud-pickup-1tb" });
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
-  assert.deepEqual(stripe.state.sessions.map(({ config }) => config.line_items), [[{ price: PRICES["1tb"], quantity: 1 }]]);
+  assert.deepEqual(stripe.state.sessions.map(({ config }) => config.line_items[0].price_data.unit_amount), [2500]);
 });
 
-test("one plan per account: the same tier is already_subscribed, another tier is a switch in the billing portal", async () => {
+test("one plan per account: the same tier is already_subscribed, another tier opens the billing portal", async () => {
   useStripe();
   const ray = await signUp("ray", { owns: ["forgedrop"] });
-  const opened = await checkout(ray, { tier: "100gb" });
+  const opened = await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" });
   // Paid, and no webhook yet: Stripe's own list of the customer's subscriptions still counts.
   const { subscription, completed } = completeCheckout(stripe, opened.body.sessionId);
   const customer = subscription.customer;
   const sessionsBefore = stripe.state.sessions.length;
 
-  const same = await checkout(ray, { tier: "100gb" });
-  assert.deepEqual(same, {
+  assert.deepEqual(await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" }), {
     status: 409,
     body: {
       error: "already_subscribed",
-      tier: "100gb",
+      productSlug: "forgedrop-cloud-pickup-100gb",
       message: "This account already has Cloud pickup 100 GB. Manage it from Account.",
     },
   });
 
-  const upgrade = await checkout(ray, { tier: "1tb" });
+  const other = await checkout(ray, { productSlug: "forgedrop-cloud-pickup-1tb" });
   const portal = stripe.state.portals.at(-1);
-  assert.deepEqual(upgrade, {
+  assert.deepEqual(other, {
     status: 200,
-    body: { ok: true, url: portal.url, portal: true, tier: "1tb", currentTier: "100gb" },
-  });
-  assert.deepEqual(portal.params, {
-    customer,
-    return_url: CANCEL_URL,
-    flow_data: {
-      type: "subscription_update_confirm",
-      subscription_update_confirm: {
-        subscription: subscription.id,
-        items: [{ id: `si_${subscription.id}`, price: PRICES["1tb"], quantity: 1 }],
-      },
-      after_completion: { type: "redirect", redirect: { return_url: SWITCHED_URL } },
+    body: {
+      ok: true,
+      url: portal.url,
+      portal: true,
+      productSlug: "forgedrop-cloud-pickup-1tb",
+      currentProductSlug: "forgedrop-cloud-pickup-100gb",
     },
   });
-
-  // Until the portal's settings list the four prices, Stripe refuses that deep
-  // link, and the portal's front page opens instead.
-  stripe.state.portalRefusesSwitch = true;
-  const fallback = await checkout(ray, { tier: "500gb" });
-  assert.deepEqual(fallback.body, {
-    ok: true,
-    url: stripe.state.portals.at(-1).url,
-    portal: true,
-    tier: "500gb",
-    currentTier: "100gb",
-  });
-  assert.deepEqual(stripe.state.portals.at(-1).params, { customer, return_url: CANCEL_URL });
+  assert.deepEqual(portal.params, { customer, return_url: PORTAL_RETURN_URL });
   assert.equal(stripe.state.sessions.length, sessionsBefore, "never a second Checkout");
 
   // Once the webhook has run, a subscription under a Stripe customer the
@@ -593,23 +591,24 @@ test("one plan per account: the same tier is already_subscribed, another tier is
   await handleStripeEvent(completed, stripe);
   const replacement = await stripe.customers.create({ email: ray.email });
   await db("users").where({ id: ray.id }).update({ stripe_customer_id: replacement.id });
-  assert.equal((await checkout(ray, { tier: "100gb" })).body.error, "already_subscribed");
-  const elsewhere = await checkout(ray, { tier: "250gb" });
-  assert.deepEqual([elsewhere.body.portal, elsewhere.body.currentTier], [true, "100gb"]);
-  assert.deepEqual(stripe.state.portals.at(-1).params, { customer: replacement.id, return_url: CANCEL_URL });
+  assert.equal((await checkout(ray, { productSlug: "forgedrop-cloud-pickup-100gb" })).body.error, "already_subscribed");
+  const elsewhere = await checkout(ray, { productSlug: "forgedrop-cloud-pickup-250gb" });
+  assert.deepEqual([elsewhere.body.portal, elsewhere.body.currentProductSlug], [true, "forgedrop-cloud-pickup-100gb"]);
+  assert.deepEqual(stripe.state.portals.at(-1).params, { customer: replacement.id, return_url: PORTAL_RETURN_URL });
+  assert.equal(stripe.state.sessions.length, sessionsBefore);
 
   // A tier granted by hand is not bought again; another tier still can be.
   const hal = await signUp("hal", { owns: ["forgedrop", "forgedrop-cloud-pickup-250gb"] });
-  assert.equal((await checkout(hal, { tier: "250gb" })).body.error, "already_subscribed");
-  assert.equal((await checkout(hal, { tier: "1tb" })).status, 200);
+  assert.equal((await checkout(hal, { productSlug: "forgedrop-cloud-pickup-250gb" })).body.error, "already_subscribed");
+  assert.equal((await checkout(hal, { productSlug: "forgedrop-cloud-pickup-1tb" })).status, 200);
 });
 
 // ------------------------------------------------------------------ webhooks
 
-test("the webhook grants the tier that is paid for, follows a switch, and takes the plan away when it ends", async () => {
+test("the webhook grants the tier its item's product names, follows it, and takes the plan away when it ends", async () => {
   useStripe();
   const pat = await signUp("pat", { owns: ["forgedrop"] });
-  const opened = await checkout(pat, { tier: "100gb" });
+  const opened = await checkout(pat, { productSlug: "forgedrop-cloud-pickup-100gb" });
   const { subscription, completed } = completeCheckout(stripe, opened.body.sessionId);
   const id = subscription.id;
   const sourceRef = `subscription:${id}:forgedrop-cloud-pickup`;
@@ -622,8 +621,8 @@ test("the webhook grants the tier that is paid for, follows a switch, and takes 
   const plan = await db("product_entitlements").where({ user_id: pat.id, product_slug: "forgedrop-cloud-pickup-100gb" }).first();
   assert.deepEqual([plan.status, plan.source, plan.source_ref], ["active", "stripe_subscription", sourceRef]);
   assert.deepEqual(
-    [plan.metadata.subscription_id, plan.metadata.cloud_pickup_tier, plan.metadata.monthly_bytes, plan.metadata.stripe_price_id],
-    [id, "100gb", 100 * GB, PRICES["100gb"]]
+    [plan.metadata.subscription_id, plan.metadata.cloud_pickup_tier, plan.metadata.monthly_bytes],
+    [id, "100gb", 100 * GB]
   );
   assert.deepEqual(
     (await listProductEntitlements(pat.id)).map((row) => row.product_slug).sort(),
@@ -635,9 +634,12 @@ test("the webhook grants the tier that is paid for, follows a switch, and takes 
   assert.equal((await db("billing_checkout_attempts").where({ stripe_checkout_session_id: opened.body.sessionId }).first()).status, "completed");
   assert.equal(await heldTier(pat.id), "100gb");
 
-  // A switch in the billing portal changes the price; the plan follows the price.
-  stripe.setPrice(id, PRICES["500gb"]);
+  // The subscription's item moves to the 500 GB product, and only the item
+  // says so: the subscription's own metadata still reads 100 GB. The plan
+  // follows the product.
+  stripe.moveTo(id, catalogLine(tierOf("500gb")));
   await handleStripeEvent(event("customer.subscription.updated", stripe.subscription(id)), stripe);
+  assert.equal(stripe.subscription(id).metadata.entitlement_slug, "forgedrop-cloud-pickup-100gb");
   assert.deepEqual(await pickupPlans(pat.id), [
     ["forgedrop-cloud-pickup-100gb", "revoked"],
     ["forgedrop-cloud-pickup-500gb", "active"],
@@ -666,10 +668,6 @@ test("the webhook grants the tier that is paid for, follows a switch, and takes 
   stripe.setStatus(id, "unpaid");
   await handleStripeEvent(event("customer.subscription.updated", stripe.subscription(id)), stripe);
   assert.equal(await heldTier(pat.id), null);
-  assert.deepEqual(await pickupPlans(pat.id), [
-    ["forgedrop-cloud-pickup-100gb", "revoked"],
-    ["forgedrop-cloud-pickup-500gb", "revoked"],
-  ]);
 
   // Cancelled: gone, and a replay of an older event does not bring it back.
   stripe.setStatus(id, "active");
@@ -685,6 +683,11 @@ test("the webhook grants the tier that is paid for, follows a switch, and takes 
     ["forgedrop-cloud-pickup-500gb", "revoked"],
   ]);
   assert.equal((await db("subscriptions").where({ provider_subscription_id: id }).first()).status, "canceled");
+
+  // Every lookup the webhook made asked Stripe for the item's product.
+  const lookups = stripe.state.calls.filter(([name]) => name === "subscriptions.retrieve");
+  assert.ok(lookups.length >= 8);
+  for (const [, [, params]] of lookups) assert.ok(params.expand.includes("items.data.price.product"), JSON.stringify(params));
 
   // A deletion Stripe can no longer look up is taken at its word.
   const val = await signUp("val", { owns: ["forgedrop"] });
@@ -740,8 +743,8 @@ test("the pickup allowance sees the plan the webhook granted, and loses it when 
   const fits = await leave(1000);
   assert.equal(fits.status, 201, JSON.stringify(fits.body));
 
-  // Switched up to 1 TB in the portal: the allowance grows with it.
-  stripe.setPrice(sub.id, PRICES["1tb"]);
+  // Moved to the 1 TB product: the allowance grows with it.
+  stripe.moveTo(sub.id, catalogLine(tierOf("1tb")));
   await handleStripeEvent(event("customer.subscription.updated", stripe.subscription(sub.id)), stripe);
   assert.equal((await leave(250 * GB)).status, 201);
 
@@ -762,7 +765,7 @@ test("every paid Cloud pickup invoice pays the ForgeDrop affiliate 5%, once per 
   const sam = await signUp("sam", { owns: ["forgedrop"], referredBy: ada, code: adaCode });
   const sub = await subscribed(sam, "250gb");
 
-  const first = paidInvoice({ id: "in_sam_1", subscription: sub, price: PRICES["250gb"], amountPaid: 1000, billingReason: "subscription_create" });
+  const first = paidInvoice({ id: "in_sam_1", subscription: sub, amountPaid: 1000, billingReason: "subscription_create" });
   await handleStripeEvent(event("invoice.paid", first), stripe);
   await handleStripeEvent(event("invoice.paid", first), stripe);
   await handleStripeEvent(event("invoice.paid", first), stripe);
@@ -798,10 +801,10 @@ test("every paid Cloud pickup invoice pays the ForgeDrop affiliate 5%, once per 
     }
   );
 
-  // Each month is its own invoice; a switch to 1 TB pays 5% of $25; a free month pays nothing.
-  await handleStripeEvent(event("invoice.paid", paidInvoice({ id: "in_sam_2", subscription: sub, price: PRICES["250gb"], amountPaid: 1000 })), stripe);
-  await handleStripeEvent(event("invoice.paid", paidInvoice({ id: "in_sam_3", subscription: sub, price: PRICES["1tb"], amountPaid: 2500 })), stripe);
-  await handleStripeEvent(event("invoice.paid", paidInvoice({ id: "in_sam_4", subscription: sub, price: PRICES["1tb"], amountPaid: 0 })), stripe);
+  // Each month is its own invoice; $25 pays $1.25; a free month pays nothing.
+  await handleStripeEvent(event("invoice.paid", paidInvoice({ id: "in_sam_2", subscription: sub, amountPaid: 1000 })), stripe);
+  await handleStripeEvent(event("invoice.paid", paidInvoice({ id: "in_sam_3", subscription: sub, amountPaid: 2500 })), stripe);
+  await handleStripeEvent(event("invoice.paid", paidInvoice({ id: "in_sam_4", subscription: sub, amountPaid: 0 })), stripe);
   assert.deepEqual(await shares(ada.id), [
     ["cloud_pickup_share:in_sam_1", 50, "pending"],
     ["cloud_pickup_share:in_sam_2", 50, "pending"],
@@ -817,13 +820,18 @@ test("every paid Cloud pickup invoice pays the ForgeDrop affiliate 5%, once per 
   // the milestone count does not apply to a share of one invoice.
   assert.equal(await rewardPayoutEligibility(ada.id, "forgedrop-cloud-pickup"), true);
   assert.equal(isCloudPickupShareReward(row), true);
-  assert.equal(isCloudPickupShareReward({ ...row, metadata: { kind: "sync_share" } }), false);
 
-  // An invoice Stripe describes only by the subscription's metadata still counts.
-  const described = paidInvoice({ id: "in_sam_5", subscription: sub, price: "price_not_one_of_ours", amountPaid: 1500 });
+  // An invoice Stripe describes only in its subscription details still counts,
+  // and a line whose product came expanded is read from the product.
+  const described = paidInvoice({ id: "in_sam_5", subscription: sub, amountPaid: 1500 });
+  described.lines.data[0].metadata = {};
   described.subscription_details = { metadata: { plan: "forgedrop_cloud_pickup", tier: "500gb" } };
   await handleStripeEvent(event("invoice.paid", described), stripe);
   assert.deepEqual((await shares(ada.id)).at(-1), ["cloud_pickup_share:in_sam_5", 75, "pending"]);
+  assert.equal(
+    cloudPickupInvoice({ lines: { data: [{ price: { product: { metadata: catalogLine(tierOf("1tb")).product_data.metadata } } }] } }).tier.key,
+    "1tb"
+  );
 });
 
 test("no share for a referrer below the ForgeDrop affiliate level", async () => {
@@ -844,7 +852,7 @@ test("no share for a referrer below the ForgeDrop affiliate level", async () => 
   for (const { person, code } of [owner, pro, zeroed, retired]) {
     const customer = await signUp(`customer-of-${person.email.split("@")[0]}`, { owns: ["forgedrop"], referredBy: person, code });
     const sub = await subscribed(customer, "100gb");
-    await handleStripeEvent(event("invoice.paid", paidInvoice({ id: `in_${sub.id}`, subscription: sub, price: PRICES["100gb"], amountPaid: 500 })), stripe);
+    await handleStripeEvent(event("invoice.paid", paidInvoice({ id: `in_${sub.id}`, subscription: sub, amountPaid: 500 })), stripe);
     assert.deepEqual(await shares(person.id), [], person.email);
     assert.equal(await rewardPayoutEligibility(person.id, "forgedrop-cloud-pickup"), false, person.email);
     assert.deepEqual(
@@ -878,7 +886,25 @@ test("no share for a referrer below the ForgeDrop affiliate level", async () => 
 test("Private Sync, Romancing the Stone and one-off purchases go on as before", async () => {
   useStripe();
 
-  // Private Sync: its own entitlement, its own 5% for a Pro-owning referrer, no Cloud pickup.
+  // The catalog still sells Private Sync its own way: Pro owners only, with its own words and metadata.
+  const nopro = await signUp("no-pro");
+  assert.deepEqual(await checkout(nopro, { productSlug: "tabforge-collections-subscription" }), {
+    status: 403,
+    body: {
+      error: "tabforge_pro_required",
+      message: "Private Sync can be re-subscribed from the account of an existing TabForge Pro owner.",
+    },
+  });
+  const renewer = await signUp("renewer", { owns: ["tabforge"] });
+  const resubscribe = await checkout(renewer, { productSlug: "tabforge-collections-subscription" });
+  assert.equal(resubscribe.status, 200, JSON.stringify(resubscribe.body));
+  const syncConfig = stripe.state.sessions.at(-1).config;
+  assert.equal(syncConfig.subscription_data.metadata.plan, "tabforge_private_sync");
+  assert.equal(syncConfig.subscription_data.metadata.tier, undefined);
+  assert.equal(syncConfig.line_items[0].price_data.product_data.name, "TabForge Private Sync");
+  assert.match(syncConfig.custom_text.submit.message, /Private Sync renews automatically at \$5\/month/);
+
+  // Private Sync's webhook: its own entitlement, its own 5% for a Pro-owning referrer, no Cloud pickup.
   const pro = await signUp("sync-referrer", { owns: ["tabforge"], cashApp: "$syncref" });
   const proCode = await referralCode(pro, { affiliate: true });
   const syncer = await signUp("syncer", { owns: ["tabforge"], referredBy: pro, code: proCode });
@@ -886,7 +912,7 @@ test("Private Sync, Romancing the Stone and one-off purchases go on as before", 
   await db("users").where({ id: syncer.id }).update({ stripe_customer_id: customer });
   const sync = stripe.addSubscription({
     customer,
-    price: "price_test_tabforge_sync",
+    priceData: { currency: "usd", unit_amount: 500, recurring: { interval: "month" }, product_data: { name: "TabForge Private Sync" } },
     metadata: {
       user_id: syncer.id,
       product_slug: "tabforge-collections-subscription",
@@ -914,14 +940,13 @@ test("Private Sync, Romancing the Stone and one-off purchases go on as before", 
     status: "paid",
     amount_paid: 500,
     billing_reason: "subscription_cycle",
-    lines: { data: [{ price: { id: "price_test_tabforge_sync", metadata: {} }, description: "1 × TabForge Private Sync (at $5.00 / month)" }] },
+    lines: { data: [{ price: { id: sync.items.data[0].price.id, product: sync.items.data[0].price.product, metadata: {} }, description: "1 × TabForge Private Sync (at $5.00 / month)" }] },
   };
   assert.equal(cloudPickupInvoice(syncInvoice), null);
   await handleStripeEvent(event("invoice.paid", syncInvoice), stripe);
   await handleStripeEvent(event("invoice.paid", syncInvoice), stripe);
-  const proRewards = await db("reward_queue").where({ user_id: pro.id });
   assert.deepEqual(
-    proRewards.map((row) => [row.product_slug, row.reward_key, row.reward_amount_cents]),
+    (await db("reward_queue").where({ user_id: pro.id })).map((row) => [row.product_slug, row.reward_key, row.reward_amount_cents]),
     [["tabforge-subscription", "sync_share:in_sync_1", 25]],
     "the Private Sync share, once, and no Cloud pickup share"
   );
@@ -937,7 +962,7 @@ test("Private Sync, Romancing the Stone and one-off purchases go on as before", 
   const rae = await signUp("rae");
   const rts = stripe.addSubscription({
     customer: "cus_test_rae",
-    price: "price_test_rts",
+    priceData: { currency: "usd", unit_amount: 500, recurring: { interval: "month" }, product_data: { name: "Romancing the Stone subscription" } },
     status: "trialing",
     metadata: { user_id: rae.id, plan: "rts_subscription", product_slug: "romancing-the-stone", entitlement_slug: "romancing-the-stone-subscription" },
   });
@@ -980,9 +1005,9 @@ test("Private Sync, Romancing the Stone and one-off purchases go on as before", 
       amount_total: 500,
       metadata: {
         user_id: eve.id,
-        product_slug: "forgedrop-cloud-pickup",
+        product_slug: "forgedrop-cloud-pickup-100gb",
         fulfillment_type: "multi_entitlement_cart",
-        checkout_items: JSON.stringify([{ kind: "subscription", slug: "forgedrop-cloud-pickup", entitlementSlug: "forgedrop-cloud-pickup-100gb" }]),
+        checkout_items: JSON.stringify([{ kind: "subscription", slug: "forgedrop-cloud-pickup-100gb", entitlementSlug: "forgedrop-cloud-pickup-100gb" }]),
       },
     }),
     {}
@@ -1000,10 +1025,10 @@ test("the webhook still checks Stripe's signature before it handles anything, an
   );
   assert.match(webhook, /recordCloudPickupShare\(\{\s*subscriberUserId: user\.id,\s*invoiceRef: String\(invoice\.id \|\| ""\)/);
 
-  // Payout approval: the gate (rewardPayoutEligibility) still applies; only
-  // the purchase-count check is skipped, and only for a Cloud pickup share.
+  // Payout approval: the gate (rewardPayoutEligibility) still applies, and a
+  // Cloud pickup share is spared only the count of referred customers.
   const admin = await src("../src/routes/admin.routes.js");
   const approval = admin.slice(admin.indexOf("async function applyRewardStatusChange"));
-  assert.ok(approval.indexOf("rewardPayoutEligibility(") < approval.indexOf("!isCloudPickupShareReward(existing) &&"));
-  assert.match(approval, /!isCloudPickupShareReward\(existing\) &&\s*\(!requiredPurchases \|\| verifiedCount < requiredPurchases\)/);
+  assert.ok(approval.indexOf("rewardPayoutEligibility(") > 0);
+  assert.ok(approval.indexOf("rewardPayoutEligibility(") < approval.indexOf("isCloudPickupShareReward(existing)"));
 });

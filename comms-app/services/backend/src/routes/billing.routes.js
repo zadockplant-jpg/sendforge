@@ -9,9 +9,7 @@ import {
   getActivePlan,
   grantProductEntitlement,
   hasAnyProductEntitlement,
-  hasProductEntitlement,
 } from "../services/entitlement.service.js";
-import { licensedProduct } from "../services/licensedProducts.js";
 import {
   buildTabForgeProBundleCheckoutItems,
   buildTabForgeProBundleLineItems,
@@ -50,19 +48,12 @@ import {
   RTS_SUBSCRIPTION_PRODUCT_SLUG,
 } from "../modules/romancing-the-stone/config.js";
 import {
-  buildCloudPickupCheckoutItem,
   buildCloudPickupCheckoutOptions,
-  CLOUD_PICKUP_CANCEL_PATH,
-  CLOUD_PICKUP_PRODUCT_SLUG,
-  CLOUD_PICKUP_SUCCESS_PATH,
+  CLOUD_PICKUP_CATALOG,
   cloudPickupTierForSubscription,
   findCloudPickupSubscription,
-  openCloudPickupPlanChange,
 } from "../modules/forgedrop-pickup/billing.js";
-import {
-  cloudPickupPriceId,
-  cloudPickupTierByKey,
-} from "../modules/forgedrop-pickup/plans.js";
+import { cloudPickupTier } from "../modules/forgedrop-pickup/plans.js";
 import { log } from "../utils/logger.js";
 
 export const billingRouter = Router();
@@ -176,6 +167,11 @@ const PRODUCT_CATALOG = {
   // Romancing the Stone: $30 today with the first 6 months included, then
   // $5/month; or a $120 permanent licence. See modules/romancing-the-stone/billing.js.
   ...RTS_CATALOG,
+  // ForgeDrop Cloud pickup, one product per tier, each a monthly subscription
+  // for ForgeDrop owners: "forgedrop-cloud-pickup-100gb" at $5, -250gb at $10,
+  // -500gb at $15 and -1tb at $25, named "ForgeDrop Cloud pickup — 100 GB" and
+  // so on. Built from the tier table; see modules/forgedrop-pickup/billing.js.
+  ...CLOUD_PICKUP_CATALOG,
 };
 
 const TABFORGE_PACK_CATALOG = {
@@ -287,12 +283,6 @@ const IncludedPackRedeemSchema = z.object({
 
 const PortalSessionSchema = z.object({
   returnPath: z.string().optional(),
-});
-
-const CloudPickupCheckoutSchema = z.object({
-  tier: z.string().trim().min(1).max(40),
-  successPath: z.string().optional(),
-  cancelPath: z.string().optional(),
 });
 
 function getStripe() {
@@ -1094,8 +1084,14 @@ billingRouter.post("/donations/checkout-session", async (req, res) => {
  * - TabForge Pro with an included 60-day Private Sync trial
  * - account-only Private Sync re-subscription for existing Pro owners
  * - retired collection/skin direct checkout returns explicit errors
+ * - ForgeDrop Cloud pickup, productSlug "forgedrop-cloud-pickup-100gb",
+ *   -250gb, -500gb or -1tb: a monthly subscription for ForgeDrop owners
+ *   (403 forgedrop_required otherwise), one plan per account: the same tier
+ *   again is 409 already_subscribed, and another tier answers
+ *   { ok, url, portal: true, productSlug, currentProductSlug } with a Stripe
+ *   billing portal url instead of a second subscription
  */
-billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) => {
+async function catalogCheckoutSession(req, res, stripeClient = getStripe) {
   const parsed = CatalogCheckoutSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "invalid_input" });
@@ -1216,8 +1212,9 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
           );
     if (!hasRequiredEntitlement) {
       return res.status(403).json({
-        error: "tabforge_pro_required",
+        error: product.requiredEntitlementError || "tabforge_pro_required",
         message:
+          product.requiredEntitlementMessage ||
           "Private Sync can be re-subscribed from the account of an existing TabForge Pro owner.",
       });
     }
@@ -1289,13 +1286,13 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     }
   }
 
-  const stripe = getStripe();
+  const stripe = stripeClient();
   if (!stripe) {
     return res.status(500).json({ error: "stripe_not_configured" });
   }
 
   try {
-    const { user, customerId } = await getOrCreateStripeCustomerForUser(req.user.sub);
+    const { user, customerId } = await getOrCreateStripeCustomerForUser(req.user.sub, stripe);
 
     let reconciledTabForgeSyncSubscription =
       hasTabForgeSyncSubscription;
@@ -1328,6 +1325,39 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
     const defaultCancelPath = product?.defaultCancelPath || (skins.length ? "/store/index.html#tabforge" : "/products/tabforge/index.html");
     const successPath = sanitizeRelativePath(parsed.data.successPath, defaultSuccessPath);
     const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, defaultCancelPath);
+
+    // ForgeDrop Cloud pickup: one plan per account. The same tier again is
+    // already_subscribed. Another tier opens Stripe's billing portal, where
+    // the plan the account has can be managed or cancelled, rather than a
+    // second subscription beside it.
+    if (product?.cloudPickup) {
+      const current = await findCloudPickupSubscription({
+        stripe,
+        customerId,
+        userId: user.id,
+      });
+      if (current) {
+        const currentTier = cloudPickupTierForSubscription(current);
+        if (!currentTier || currentTier.slug === product.entitlementSlug) {
+          return cloudPickupAlreadySubscribed(res, currentTier);
+        }
+        const portal = await stripe.billingPortal.sessions.create({
+          customer: customerId,
+          return_url: buildSiteUrl(cancelPath),
+        });
+        return res.json({
+          ok: true,
+          url: portal.url,
+          portal: true,
+          productSlug: product.slug,
+          currentProductSlug: currentTier.slug,
+        });
+      }
+      // The same tier granted by hand: nothing to buy.
+      if (await userHasEntitlement(user.id, product.entitlementSlug)) {
+        return cloudPickupAlreadySubscribed(res, cloudPickupTier(product.entitlementSlug));
+      }
+    }
 
     // A legacy subscriber who buys permanent Pro must not receive a second
     // subscription, including while payment recovery is pending. Everyone
@@ -1414,6 +1444,15 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
           checkoutItems,
         })
       );
+    } else if (sessionConfig.mode === "subscription" && product?.cloudPickup) {
+      Object.assign(
+        sessionConfig,
+        buildCloudPickupCheckoutOptions({
+          userId: user.id,
+          tier: cloudPickupTier(product.entitlementSlug),
+          checkoutItems,
+        })
+      );
     } else if (sessionConfig.mode === "subscription") {
       const initialProPurchase =
         product?.slug === TABFORGE_PRO_PRODUCT_SLUG;
@@ -1462,183 +1501,27 @@ billingRouter.post("/catalog/checkout-session", requireAuth, async (req, res) =>
       message,
     });
   }
-});
+}
+
+/**
+ * The catalog checkout, with the Stripe client it talks to: the route below
+ * uses the real one, and the tests hand it a stand-in.
+ */
+export function createCatalogCheckoutHandler({ getStripe: stripeClient = getStripe } = {}) {
+  return (req, res) => catalogCheckoutSession(req, res, stripeClient);
+}
+
+billingRouter.post("/catalog/checkout-session", requireAuth, createCatalogCheckoutHandler());
 
 function cloudPickupAlreadySubscribed(res, heldTier) {
   return res.status(409).json({
     error: "already_subscribed",
-    tier: heldTier?.key || null,
+    productSlug: heldTier?.slug || null,
     message: heldTier
       ? `This account already has Cloud pickup ${heldTier.label}. Manage it from Account.`
       : "This account already has a Cloud pickup plan. Manage it from Account.",
   });
 }
-
-/**
- * POST /v1/billing/forgedrop-pickup/checkout-session
- * Body: { tier: "100gb" | "250gb" | "500gb" | "1tb", successPath?, cancelPath? }
- *
- * ForgeDrop Cloud pickup: a monthly subscription on the tier's own Stripe
- * price (STRIPE_PRICE_FORGEDROP_PICKUP_*, see modules/forgedrop-pickup).
- *  - 403 forgedrop_required: the account does not own ForgeDrop. Only the
- *    desktop app can use a plan, so this is asked before anything else,
- *    Stripe included.
- *  - 200 { ok, url, sessionId, reused, tier, checkout }: Stripe Checkout. The
- *    webhook grants the tier once it is paid.
- *  - 200 { ok, url, portal: true, tier, currentTier }: the account is on
- *    another tier. One plan per account, so the url is Stripe's billing
- *    portal, on the page that confirms the switch.
- *  - 409 already_subscribed: the account already has this tier.
- *  - 503 plan_unavailable: the tier's price id is not set, or Stripe does not
- *    know it under the current key.
- * Returns to the site like the catalog checkout: successPath with
- * checkout=success (checkout=plan_changed after a switch), cancelPath with
- * checkout=cancelled.
- *
- * Built by a factory so the tests can hand it a stand-in Stripe client.
- */
-export function createCloudPickupCheckoutHandler({
-  getStripe: stripeClient = getStripe,
-  environment = process.env,
-} = {}) {
-  // The ForgeDrop link's ownership check (modules/forgedrop-link/router.js).
-  const forgedrop = licensedProduct("forgedrop");
-  const ownsForgeDrop = (userId) =>
-    hasProductEntitlement(userId, forgedrop.entitlementSlug || forgedrop.slug);
-
-  return async (req, res) => {
-    const parsed = CloudPickupCheckoutSchema.safeParse(req.body || {});
-    const tier = parsed.success ? cloudPickupTierByKey(parsed.data.tier) : null;
-    if (!tier) {
-      return res.status(400).json({ error: "invalid_input" });
-    }
-
-    try {
-      // Only the ForgeDrop desktop app can use a plan.
-      if (!(await ownsForgeDrop(req.user.sub))) {
-        return res.status(403).json({
-          error: "forgedrop_required",
-          message: "Cloud pickup is for ForgeDrop owners.",
-        });
-      }
-
-      // A tier is on sale once the owner has set its Stripe price id.
-      const priceId = cloudPickupPriceId(tier, environment);
-      if (!priceId) {
-        return res.status(503).json({ error: "plan_unavailable", tier: tier.key });
-      }
-
-      const stripe = stripeClient();
-      if (!stripe) {
-        return res.status(500).json({ error: "stripe_not_configured" });
-      }
-
-      // A price Stripe does not know under this key (one made in test mode,
-      // say) would only fail inside Checkout.
-      if (!(await usableStripePriceId(stripe, priceId))) {
-        return res.status(503).json({ error: "plan_unavailable", tier: tier.key });
-      }
-
-      const { user, customerId } = await getOrCreateStripeCustomerForUser(req.user.sub, stripe);
-      const successPath = sanitizeRelativePath(parsed.data.successPath, CLOUD_PICKUP_SUCCESS_PATH);
-      const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, CLOUD_PICKUP_CANCEL_PATH);
-      const cancelUrl = buildSiteUrl(cancelPath, { checkout: "cancelled" });
-
-      // One Cloud pickup plan per account: another tier is a switch in the
-      // billing portal, never a second subscription.
-      const current = await findCloudPickupSubscription({
-        stripe,
-        customerId,
-        userId: user.id,
-        environment,
-      });
-      if (current) {
-        const currentTier = cloudPickupTierForSubscription(current, environment);
-        if (!currentTier || currentTier.slug === tier.slug) {
-          return cloudPickupAlreadySubscribed(res, currentTier);
-        }
-        const portal = await openCloudPickupPlanChange({
-          stripe,
-          customerId,
-          subscription: current,
-          priceId,
-          returnUrl: cancelUrl,
-          doneUrl: buildSiteUrl(successPath, { checkout: "plan_changed" }),
-        });
-        return res.json({
-          ok: true,
-          url: portal.url,
-          portal: true,
-          tier: tier.key,
-          currentTier: currentTier.key,
-        });
-      }
-      // The same tier granted by hand: nothing to buy.
-      if (await userHasEntitlement(user.id, tier.slug)) {
-        return cloudPickupAlreadySubscribed(res, tier);
-      }
-
-      const checkoutItems = [buildCloudPickupCheckoutItem(tier)];
-      const sessionConfig = {
-        mode: "subscription",
-        payment_method_types: ["card"],
-        customer: customerId,
-        client_reference_id: user.id,
-        line_items: [{ price: priceId, quantity: 1 }],
-        allow_promotion_codes: true,
-        // Stripe needs the literal placeholder, not its URL-encoded form.
-        success_url: buildSiteUrl(successPath, {
-          checkout: "success",
-          session_id: "{CHECKOUT_SESSION_ID}",
-        }).replace("%7BCHECKOUT_SESSION_ID%7D", "{CHECKOUT_SESSION_ID}"),
-        cancel_url: cancelUrl,
-        metadata: {
-          user_id: user.id,
-          product_slug: CLOUD_PICKUP_PRODUCT_SLUG,
-          fulfillment_type: "multi_entitlement_cart",
-          checkout_items: serializeCheckoutItems(checkoutItems),
-        },
-        ...buildCloudPickupCheckoutOptions({ userId: user.id, tier, checkoutItems }),
-      };
-
-      // Every tier shares one lock and product slug, and each tier is its own
-      // selection, so a second click on the same tier reopens the same session.
-      const session = await getOrCreateOpenCheckoutSession({
-        stripe,
-        userId: user.id,
-        productSlug: CLOUD_PICKUP_PRODUCT_SLUG,
-        selectionKey: checkoutSelectionKey({
-          productSlug: CLOUD_PICKUP_PRODUCT_SLUG,
-          mode: "subscription",
-          checkoutItems,
-        }),
-        sessionConfig,
-        checkoutItems,
-      });
-
-      return res.json({
-        ok: true,
-        url: session.url,
-        sessionId: session.id,
-        reused: Boolean(session.reused),
-        tier: tier.key,
-        checkout: { items: checkoutItems },
-      });
-    } catch (err) {
-      const statusCode = err?.statusCode || 500;
-      return res.status(statusCode).json({
-        error: statusCode === 404 ? "user_not_found" : "server_error",
-        message: String(err?.message || err),
-      });
-    }
-  };
-}
-
-billingRouter.post(
-  "/forgedrop-pickup/checkout-session",
-  requireAuth,
-  createCloudPickupCheckoutHandler()
-);
 
 
 /**

@@ -36,8 +36,9 @@ const { createForgeDropPickupRouter, PICKUP_LIMITS } = await import("../src/modu
 const { createR2Client, EMPTY_SHA256, r2ConfigProblems, readR2Config, signV4 } = await import(
   "../src/modules/forgedrop-pickup/r2.js"
 );
-const { bytesSentThisMonth, CLOUD_PICKUP_TIERS, GB, monthWindow, TB, tierForStripePrice, tierFromEntitlements } =
-  await import("../src/modules/forgedrop-pickup/plans.js");
+const { bytesSentThisMonth, CLOUD_PICKUP_TIERS, GB, monthWindow, TB, tierFromEntitlements } = await import(
+  "../src/modules/forgedrop-pickup/plans.js"
+);
 const { partPlan } = await import("../src/modules/forgedrop-pickup/shapes.js");
 const { forgedropPickupRouter, loadForgeDropPickup } = await import("../src/modules/forgedrop-pickup/index.js");
 
@@ -681,7 +682,7 @@ test("without a plan it is plan_required; past the month's allowance, allowance_
   assert.equal(await bytesSentThisMonth(db, people.hank.id, clock), 30);
 });
 
-test("plans: four tiers in one table, the biggest held wins, and Stripe prices map only once set", () => {
+test("plans: four tiers in one table, and the biggest held wins", () => {
   assert.deepEqual(
     CLOUD_PICKUP_TIERS.map((tier) => [tier.slug, tier.monthlyCents, tier.bytes]),
     [
@@ -700,14 +701,6 @@ test("plans: four tiers in one table, the biggest held wins, and Stripe prices m
       { product_slug: "forgedrop-cloud-pickup-100gb" },
     ]).slug,
     "forgedrop-cloud-pickup-250gb"
-  );
-
-  // Nothing is set yet, so no price is a tier.
-  assert.equal(tierForStripePrice("price_123", {}), null);
-  assert.equal(tierForStripePrice("", { STRIPE_PRICE_FORGEDROP_PICKUP_500GB: "" }), null);
-  assert.equal(
-    tierForStripePrice("price_500", { STRIPE_PRICE_FORGEDROP_PICKUP_500GB: " price_500 " }).slug,
-    "forgedrop-cloud-pickup-500gb"
   );
 
   assert.deepEqual(monthWindow(Date.UTC(2026, 11, 31, 23, 59)), {
