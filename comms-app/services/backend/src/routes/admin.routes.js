@@ -14,6 +14,7 @@ import {
   commissionPlanForReferralCode,
   ensureReferralCodeForUser,
   hasReferralProgramEligibility,
+  isCloudPickupShareReward,
   normalizeCashAppTag,
   rewardPayoutEligibility,
 } from "../services/referrals/referral.service.js";
@@ -609,7 +610,12 @@ async function applyRewardStatusChange(req, rewardId, data) {
           existing,
           program
         );
-        if (!requiredPurchases || verifiedCount < requiredPurchases) {
+        // A Cloud pickup share was earned by one paid invoice, not by a count
+        // of referred customers; the payout gate above is its qualification.
+        if (
+          !isCloudPickupShareReward(existing) &&
+          (!requiredPurchases || verifiedCount < requiredPurchases)
+        ) {
           throw rewardStatusError(
             409,
             "referral_qualification_no_longer_met",

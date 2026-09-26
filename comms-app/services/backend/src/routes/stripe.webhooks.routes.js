@@ -22,6 +22,7 @@ import {
   cancelFlatProductReferral,
   disqualifyReferralPurchaseForStripe,
   isMilestoneReferralProduct,
+  recordCloudPickupShare,
   recordReferralPurchase,
   recordSyncSubscriptionShare,
 } from "../services/referrals/referral.service.js";
@@ -42,6 +43,12 @@ import {
 import {
   markInmateRecordsOrderReadyForManualFulfillment,
 } from "../services/inmate.records/fulfillment.service.js";
+import {
+  cloudPickupInvoice,
+  isCloudPickupEntitlement,
+  isCloudPickupSubscription,
+  syncCloudPickupSubscriptionEntitlements,
+} from "../modules/forgedrop-pickup/billing.js";
 
 export const stripeWebhooksRouter = Router();
 
@@ -270,6 +277,15 @@ async function upsertStripeSubscription(sub) {
       subscription: { ...payload.raw, id: sub.id, status: payload.status },
     });
   }
+
+  // ForgeDrop Cloud pickup: the tier of the price the subscription is on now,
+  // while it is active; nothing once it has ended.
+  if (isCloudPickupSubscription(sub)) {
+    await syncCloudPickupSubscriptionEntitlements({
+      userId,
+      subscription: { ...payload.raw, id: sub.id, status: payload.status },
+    });
+  }
 }
 
 async function markStripeSubscriptionCanceled(sub) {
@@ -374,6 +390,10 @@ async function cancelLocalStripeSubscription(subscriptionId, session = {}) {
       subscriptionId,
       status: "canceled",
     });
+    await syncCloudPickupSubscriptionEntitlements({
+      userId: row.user_id,
+      subscription: { id: subscriptionId, status: "canceled" },
+    });
   }
 
   if (rows.length) return;
@@ -386,6 +406,10 @@ async function cancelLocalStripeSubscription(subscriptionId, session = {}) {
       userId,
       subscriptionId,
       status: "canceled",
+    });
+    await syncCloudPickupSubscriptionEntitlements({
+      userId,
+      subscription: { id: subscriptionId, status: "canceled" },
     });
   }
 }
@@ -473,8 +497,10 @@ async function grantCheckoutEntitlements({
     // deliver events out of order, so only the subscription's current status
     // is allowed to grant or revoke Private Sync.
     if (isTabForgeSyncEntitlement(entitlementSlug)) continue;
-    // The same holds for the Romancing the Stone subscription.
+    // The same holds for the Romancing the Stone subscription, and for the
+    // ForgeDrop Cloud pickup plans.
     if (isRtsSubscriptionEntitlement(entitlementSlug)) continue;
+    if (isCloudPickupEntitlement(entitlementSlug)) continue;
 
     if (entitlementSlug === "tabforge-skin-bundle-all") {
       for (const skinEntitlementSlug of [
@@ -881,6 +907,28 @@ async function handleInvoicePaid(invoice) {
       });
     }
   }
+
+  // Every paid Cloud pickup invoice, the first and each month after it, pays
+  // the ForgeDrop affiliate who brought this customer in 5%. Keyed on the
+  // invoice id, so a replayed webhook cannot pay for the same month twice.
+  const pickup = isHardcap ? null : cloudPickupInvoice(invoice);
+  if (pickup) {
+    const netPaidCents = checkoutNetPaidCents(invoice);
+    if (netPaidCents > 0) {
+      await recordCloudPickupShare({
+        subscriberUserId: user.id,
+        invoiceRef: String(invoice.id || ""),
+        netPaidCents,
+        metadata: {
+          stripe_invoice_id: String(invoice.id || ""),
+          stripe_customer_id: customerId,
+          stripe_subscription_id: stripeObjectId(invoice.subscription) || null,
+          billing_reason: String(invoice.billing_reason || ""),
+          cloud_pickup_tier: pickup.tier?.key || null,
+        },
+      });
+    }
+  }
 }
 
 async function handleInvoicePaymentFailed(invoice, stripe) {
@@ -909,6 +957,77 @@ async function handleInvoicePaymentFailed(invoice, stripe) {
     });
 }
 
+/**
+ * One verified Stripe event, handled. Exported so the tests can drive the
+ * real event handling with a stand-in Stripe client, past the signature
+ * check that only the webhook route can do.
+ */
+export async function handleStripeEvent(event, stripe) {
+  switch (event.type) {
+    case "checkout.session.completed":
+    case "checkout.session.async_payment_succeeded":
+      await handleCheckoutSessionCompleted(event.data.object, stripe);
+      break;
+
+    case "checkout.session.async_payment_failed":
+      await handleAsyncCheckoutPaymentFailed(
+        event.data.object,
+        stripe
+      );
+      break;
+
+    case "checkout.session.expired":
+      await updateCheckoutAttempt(event.data.object?.id, "expired");
+      break;
+
+    case "customer.subscription.created":
+    case "customer.subscription.updated":
+      await handleStripeSubscriptionEvent(
+        stripe,
+        event.data.object,
+        false
+      );
+      break;
+
+    case "customer.subscription.deleted":
+      await handleStripeSubscriptionEvent(
+        stripe,
+        event.data.object,
+        true
+      );
+      break;
+
+    case "invoice.paid":
+      await handleInvoicePaid(event.data.object);
+      break;
+
+    case "invoice.payment_failed":
+      await handleInvoicePaymentFailed(event.data.object, stripe);
+      break;
+
+    case "charge.refunded":
+    case "refund.updated":
+      if (
+        event.type === "charge.refunded" ||
+        String(event.data.object?.status || "") === "succeeded"
+      ) {
+        await handleReferralPaymentReversal({ stripe, event });
+      }
+      break;
+
+    case "charge.dispute.created":
+      await handleReferralPaymentReversal({
+        stripe,
+        event,
+        disputed: true,
+      });
+      break;
+
+    default:
+      break;
+  }
+}
+
 export async function handleStripeWebhook(req, res) {
   if (!env.stripeWebhookSecret || !env.stripeSecretKey) {
     return res.status(500).send("Stripe not configured");
@@ -933,70 +1052,7 @@ export async function handleStripeWebhook(req, res) {
   }
 
   try {
-    switch (event.type) {
-      case "checkout.session.completed":
-      case "checkout.session.async_payment_succeeded":
-        await handleCheckoutSessionCompleted(event.data.object, stripe);
-        break;
-
-      case "checkout.session.async_payment_failed":
-        await handleAsyncCheckoutPaymentFailed(
-          event.data.object,
-          stripe
-        );
-        break;
-
-      case "checkout.session.expired":
-        await updateCheckoutAttempt(event.data.object?.id, "expired");
-        break;
-
-      case "customer.subscription.created":
-      case "customer.subscription.updated":
-        await handleStripeSubscriptionEvent(
-          stripe,
-          event.data.object,
-          false
-        );
-        break;
-
-      case "customer.subscription.deleted":
-        await handleStripeSubscriptionEvent(
-          stripe,
-          event.data.object,
-          true
-        );
-        break;
-
-      case "invoice.paid":
-        await handleInvoicePaid(event.data.object);
-        break;
-
-      case "invoice.payment_failed":
-        await handleInvoicePaymentFailed(event.data.object, stripe);
-        break;
-
-      case "charge.refunded":
-      case "refund.updated":
-        if (
-          event.type === "charge.refunded" ||
-          String(event.data.object?.status || "") === "succeeded"
-        ) {
-          await handleReferralPaymentReversal({ stripe, event });
-        }
-        break;
-
-      case "charge.dispute.created":
-        await handleReferralPaymentReversal({
-          stripe,
-          event,
-          disputed: true,
-        });
-        break;
-
-      default:
-        break;
-    }
-
+    await handleStripeEvent(event, stripe);
     return res.json({ received: true });
   } catch (err) {
     return res.status(500).json({

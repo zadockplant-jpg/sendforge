@@ -8,8 +8,9 @@
  * the subscription is. An account holding more than one (an upgrade whose
  * old tier has not been revoked yet) gets the biggest.
  *
- * Nothing grants these yet: the Stripe prices do not exist. See
- * tierForStripePrice at the bottom.
+ * The Stripe subscription grants them (billing.js): each tier is one monthly
+ * Stripe price, whose id the owner sets under the tier's `stripePriceEnv`.
+ * A tier whose price id is not set is not on sale.
  *
  * Sizes are binary, as Windows shows them, so a "100 GB" plan holds what
  * Explorer calls 100 GB. The table below is the one place to change that.
@@ -20,6 +21,8 @@ export const TB = 2 ** 40;
 
 export const CLOUD_PICKUP_TIERS = Object.freeze([
   Object.freeze({
+    // What the website asks for: POST /v1/billing/forgedrop-pickup/checkout-session { tier }.
+    key: "100gb",
     slug: "forgedrop-cloud-pickup-100gb",
     label: "100 GB",
     monthlyCents: 500,
@@ -27,6 +30,7 @@ export const CLOUD_PICKUP_TIERS = Object.freeze([
     stripePriceEnv: "STRIPE_PRICE_FORGEDROP_PICKUP_100GB",
   }),
   Object.freeze({
+    key: "250gb",
     slug: "forgedrop-cloud-pickup-250gb",
     label: "250 GB",
     monthlyCents: 1000,
@@ -34,6 +38,7 @@ export const CLOUD_PICKUP_TIERS = Object.freeze([
     stripePriceEnv: "STRIPE_PRICE_FORGEDROP_PICKUP_250GB",
   }),
   Object.freeze({
+    key: "500gb",
     slug: "forgedrop-cloud-pickup-500gb",
     label: "500 GB",
     monthlyCents: 1500,
@@ -41,6 +46,7 @@ export const CLOUD_PICKUP_TIERS = Object.freeze([
     stripePriceEnv: "STRIPE_PRICE_FORGEDROP_PICKUP_500GB",
   }),
   Object.freeze({
+    key: "1tb",
     slug: "forgedrop-cloud-pickup-1tb",
     label: "1 TB",
     monthlyCents: 2500,
@@ -50,9 +56,15 @@ export const CLOUD_PICKUP_TIERS = Object.freeze([
 ]);
 
 const BY_SLUG = new Map(CLOUD_PICKUP_TIERS.map((tier) => [tier.slug, tier]));
+const BY_KEY = new Map(CLOUD_PICKUP_TIERS.map((tier) => [tier.key, tier]));
 
 export function cloudPickupTier(slug) {
   return BY_SLUG.get(String(slug || "").trim().toLowerCase()) || null;
+}
+
+/** The tier the website names: "100gb", "250gb", "500gb" or "1tb". */
+export function cloudPickupTierByKey(key) {
+  return BY_KEY.get(String(key || "").trim().toLowerCase()) || null;
 }
 
 /**
@@ -97,21 +109,26 @@ export async function bytesSentThisMonth(db, userId, at) {
 }
 
 // ---------------------------------------------------------------------------
-// STRIPE PRICE IDS -> TIERS: NOT WIRED YET.
+// Stripe price ids <-> tiers.
 //
-// The four monthly prices do not exist yet (ForgeDrop/docs/pickup.md, "Needs
-// the owner"). When they do:
-//   1. put each price id in Render under its tier's `stripePriceEnv` name;
-//   2. have the subscription webhook (routes/stripe.webhooks.routes.js) call
-//      this with the subscription's price, grant that tier's slug while the
-//      subscription is active and revoke the other three, the way
-//      syncTabForgeSubscriptionEntitlements keeps Private Sync in step;
-//   3. pay the affiliate share through the existing referral code.
-// Until then nothing calls this, and an account has a tier only if one is
-// granted by hand.
+// The owner creates the four monthly prices in Stripe and sets each id in
+// Render under its tier's `stripePriceEnv` name. Both are read per call, so
+// nothing here is fixed at import:
+//   - the checkout (routes/billing.routes.js) sells a tier only once its
+//     price id is set (503 plan_unavailable before that);
+//   - the subscription webhook (billing.js) grants the tier of the price the
+//     subscription is on now, which after a switch in Stripe's billing portal
+//     is the new one, and revokes the other three;
+//   - a paid invoice on one of these prices pays the affiliate share.
 // ---------------------------------------------------------------------------
+
+/** The tier's Stripe price id, or "" while the owner has not set it. */
+export function cloudPickupPriceId(tier, env = process.env) {
+  return tier?.stripePriceEnv ? String(env?.[tier.stripePriceEnv] || "").trim() : "";
+}
+
 export function tierForStripePrice(priceId, env = process.env) {
   const id = String(priceId || "").trim();
   if (!id) return null;
-  return CLOUD_PICKUP_TIERS.find((tier) => String(env?.[tier.stripePriceEnv] || "").trim() === id) || null;
+  return CLOUD_PICKUP_TIERS.find((tier) => cloudPickupPriceId(tier, env) === id) || null;
 }

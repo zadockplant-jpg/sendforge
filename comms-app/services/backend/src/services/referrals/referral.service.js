@@ -87,6 +87,32 @@ export function syncShareCents(netPaidCents) {
   return Math.max(1, Math.round(paid * SYNC_SHARE_RATE));
 }
 
+// ForgeDrop Cloud pickup pays the same way: 5% of every paid invoice, the
+// first one and each month after it, to the account directly above the
+// subscriber and no further. The gate is the ForgeDrop affiliate level
+// (isForgeDropAffiliateCode), not TabForge Pro. The share has its own
+// product slug, so a ForgeDrop refund's milestone recount never touches it.
+export const CLOUD_PICKUP_SHARE_RATE = 0.05;
+export const CLOUD_PICKUP_SHARE_PRODUCT_SLUG = "forgedrop-cloud-pickup";
+const CLOUD_PICKUP_SHARE_KIND = "cloud_pickup_share";
+
+export function cloudPickupShareCents(netPaidCents) {
+  const paid = Number(netPaidCents);
+  if (!Number.isFinite(paid) || paid <= 0) return 0;
+  // $5, $10, $15 and $25 plans: 25, 50, 75 and 125 cents. Never nothing for
+  // a paid invoice, as with Private Sync.
+  return Math.max(1, Math.round(paid * CLOUD_PICKUP_SHARE_RATE));
+}
+
+/** A queued Cloud pickup share: earned by one paid invoice, not by a count of customers. */
+export function isCloudPickupShareReward(row) {
+  const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
+  return (
+    normalizeProductSlug(row?.product_slug) === CLOUD_PICKUP_SHARE_PRODUCT_SLUG &&
+    metadata.kind === CLOUD_PICKUP_SHARE_KIND
+  );
+}
+
 export const REFERRAL_REQUIRED_PRODUCT_SLUG = "tabforge";
 const REFERRAL_ELIGIBLE_ENTITLEMENT_SLUGS = [
   REFERRAL_REQUIRED_PRODUCT_SLUG,
@@ -233,10 +259,29 @@ export function perSaleCentsForCode(referralCode, productSlug) {
 }
 
 /**
+ * The ForgeDrop affiliate level: an active code on affiliate terms (the owner
+ * made it an affiliate, or a comp code gave it a per-sale TabForge rate) whose
+ * ForgeDrop rate the owner has not set to zero, which means "earns nothing on
+ * ForgeDrop". It is what Cloud pickup's share is gated on.
+ */
+export function isForgeDropAffiliateCode(referralCode) {
+  if (!referralCode || (referralCode.status && referralCode.status !== "active")) return false;
+  if (!isAffiliateReferralCode(referralCode)) return false;
+  return Number(perSaleCentsForCode(referralCode, "forgedrop")) > 0;
+}
+
+export async function hasForgeDropAffiliateLevel(userId, trx = db) {
+  if (!userId) return false;
+  const codes = await trx("referral_codes").where({ user_id: userId, status: "active" });
+  return codes.some(isForgeDropAffiliateCode);
+}
+
+/**
  * Whether this account earns referral rewards on a product at all. TabForge,
- * and the Private Sync share that rides on it, need TabForge Pro. Every other
- * product with a programme needs the referrer to hold a referral code: to own
- * one of our products, or to be an affiliate.
+ * and the Private Sync share that rides on it, need TabForge Pro. The Cloud
+ * pickup share needs the ForgeDrop affiliate level. Every other product with
+ * a programme needs the referrer to hold a referral code: to own one of our
+ * products, or to be an affiliate.
  */
 export async function productReferralEligibility(userId, productSlug, trx = db) {
   const slug = normalizeProductSlug(productSlug);
@@ -244,6 +289,7 @@ export async function productReferralEligibility(userId, productSlug, trx = db) 
   if (slug === REFERRAL_REQUIRED_PRODUCT_SLUG || slug === SYNC_SHARE_PRODUCT_SLUG) {
     return hasReferralProgramEligibility(userId, REFERRAL_REQUIRED_PRODUCT_SLUG, trx);
   }
+  if (slug === CLOUD_PICKUP_SHARE_PRODUCT_SLUG) return hasForgeDropAffiliateLevel(userId, trx);
   if (isMilestoneReferralProduct(slug)) return canHoldReferralCode(userId, trx);
   return false;
 }
@@ -1421,6 +1467,86 @@ export async function recordSyncSubscriptionShare({
     if (!reward) return { recorded: false, reason: "duplicate_invoice" };
 
     log("info", "sync_share_queued", {
+      referrerUserId: referrer.id,
+      subscriberUserId: subscriber.id,
+      invoiceRef: ref,
+      amountCents,
+    });
+    return { recorded: true, reward, amountCents };
+  });
+}
+
+/**
+ * Cloud pickup's share of one paid invoice: 5% to the account directly above
+ * the subscriber, modelled on recordSyncSubscriptionShare. One level, read
+ * once and never walked; one reward_queue row per invoice, keyed on the
+ * invoice id, so a replayed webhook cannot pay twice. The gate is the
+ * ForgeDrop affiliate level, checked on every invoice, so an affiliate the
+ * owner stops paying on ForgeDrop stops earning from renewals too.
+ */
+export async function recordCloudPickupShare({
+  subscriberUserId,
+  invoiceRef,
+  netPaidCents,
+  metadata = {},
+}) {
+  const ref = normalizeReferralValue(invoiceRef);
+  const amountCents = cloudPickupShareCents(netPaidCents);
+  if (!subscriberUserId || !ref) return { recorded: false, reason: "missing_input" };
+  if (amountCents <= 0) return { recorded: false, reason: "no_positive_payment" };
+
+  return db.transaction(async (trx) => {
+    const subscriber = await trx("users").where({ id: subscriberUserId }).first();
+    if (!subscriber) return { recorded: false, reason: "subscriber_missing" };
+
+    // One level up, and no further.
+    const referrerId = subscriber.referred_by_user_id;
+    if (!referrerId) return { recorded: false, reason: "no_referrer" };
+    if (referrerId === subscriber.id) return { recorded: false, reason: "self_referral" };
+
+    const referrer = await trx("users").where({ id: referrerId }).first();
+    if (!referrer) return { recorded: false, reason: "referrer_missing" };
+
+    if (!(await hasForgeDropAffiliateLevel(referrer.id, trx))) {
+      return { recorded: false, reason: "referrer_not_forgedrop_affiliate" };
+    }
+
+    const referralCode = subscriber.referral_code_id
+      ? await trx("referral_codes").where({ id: subscriber.referral_code_id }).first()
+      : await ensureReferralCodeForUser(referrer, trx);
+
+    const rewardKey = `${CLOUD_PICKUP_SHARE_KIND}:${ref}`;
+    const [reward] = await trx("reward_queue")
+      .insert({
+        id: crypto.randomUUID(),
+        referral_code_id: referralCode?.id || null,
+        user_id: referrer.id,
+        email: normalizeEmail(referrer.email),
+        product_slug: CLOUD_PICKUP_SHARE_PRODUCT_SLUG,
+        reward_key: rewardKey,
+        reward_amount_cents: amountCents,
+        reward_type: "cashapp_manual",
+        cashapp_handle: normalizeCashAppTag(referrer.cash_app_tag || referralCode?.cashapp_handle),
+        status: "pending",
+        metadata: {
+          ...metadata,
+          kind: CLOUD_PICKUP_SHARE_KIND,
+          level: 1,
+          share_rate: CLOUD_PICKUP_SHARE_RATE,
+          invoice_ref: ref,
+          net_paid_cents: Number(netPaidCents) || 0,
+          subscriber_user_id: subscriber.id,
+          subscriber_email: normalizeEmail(subscriber.email),
+        },
+        updated_at: trx.fn.now(),
+      })
+      .onConflict(["user_id", "product_slug", "reward_key"])
+      .ignore()
+      .returning("*");
+
+    if (!reward) return { recorded: false, reason: "duplicate_invoice" };
+
+    log("info", "cloud_pickup_share_queued", {
       referrerUserId: referrer.id,
       subscriberUserId: subscriber.id,
       invoiceRef: ref,
