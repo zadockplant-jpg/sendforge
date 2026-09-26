@@ -1,6 +1,12 @@
 import crypto from "crypto";
 import { db } from "../../config/db.js";
 import { log } from "../../utils/logger.js";
+import {
+  DEFAULT_SHARE_RATE_BPS,
+  invoicePaidAtIso,
+  resolveShareRate,
+  shareCentsAt,
+} from "./shareRates.js";
 
 // Every product pays its referrers on the same milestones: the 5th, 15th,
 // 25th and 50th referred customer, then every 25th after that. Only the
@@ -75,33 +81,35 @@ const INVITE_TTL_DAYS = 30;
 // decision, not an oversight: a second level turns a referral scheme into a
 // structure people have to be told is not one, and it is not worth the
 // explaining.
+//
+// SYNC_SHARE_RATE is the default. The owner sets the rate that is paid from
+// the admin dashboard (shareRates.js), per programme and per affiliate.
 export const SYNC_SHARE_RATE = 0.05;
 export const SYNC_SHARE_PRODUCT_SLUG = "tabforge-subscription";
 
+// One argument only, at the default rate: it is used as a map callback, which
+// passes an index second. The recorders call shareCentsAt with the owner's rate.
 export function syncShareCents(netPaidCents) {
-  const paid = Number(netPaidCents);
-  if (!Number.isFinite(paid) || paid <= 0) return 0;
   // Rounded to the nearest cent, but a paid invoice never earns nothing: at
   // the $5 price this is 25 cents, and it should not silently become zero if
   // the price is ever lowered.
-  return Math.max(1, Math.round(paid * SYNC_SHARE_RATE));
+  return shareCentsAt(netPaidCents, DEFAULT_SHARE_RATE_BPS);
 }
 
-// ForgeDrop Cloud pickup pays the same way: 5% of every paid invoice, the
-// first one and each month after it, to the account directly above the
-// subscriber and no further. The gate is the ForgeDrop affiliate level
-// (isForgeDropAffiliateCode), not TabForge Pro. The share has its own
-// product slug, so a ForgeDrop refund's milestone recount never touches it.
+// ForgeDrop Cloud pickup pays the same way: 5% of every paid invoice (the
+// default; the owner sets the rate), the first one and each month after it,
+// to the account directly above the subscriber and no further. The gate is
+// the ForgeDrop affiliate level (isForgeDropAffiliateCode), not TabForge Pro.
+// The share has its own product slug, so a ForgeDrop refund's milestone
+// recount never touches it.
 export const CLOUD_PICKUP_SHARE_RATE = 0.05;
 export const CLOUD_PICKUP_SHARE_PRODUCT_SLUG = "forgedrop-cloud-pickup";
 const CLOUD_PICKUP_SHARE_KIND = "cloud_pickup_share";
 
 export function cloudPickupShareCents(netPaidCents) {
-  const paid = Number(netPaidCents);
-  if (!Number.isFinite(paid) || paid <= 0) return 0;
-  // $5, $10, $15 and $25 plans: 25, 50, 75 and 125 cents. Never nothing for
-  // a paid invoice, as with Private Sync.
-  return Math.max(1, Math.round(paid * CLOUD_PICKUP_SHARE_RATE));
+  // $5, $10, $15 and $25 plans: 25, 50, 75 and 125 cents at 5%. Never
+  // nothing for a paid invoice, as with Private Sync.
+  return shareCentsAt(netPaidCents, DEFAULT_SHARE_RATE_BPS);
 }
 
 /** A queued Cloud pickup share: earned by one paid invoice, not by a count of customers. */
@@ -120,6 +128,14 @@ export function isSyncShareReward(row) {
     normalizeProductSlug(row?.product_slug) === SYNC_SHARE_PRODUCT_SLUG &&
     metadata.kind === "sync_share"
   );
+}
+
+/**
+ * Any subscription-percentage share (Private Sync or Cloud pickup): what the
+ * monthly affiliate statements are made of.
+ */
+export function isSubscriptionShareReward(row) {
+  return isSyncShareReward(row) || isCloudPickupShareReward(row);
 }
 
 export const REFERRAL_REQUIRED_PRODUCT_SLUG = "tabforge";
@@ -1415,9 +1431,8 @@ export async function recordSyncSubscriptionShare({
   metadata = {},
 }) {
   const ref = normalizeReferralValue(invoiceRef);
-  const amountCents = syncShareCents(netPaidCents);
   if (!subscriberUserId || !ref) return { recorded: false, reason: "missing_input" };
-  if (amountCents <= 0) return { recorded: false, reason: "no_positive_payment" };
+  if (syncShareCents(netPaidCents) <= 0) return { recorded: false, reason: "no_positive_payment" };
 
   return db.transaction(async (trx) => {
     const subscriber = await trx("users").where({ id: subscriberUserId }).first();
@@ -1437,6 +1452,14 @@ export async function recordSyncSubscriptionShare({
     // does not keep earning from renewals.
     if (!(await hasReferralProgramEligibility(referrer.id, REFERRAL_REQUIRED_PRODUCT_SLUG, trx))) {
       return { recorded: false, reason: "referrer_tabforge_pro_required" };
+    }
+
+    // The rate the owner set: this affiliate's own, else the programme's. The
+    // programme switched off, or this affiliate set to 0, records nothing.
+    const rate = await resolveShareRate(SYNC_SHARE_PRODUCT_SLUG, referrer.id, trx);
+    const amountCents = shareCentsAt(netPaidCents, rate.rateBps);
+    if (amountCents <= 0) {
+      return { recorded: false, reason: rate.enabled ? "share_rate_zero" : "share_program_off" };
     }
 
     const referralCode = subscriber.referral_code_id
@@ -1461,8 +1484,14 @@ export async function recordSyncSubscriptionShare({
           ...metadata,
           kind: "sync_share",
           level: 1,
-          share_rate: SYNC_SHARE_RATE,
+          // The rate this row was paid at, as a fraction (0.05) and in basis
+          // points (500), and whether it was the affiliate's own.
+          share_rate: rate.rateBps / 10000,
+          share_rate_bps: rate.rateBps,
+          share_rate_source: rate.source,
           invoice_ref: ref,
+          // Which month's statement the share belongs to (UTC).
+          invoice_paid_at: invoicePaidAtIso(metadata.invoice_paid_at),
           net_paid_cents: Number(netPaidCents) || 0,
           subscriber_user_id: subscriber.id,
           subscriber_email: normalizeEmail(subscriber.email),
@@ -1480,18 +1509,20 @@ export async function recordSyncSubscriptionShare({
       subscriberUserId: subscriber.id,
       invoiceRef: ref,
       amountCents,
+      rateBps: rate.rateBps,
     });
     return { recorded: true, reward, amountCents };
   });
 }
 
 /**
- * Cloud pickup's share of one paid invoice: 5% to the account directly above
- * the subscriber, modelled on recordSyncSubscriptionShare. One level, read
- * once and never walked; one reward_queue row per invoice, keyed on the
- * invoice id, so a replayed webhook cannot pay twice. The gate is the
- * ForgeDrop affiliate level, checked on every invoice, so an affiliate the
- * owner stops paying on ForgeDrop stops earning from renewals too.
+ * Cloud pickup's share of one paid invoice: the rate the owner set (5% unless
+ * changed) to the account directly above the subscriber, modelled on
+ * recordSyncSubscriptionShare. One level, read once and never walked; one
+ * reward_queue row per invoice, keyed on the invoice id, so a replayed
+ * webhook cannot pay twice. The gate is the ForgeDrop affiliate level,
+ * checked on every invoice, so an affiliate the owner stops paying on
+ * ForgeDrop stops earning from renewals too.
  */
 export async function recordCloudPickupShare({
   subscriberUserId,
@@ -1500,9 +1531,8 @@ export async function recordCloudPickupShare({
   metadata = {},
 }) {
   const ref = normalizeReferralValue(invoiceRef);
-  const amountCents = cloudPickupShareCents(netPaidCents);
   if (!subscriberUserId || !ref) return { recorded: false, reason: "missing_input" };
-  if (amountCents <= 0) return { recorded: false, reason: "no_positive_payment" };
+  if (cloudPickupShareCents(netPaidCents) <= 0) return { recorded: false, reason: "no_positive_payment" };
 
   return db.transaction(async (trx) => {
     const subscriber = await trx("users").where({ id: subscriberUserId }).first();
@@ -1518,6 +1548,13 @@ export async function recordCloudPickupShare({
 
     if (!(await hasForgeDropAffiliateLevel(referrer.id, trx))) {
       return { recorded: false, reason: "referrer_not_forgedrop_affiliate" };
+    }
+
+    // The rate the owner set, as for Private Sync.
+    const rate = await resolveShareRate(CLOUD_PICKUP_SHARE_PRODUCT_SLUG, referrer.id, trx);
+    const amountCents = shareCentsAt(netPaidCents, rate.rateBps);
+    if (amountCents <= 0) {
+      return { recorded: false, reason: rate.enabled ? "share_rate_zero" : "share_program_off" };
     }
 
     const referralCode = subscriber.referral_code_id
@@ -1541,8 +1578,11 @@ export async function recordCloudPickupShare({
           ...metadata,
           kind: CLOUD_PICKUP_SHARE_KIND,
           level: 1,
-          share_rate: CLOUD_PICKUP_SHARE_RATE,
+          share_rate: rate.rateBps / 10000,
+          share_rate_bps: rate.rateBps,
+          share_rate_source: rate.source,
           invoice_ref: ref,
+          invoice_paid_at: invoicePaidAtIso(metadata.invoice_paid_at),
           net_paid_cents: Number(netPaidCents) || 0,
           subscriber_user_id: subscriber.id,
           subscriber_email: normalizeEmail(subscriber.email),
@@ -1560,6 +1600,7 @@ export async function recordCloudPickupShare({
       subscriberUserId: subscriber.id,
       invoiceRef: ref,
       amountCents,
+      rateBps: rate.rateBps,
     });
     return { recorded: true, reward, amountCents };
   });

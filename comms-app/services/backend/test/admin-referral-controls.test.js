@@ -86,7 +86,9 @@ test("milestone programmes keep their tiers, and null switches the recurring rul
 
 test("the admin router exposes batch payouts and perk accounts on the shared status logic", async () => {
   const source = await readFile(routesUrl, "utf8");
-  assert.match(source, /async function applyRewardStatusChange\(req, rewardId, data\)/);
+  // `outer` lets a monthly statement run each row's change as a savepoint of its own transaction.
+  assert.match(source, /async function applyRewardStatusChange\(req, rewardId, data, outer = null\)/);
+  assert.match(source, /createAdminRecurringPayoutsRouter\(\{\s*applyRewardStatusChange,/);
   assert.match(source, /async function updateRewardStatus\(req, res\) \{[\s\S]*?applyRewardStatusChange\(req, req\.params\.id, parsed\.data\)/);
   assert.match(source, /adminRouter\.post\("\/rewards\/batch", writeLimiter/);
   assert.match(source, /payoutReference: status === "paid" \? batchPayoutReference\(batchReference, id\) : undefined/);

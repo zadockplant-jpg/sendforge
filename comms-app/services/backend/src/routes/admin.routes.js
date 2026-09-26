@@ -31,6 +31,7 @@ import {
 } from "../services/adminReferralControls.service.js";
 import { adminLiveTestingRouter } from "./admin.liveTesting.routes.js";
 import { adminAccountsRouter } from "./admin.accounts.routes.js";
+import { createAdminRecurringPayoutsRouter } from "./admin.recurringPayouts.routes.js";
 import { listCompCodes, upsertCompCode } from "../services/compCodes.service.js";
 import { liveTestingEnabledFor, liveTestingOwnerEmail } from "../services/adminLiveTesting.service.js";
 import { getRequestId, log, sanitizeEmail } from "../utils/logger.js";
@@ -204,6 +205,20 @@ adminRouter.get("/me", (req, res) => res.json({
 
 adminRouter.use("/testing/live", adminLiveTestingRouter);
 adminRouter.use("/accounts", adminAccountsRouter);
+// Monthly statements of the subscription shares. They are paid through the
+// same status change and review-period check as a single reward below.
+adminRouter.use(
+  "/recurring-payouts",
+  createAdminRecurringPayoutsRouter({
+    applyRewardStatusChange,
+    rewardStatusErrorPayload,
+    holdInfoWith: (programs) => {
+      const programMap = new Map(programs.map((program) => [normalizeSlug(program.product_slug), program]));
+      return (row) => rewardPayoutHoldInfo(row, programMap);
+    },
+    writeLimiter,
+  })
+);
 
 adminRouter.get("/audit-log", async (req, res) => {
   const rows = await db("admin_audit_log").orderBy("created_at", "desc").limit(Math.min(Number(req.query.limit || 100), 500));
@@ -482,10 +497,12 @@ adminRouter.get("/rewards", async (_req, res) => {
   res.json({ items: rows.map((row) => enrichReward(row, programMap)) });
 });
 
-// The status change itself, shared by the single-row route and the batch
-// route. It throws rewardStatusError for every rule it enforces, so both
-// callers report the same codes.
-async function applyRewardStatusChange(req, rewardId, data) {
+// The status change itself, shared by the single-row route, the batch route
+// and the monthly statements. It throws rewardStatusError for every rule it
+// enforces, so every caller reports the same codes. Given `outer`, a
+// transaction, it runs as a savepoint inside it: a statement pays all its
+// rows in one transaction, and a refused row rolls back alone.
+async function applyRewardStatusChange(req, rewardId, data, outer = null) {
   const target = data.status;
   const allowedTransitions = {
     pending: new Set(["approved", "paid", "rejected"]),
@@ -494,7 +511,7 @@ async function applyRewardStatusChange(req, rewardId, data) {
     paid: new Set(),
   };
 
-  return db.transaction(async (trx) => {
+  return (outer || db).transaction(async (trx) => {
       // Read enough identity to lock qualifying purchase rows before the reward
       // row. Refund/dispute handling uses the same event-then-reward order.
       const snapshot = await trx("reward_queue")
@@ -570,9 +587,13 @@ async function applyRewardStatusChange(req, rewardId, data) {
             trx
           ))
         ) {
+          // Each share's gate is its own programme's: TabForge Pro for a
+          // Private Sync share, the ForgeDrop affiliate level for Cloud pickup.
           throw rewardStatusError(
             409,
-            "referrer_tabforge_pro_required"
+            isCloudPickupShareReward(existing)
+              ? "referrer_not_forgedrop_affiliate"
+              : "referrer_tabforge_pro_required"
           );
         }
         if (!cashAppHandle) {
