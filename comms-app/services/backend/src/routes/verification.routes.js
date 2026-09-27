@@ -125,7 +125,7 @@ verificationRouter.get("/verify", async (req, res) => {
         reason: referralResult?.reason || null,
       });
       // Purchases of the other products with a referral programme (Rose
-      // Colored Glasses, ForgeDrop) made before verifying count now too.
+      // Colored Glasses, DropForge) made before verifying count now too.
       const productResult = await recordVerifiedReferralPurchases({ referredUserId: user.id });
       if (productResult.promoted) {
         log("info", "verified_referral_purchases_promoted", {

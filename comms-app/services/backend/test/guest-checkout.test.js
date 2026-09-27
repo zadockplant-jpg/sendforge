@@ -206,7 +206,7 @@ test("a signed-out visitor goes straight to Stripe, which asks for the email tha
   assert.deepEqual(config.custom_text, { submit: { message: "This email will be your SendForge login." } });
   assert.equal(config.line_items.length, 1);
   assert.equal(config.line_items[0].price_data.unit_amount, 1500);
-  assert.equal(config.line_items[0].price_data.product_data.name, "ForgeDrop (ART25, 25% off)");
+  assert.equal(config.line_items[0].price_data.product_data.name, "DropForge (ART25, 25% off)");
   assert.equal(config.success_url, SUCCESS_URL("forgedrop"), "the session id is filled in by Stripe, so it is written as is");
   assert.equal(config.cancel_url, `${SITE}/products/forgedrop/index.html?checkout=cancelled`);
   assert.equal(config.metadata.guest_checkout, "1");

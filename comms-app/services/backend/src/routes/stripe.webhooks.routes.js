@@ -74,7 +74,7 @@ function normalizeSlug(slug) {
 }
 
 // Every product with a referral programme: TabForge Pro, Rose Colored
-// Glasses and ForgeDrop.
+// Glasses and DropForge.
 function isReferralQualifyingPurchase(entitlementSlug) {
   return isMilestoneReferralProduct(normalizeSlug(entitlementSlug));
 }
@@ -297,7 +297,7 @@ async function upsertStripeSubscription(sub) {
     });
   }
 
-  // ForgeDrop Cloud pickup: the tier of the price the subscription is on now,
+  // DropForge Cloud pickup: the tier of the price the subscription is on now,
   // while it is active; nothing once it has ended.
   if (isCloudPickupSubscription(sub)) {
     await syncCloudPickupSubscriptionEntitlements({
@@ -517,7 +517,7 @@ async function grantCheckoutEntitlements({
     // is allowed to grant or revoke Private Sync.
     if (isTabForgeSyncEntitlement(entitlementSlug)) continue;
     // The same holds for the Romancing the Stone subscription, and for the
-    // ForgeDrop Cloud pickup plans.
+    // DropForge Cloud pickup plans.
     if (isRtsSubscriptionEntitlement(entitlementSlug)) continue;
     if (isCloudPickupEntitlement(entitlementSlug)) continue;
 
@@ -939,7 +939,7 @@ async function handleInvoicePaid(invoice) {
   }
 
   // Every paid Cloud pickup invoice, the first and each month after it, pays
-  // the ForgeDrop affiliate who brought this customer in 5%. Keyed on the
+  // the DropForge affiliate who brought this customer in 5%. Keyed on the
   // invoice id, so a replayed webhook cannot pay for the same month twice.
   const pickup = isHardcap ? null : cloudPickupInvoice(invoice);
   if (pickup) {

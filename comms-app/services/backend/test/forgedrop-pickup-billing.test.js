@@ -1204,7 +1204,7 @@ test("ART25 takes 25% off ForgeDrop at the catalog's own price, and nothing else
   assert.equal(off.body.reused, false, "never the full-price session again");
   const config = stripe.state.sessions.at(-1).config;
   assert.equal(config.line_items[0].price_data.unit_amount, 1500);
-  assert.equal(config.line_items[0].price_data.product_data.name, "ForgeDrop (ART25, 25% off)");
+  assert.equal(config.line_items[0].price_data.product_data.name, "DropForge (ART25, 25% off)");
   assert.equal(config.metadata.promo_code, "ART25");
   assert.equal(off.body.checkout.items[0].unitAmountCents, 1500);
 

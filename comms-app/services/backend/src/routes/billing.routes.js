@@ -72,7 +72,7 @@ export const billingRouter = Router();
  * (the owner, 2026-09-26: no separate pricing in Stripe): the catalog's
  * inline price is lowered before Stripe is asked, so Checkout shows the
  * price paid. ART25 came with a flyer for an art competition (2026-09-27):
- * 25% off ForgeDrop, $20 to $15. Codes are read case-insensitively.
+ * 25% off DropForge, $20 to $15. Codes are read case-insensitively.
  */
 export const PROMO_CODES = Object.freeze({
   ART25: Object.freeze({ percentOff: 25, products: Object.freeze(["forgedrop"]) }),
@@ -129,7 +129,7 @@ const PRODUCT_CATALOG = {
   // licensing.routes.js.
   forgedrop: {
     slug: "forgedrop",
-    displayName: "ForgeDrop",
+    displayName: "DropForge",
     mode: "payment",
     stripePriceId: env.stripePriceForgedrop,
     unitAmountCents: 2000,
@@ -140,7 +140,7 @@ const PRODUCT_CATALOG = {
     defaultCancelPath: "/products/forgedrop/index.html",
   },
   // One-time $20 (the owner, 2026-09-27): a perpetual entitlement, and one
-  // purchase covers five devices (licensedProducts.js), so like ForgeDrop a
+  // purchase covers five devices (licensedProducts.js), so like DropForge a
   // second purchase would buy nothing.
   tuneforge: {
     slug: "tuneforge",
@@ -230,9 +230,9 @@ const PRODUCT_CATALOG = {
   // Romancing the Stone: $30 today with the first 6 months included, then
   // $5/month; or a $120 permanent licence. See modules/romancing-the-stone/billing.js.
   ...RTS_CATALOG,
-  // ForgeDrop Cloud pickup, one product per tier, each a monthly subscription
-  // for ForgeDrop owners: "forgedrop-cloud-pickup-100gb" at $5, -250gb at $10,
-  // -500gb at $15 and -1tb at $25, named "ForgeDrop Cloud pickup — 100 GB" and
+  // DropForge Cloud pickup, one product per tier, each a monthly subscription
+  // for DropForge owners: "forgedrop-cloud-pickup-100gb" at $5, -250gb at $10,
+  // -500gb at $15 and -1tb at $25, named "DropForge Cloud pickup — 100 GB" and
   // so on. Built from the tier table; see modules/forgedrop-pickup/billing.js.
   ...CLOUD_PICKUP_CATALOG,
 };
@@ -1148,8 +1148,8 @@ billingRouter.post("/donations/checkout-session", async (req, res) => {
  * - TabForge Pro with an included 60-day Private Sync trial
  * - account-only Private Sync re-subscription for existing Pro owners
  * - retired collection/skin direct checkout returns explicit errors
- * - ForgeDrop Cloud pickup, productSlug "forgedrop-cloud-pickup-100gb",
- *   -250gb, -500gb or -1tb: a monthly subscription for ForgeDrop owners
+ * - DropForge Cloud pickup, productSlug "forgedrop-cloud-pickup-100gb",
+ *   -250gb, -500gb or -1tb: a monthly subscription for DropForge owners
  *   (403 forgedrop_required otherwise), one plan per account: while a plan
  *   runs on, any tier is 409 already_subscribed; once the customer has
  *   cancelled it under Account, another tier can be bought at once. Sold
@@ -1409,7 +1409,7 @@ async function catalogCheckoutSession(req, res, stripeClient = getStripe, r2Env 
     const successPath = sanitizeRelativePath(parsed.data.successPath, defaultSuccessPath);
     const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, defaultCancelPath);
 
-    // ForgeDrop Cloud pickup: one plan per account, never a second
+    // DropForge Cloud pickup: one plan per account, never a second
     // subscription beside one that runs on. A plan the customer has cancelled
     // under Account (set to end with its period) no longer counts: another
     // tier can be bought at once, and until the old plan's period is over the
