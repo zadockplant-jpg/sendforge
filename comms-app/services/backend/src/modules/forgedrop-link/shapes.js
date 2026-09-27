@@ -16,10 +16,14 @@ export const LINK_LIMITS = Object.freeze({
   // background tabs and change networks under them.
   desktopOnlineMs: 40_000,
   phonePresentMs: 60_000,
+  // A guest is a phone's browser too, on a request's page (ForgeDrop 1.9).
+  guestPresentMs: 60_000,
   licenceCacheMs: 60_000,
   // A page makes a new clientId on every load, so one account's phone
-  // addresses pile up until they lapse; this bounds them.
+  // addresses pile up until they lapse; this bounds them. Guests are counted
+  // apart, so a request's page can never push out the account's own phones.
   phonesPerAccount: 32,
+  guestsPerAccount: 32,
   sweepEveryMs: 15_000,
   rate: Object.freeze({
     signalPerMinute: 120,
@@ -93,6 +97,12 @@ export const PERSON_LIMITS = Object.freeze({
   emailsPerHour: 10,
   // The most files a knock can say it sends.
   maxFiles: 1_000_000,
+  // A request for files (1.9) is open a day, for any number of sends; one
+  // desktop keeps so many, and a new one makes room by ending the oldest.
+  requestMs: 24 * 60 * 60_000,
+  requestsPerDesktop: 64,
+  // The longest message a request carries, in characters.
+  messageChars: 1000,
   rate: Object.freeze({
     // Per account, whichever of its desktops knocks: a knock lands on someone
     // else's computers, so knocking costs.
@@ -102,6 +112,11 @@ export const PERSON_LIMITS = Object.freeze({
     // Per client address, the approval page's two routes together: they
     // take no licence, only the token an email carried.
     invitePerMinute: 30,
+    // Per account, like knocks: a request emails someone else.
+    requestPerMinute: 10,
+    // Per client address, a request page's three routes together; its polls
+    // also per clientId, as a phone's are.
+    requestPagePerMinute: 60,
   }),
 });
 
@@ -117,6 +132,11 @@ export const KNOCK_OUTCOMES = new Set(["sent", "cancelled"]);
 // server; the rest are relayed as sent, like a code session's, and either
 // side may send them. The knock itself is only ever this server's to send.
 export const PERSON_TYPES = new Set(["here", "dial", "dial-answer", "bye"]);
+
+// What a request's page (a guest, 1.9) says to the desktop that asked: the
+// phone link's offer and bye. The desktop answers through /signal, as it
+// answers a phone.
+export const GUEST_TYPES = new Set(["offer", "bye"]);
 
 const NAMEPLATE = /^[0-9]{1,9}$/;
 const CODE_SESSION = /^[A-Za-z0-9_-]{22}$/;
@@ -148,6 +168,29 @@ const APPROVAL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 /** An approval token as people.js makes them: 32 random bytes, 43 base64url characters. */
 export function isApprovalToken(value) {
   return typeof value === "string" && APPROVAL_TOKEN.test(value);
+}
+
+/** A request's token (1.9), made as an approval token is. */
+export function isRequestToken(value) {
+  return typeof value === "string" && APPROVAL_TOKEN.test(value);
+}
+
+/**
+ * A request's message (1.9) as it is kept and emailed: trimmed, its line
+ * breaks and tabs kept, other control characters and the bidirectional ones
+ * (which can make text read as something it is not) taken out. Null when
+ * there is none; undefined when it is not text or is over 1000 characters.
+ */
+export function parseMessage(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const text = value
+    .replace(/\r\n?/g, "\n")
+    .replace(/\p{Cc}/gu, (char) => (char === "\n" || char === "\t" ? char : ""))
+    .replace(/\p{Bidi_Control}/gu, "")
+    .trim();
+  if (!text) return null;
+  return Array.from(text).length <= PERSON_LIMITS.messageChars ? text : undefined;
 }
 
 /**
@@ -213,6 +256,14 @@ export function takesPeople(live) {
   return Boolean(live) && Array.isArray(live.caps) && live.caps.includes("people");
 }
 
+/**
+ * Whether a desktop's presence says it takes a request page's guests (1.9):
+ * it says it answers phones, as an app that asks for files always does.
+ */
+export function takesGuests(live) {
+  return Boolean(live) && Array.isArray(live.caps) && live.caps.includes("phone-link");
+}
+
 const CLIENT_ID = /^[A-Za-z0-9_-]{22,64}$/;
 const SESSION = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -236,7 +287,10 @@ export function isSession(value) {
   return typeof value === "string" && SESSION.test(value);
 }
 
-/** "desktop:<uuid>" or "phone:<clientId>", else null. */
+/**
+ * "desktop:<uuid>", "phone:<clientId>" or "guest:<clientId>" (a request's
+ * page, 1.9, which only desktops may address), else null.
+ */
 export function parseAddress(value) {
   if (typeof value !== "string") return null;
   const colon = value.indexOf(":");
@@ -248,6 +302,7 @@ export function parseAddress(value) {
     return deviceId ? { kind, id: deviceId, address: `desktop:${deviceId}` } : null;
   }
   if (kind === "phone" && isClientId(id)) return { kind, id, address: `phone:${id}` };
+  if (kind === "guest" && isClientId(id)) return { kind, id, address: `guest:${id}` };
   return null;
 }
 

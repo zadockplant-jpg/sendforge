@@ -14,7 +14,7 @@ import express from "express";
 import { db } from "../../config/db.js";
 import { env } from "../../config/env.js";
 import { requireAuth } from "../../middleware/auth.js";
-import { sendForgeDropTransferEmail } from "../../services/email.service.js";
+import { sendForgeDropFileRequestEmail, sendForgeDropTransferEmail } from "../../services/email.service.js";
 import { hasProductEntitlement } from "../../services/entitlement.service.js";
 import { log } from "../../utils/logger.js";
 import { siteUrl } from "../../utils/sitePaths.js";
@@ -58,6 +58,10 @@ export const forgedropLinkRouter = await loadForgeDropLink(async () => {
     // link opens, the token after the "#" so no server ever logs it.
     sendTransferEmail: sendForgeDropTransferEmail,
     approvalLink: (token) => `${siteUrl("/r/")}#${token}`,
+    // A request for files (1.9), emailed with a link to the website's page
+    // for it, the token after the "#" as well.
+    sendRequestEmail: sendForgeDropFileRequestEmail,
+    requestLink: (token) => `${siteUrl("/s/")}#${token}`,
     log,
   });
 });

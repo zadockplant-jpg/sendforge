@@ -10,6 +10,11 @@
  * SendForge runs one Render instance and this is signaling, not storage. A
  * deploy drops it all and both sides simply poll again.
  *
+ * An address is a desktop, a phone, or a guest: a phone's browser on a
+ * request's page (ForgeDrop 1.9), filed under the account that asked. A guest
+ * is present as long as a phone is, and counted apart from the account's own
+ * phones, so neither can push the other out.
+ *
  * Each address holds at most one pending poll (a waiter). A waiter ends in
  * exactly one way, once:
  *   - a message arrives: it gets the mailbox;
@@ -23,19 +28,31 @@
 
 import { LINK_LIMITS } from "./shapes.js";
 
-const kindOf = (address) => (address.startsWith("desktop:") ? "desktop" : "phone");
+const kindOf = (address) => {
+  if (address.startsWith("desktop:")) return "desktop";
+  return address.startsWith("guest:") ? "guest" : "phone";
+};
 
 export function createLinkStore({
   now = Date.now,
   messageTtlMs = LINK_LIMITS.messageTtlMs,
   mailboxSize = LINK_LIMITS.mailboxMessages,
-  presentMs = { desktop: LINK_LIMITS.desktopOnlineMs, phone: LINK_LIMITS.phonePresentMs },
+  presentMs: givenPresentMs = {},
   phonesPerAccount = LINK_LIMITS.phonesPerAccount,
+  guestsPerAccount = LINK_LIMITS.guestsPerAccount,
   sweepEveryMs = LINK_LIMITS.sweepEveryMs,
   onError = () => {},
 } = {}) {
   /** userId -> Map(address -> endpoint) */
   const accounts = new Map();
+  const presentMs = {
+    desktop: LINK_LIMITS.desktopOnlineMs,
+    phone: LINK_LIMITS.phonePresentMs,
+    guest: LINK_LIMITS.guestPresentMs,
+    ...givenPresentMs,
+  };
+  /** How many of a kind one account keeps; desktops are bounded by their slots. */
+  const perAccount = { phone: phonesPerAccount, guest: guestsPerAccount };
 
   const lookup = (userId, address) => accounts.get(userId)?.get(address) || null;
 
@@ -94,15 +111,15 @@ export function createLinkStore({
     if (endpoint) return endpoint;
 
     const kind = kindOf(address);
-    if (kind === "phone") {
-      let phones = 0;
+    if (kind !== "desktop") {
+      let same = 0;
       let stalest = null;
       for (const [other, entry] of book) {
-        if (entry.kind !== "phone") continue;
-        phones += 1;
+        if (entry.kind !== kind) continue;
+        same += 1;
         if (!stalest || entry.seenAt < book.get(stalest).seenAt) stalest = other;
       }
-      if (phones >= phonesPerAccount && stalest) remove(userId, stalest);
+      if (same >= perAccount[kind] && stalest) remove(userId, stalest);
       // remove() may have dropped the last entry and with it the account.
       if (!accounts.has(userId)) accounts.set(userId, book);
     }

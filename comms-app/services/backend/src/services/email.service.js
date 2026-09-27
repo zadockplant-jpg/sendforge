@@ -716,6 +716,80 @@ ${why} Need help? Contact ${supportEmail()}.`;
   });
 }
 
+/**
+ * ForgeDrop people (ForgeDrop/docs/people.md, "Requesting files"): someone
+ * is asking this account's email for files. Their message is theirs, shown
+ * as plain text and never as HTML. The wording is a first draft for the
+ * owner to approve. The link opens the request's page; like an approval
+ * link it is never written to the log, not even without a provider.
+ */
+export async function sendForgeDropFileRequestEmail({
+  to,
+  askerEmail,
+  askerComputer = null,
+  message = null,
+  requestUrl,
+  fileRequestId = null,
+  requestId = null,
+}) {
+  // An address has no spaces or control characters; none reach the email.
+  const email = String(askerEmail || "").replace(/[\s\u0000-\u001f\u007f]/g, "");
+  const computer = forgeDropComputerName(askerComputer);
+  const from = computer ? `${email} (${computer})` : email;
+  const subject = `${email} is asking you for files`;
+  const said = String(message ?? "").trim();
+  const how =
+    "On a phone, the link opens a page ready to choose files; on a computer, it opens ForgeDrop. The files go straight to their computer.";
+  const why = "You're getting this because someone used ForgeDrop to ask for files at this email address.";
+
+  const text = `${subject}
+
+From: ${from}
+${said ? `\nTheir message:\n${said}\n` : ""}
+Send files:
+${requestUrl}
+
+${how}
+
+${why} Need help? Contact ${supportEmail()}.`;
+
+  const link = escapeHtml(requestUrl);
+  const quoted = said
+    ? `
+        <p style="margin:0 0 6px;color:#52627a;">Their message:</p>
+        <div style="margin:0 0 18px;padding:12px 14px;border-left:3px solid #dce3ee;background:#f5f7fb;word-break:break-word;">${escapeHtml(said).replace(/\n/g, "<br>")}</div>`
+    : "";
+  const html = `
+    <div style="margin:0;padding:24px;background:#f5f7fb;color:#172033;font-family:Arial,sans-serif;line-height:1.55;">
+      <div style="max-width:580px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
+        <h1 style="margin:0 0 16px;font-size:26px;line-height:1.2;color:#172033;">${escapeHtml(subject)}</h1>
+        <p style="margin:0 0 18px;"><strong>From:</strong> ${escapeHtml(from)}</p>${quoted}
+        <p style="margin:0 0 22px;">
+          <a href="${link}" style="display:inline-block;padding:12px 18px;border-radius:10px;background:#1e6fe8;color:#ffffff;text-decoration:none;font-weight:700;">Send files</a>
+        </p>
+        <p style="margin:0 0 18px;color:#52627a;">${escapeHtml(how)}</p>
+        <p style="margin:0;color:#66758c;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${link}</p>
+        <hr style="margin:22px 0;border:0;border-top:1px solid #e3e8f0;">
+        <p style="margin:0;color:#7b8799;font-size:12px;">${escapeHtml(why)} Need help? Contact ${escapeHtml(supportEmail())}.</p>
+      </div>
+    </div>
+  `;
+
+  return sendEmailViaSendGrid({
+    to,
+    subject,
+    text,
+    html,
+    requestId,
+    fromEmail: accountFromEmail(),
+    fromName: "ForgeDrop",
+    messageKind: "forgedrop-file-request",
+    messageRef: fileRequestId || requestId,
+    disableSubscriptionTracking: true,
+    logPreview: false,
+  });
+}
+
 
 export async function sendReferralInviteEmail({
   to,

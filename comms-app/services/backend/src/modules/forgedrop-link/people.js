@@ -37,6 +37,7 @@
  */
 
 import crypto from "node:crypto";
+import { createEmailAllowance } from "./allowance.js";
 import { LINK_LIMITS, PERSON_LIMITS } from "./shapes.js";
 
 /** A desktop, as its account and address; the two together say who it is. */
@@ -46,8 +47,6 @@ const keyOf = ({ userId, address }) => `${userId} ${address}`;
 
 /** 16 random bytes: 22 base64url characters. */
 const randomId = () => crypto.randomBytes(16).toString("base64url");
-
-const HOUR_MS = 60 * 60_000;
 
 export function createPeopleStore({
   deliver,
@@ -83,10 +82,8 @@ export function createPeopleStore({
   const waiting = new Map();
   /** a desktop that knocked -> ids of the knocks it keeps, oldest first */
   const kept = new Map();
-  /** "sender recipient" accounts -> when the last email between them went */
-  const lastEmail = new Map();
-  /** recipient account -> when its emails of the last hour went */
-  const emails = new Map();
+  /** How often a waiting send may email its recipient. */
+  const allowance = createEmailAllowance({ now, everyMs: emailEveryMs, perHour: emailsPerHour });
 
   const isParty = (session, who) => same(session.sender, who) || same(session.recipient, who);
   const otherParty = (session, who) => (same(session.sender, who) ? session.recipient : session.sender);
@@ -222,12 +219,7 @@ export function createPeopleStore({
     const at = now();
     for (const [sid, session] of sessions) if (session.expiresAt <= at) endSession(sid);
     for (const id of [...knocks.keys()]) liveKnock(id, at);
-    for (const [pair, when] of lastEmail) if (at - when >= emailEveryMs) lastEmail.delete(pair);
-    for (const [userId, times] of emails) {
-      const recent = times.filter((when) => at - when < HOUR_MS);
-      if (recent.length) emails.set(userId, recent);
-      else emails.delete(userId);
-    }
+    allowance.sweep();
   }
 
   const sweeper = setInterval(() => {
@@ -414,18 +406,7 @@ export function createPeopleStore({
      * an hour per recipient account.
      */
     mayEmail(fromUserId, toUserId) {
-      const at = now();
-      const pair = `${fromUserId} ${toUserId}`;
-      if (at - (lastEmail.get(pair) ?? -Infinity) < emailEveryMs) return false;
-      const recent = (emails.get(toUserId) ?? []).filter((when) => at - when < HOUR_MS);
-      if (recent.length >= emailsPerHour) {
-        emails.set(toUserId, recent);
-        return false;
-      }
-      recent.push(at);
-      emails.set(toUserId, recent);
-      lastEmail.set(pair, at);
-      return true;
+      return allowance.may(fromUserId, toUserId);
     },
 
     /**

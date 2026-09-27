@@ -24,6 +24,10 @@
  *   POST /person/end       desktop  a send's knock is over: sent or cancelled
  *   POST /person/invite    page     what an emailed approval link is for
  *   POST /person/approve   page     approve it
+ *   POST /person/request   desktop  ask someone for files, by their email
+ *   POST /request/open     page     what an emailed request's link is for
+ *   POST /request/poll     page     its long-poll, as a guest of the asker
+ *   POST /request/signal   page     an offer or bye to the desktop that asked
  *
  * Desktops of one account also swap connection candidates here to reach each
  * other across the internet (ForgeDrop 1.4); the files then go directly
@@ -37,11 +41,16 @@
  * with this server vouching for who is who. people.js explains how; the files
  * still go directly, never through here. From 1.8 a send to someone's account
  * waits for their computers and emails them a link to approve it, whose page
- * (the website's /r/) calls the two "page" routes.
+ * (the website's /r/) calls /person/invite and /person/approve. From 1.9 a
+ * desktop can ask someone for files: requests.js keeps the request, which is
+ * emailed as a link to the website's /s/, and that page, on the phone of the
+ * one asked, reaches the asking desktop as the phone link does, as a guest of
+ * the asking account. The desktop answers it through /signal.
  *
  * A desktop signs in with its offline licence (auth.js), a phone with the
  * customer's Bearer token. Either way the account must own ForgeDrop. The
- * approval page signs in with nothing: the token its link carries is the key.
+ * pages an email opens sign in with nothing: the token their link carries is
+ * the key.
  */
 
 import express from "express";
@@ -51,6 +60,7 @@ import { createDesktopAuth, hasLicenceHeader } from "./auth.js";
 import { createCodeStore } from "./codes.js";
 import { createAccountDirectory, createDeviceDirectory } from "./devices.js";
 import { createPeopleStore } from "./people.js";
+import { createRequestStore } from "./requests.js";
 import {
   answersPhones,
   canonicalUuid,
@@ -58,11 +68,13 @@ import {
   CODE_LIMITS,
   CODE_TYPES,
   DESKTOP_TO_DESKTOP_TYPES,
+  GUEST_TYPES,
   isApprovalToken,
   isClientId,
   isCodeSession,
   isPersonSession,
   isPlainObject,
+  isRequestToken,
   isSession,
   KNOCK_OUTCOMES,
   KNOCK_PURPOSES,
@@ -70,6 +82,7 @@ import {
   parseAddress,
   parseCaps,
   parseEmail,
+  parseMessage,
   parseMinutes,
   parseNameplate,
   parseSummary,
@@ -78,6 +91,7 @@ import {
   PERSON_TYPES,
   SENDABLE_TYPES,
   takesDials,
+  takesGuests,
   takesPeople,
 } from "./shapes.js";
 import { createLinkStore } from "./store.js";
@@ -93,6 +107,7 @@ const REFUSALS = Object.freeze({
   code_gone: 404,
   person_gone: 404,
   invite_gone: 404,
+  request_gone: 404,
   too_many_codes: 409,
   too_many_messages: 409,
   invite_over: 409,
@@ -126,6 +141,12 @@ export function createForgeDropLinkRouter({
   sendTransferEmail = null,
   // The approval page an email links to, with the token after the "#".
   approvalLink = (token) => `https://sendforge.app/r/#${token}`,
+  // Requests for files (1.9): their store, their email
+  // (sendForgeDropFileRequestEmail in production; without one, none goes),
+  // and the page the email links to, with the token after the "#".
+  requests: givenRequests = null,
+  sendRequestEmail = null,
+  requestLink = (token) => `https://sendforge.app/s/#${token}`,
   rate = {},
   rateLimitPrefix = "forgedrop-link",
   log = () => {},
@@ -160,6 +181,13 @@ export function createForgeDropLinkRouter({
       present: (userId, address) => store.isPresent(userId, address),
       onError: (error) =>
         log("error", "forgedrop_link_person_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
+    });
+  const requests =
+    givenRequests ||
+    createRequestStore({
+      now,
+      onError: (error) =>
+        log("error", "forgedrop_link_request_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
   const limits = { ...LINK_LIMITS.rate, ...CODE_LIMITS.rate, ...PERSON_LIMITS.rate, ...rate };
   const devices = createDeviceDirectory(db, product.slug);
@@ -256,6 +284,18 @@ export function createForgeDropLinkRouter({
   // The approval page signs in with nothing, so it is limited by the address
   // it calls from, its two routes together.
   const inviteLimiter = limiter("person-invite", limits.invitePerMinute, rateLimitByIp);
+  // Asking for files emails someone else, so it is limited per account, as
+  // knocking is.
+  const requestLimiter = limiter("person-request", limits.requestPerMinute, (req) => req.link.userId);
+  // A request's page signs in with nothing: limited by the address it calls
+  // from, its three routes together, and its polls per clientId as well, as a
+  // phone's are (keyed as sent, before it is checked; the limiter hashes it).
+  const requestPageLimiter = limiter("request-page", limits.requestPagePerMinute, rateLimitByIp);
+  const guestPollLimiter = limiter(
+    "request-poll",
+    limits.requestPagePerMinute,
+    (req) => `guest:${String(req.body?.clientId ?? "")}`
+  );
   const refuse = (res, error) => res.status(REFUSALS[error] || 400).json({ error });
 
   /** An account's email as an address: trimmed, in lower case. */
@@ -361,6 +401,34 @@ export function createForgeDropLinkRouter({
       )
       .catch((error) =>
         log("error", "forgedrop_link_transfer_email_failed", {
+          code: error?.code ?? null,
+          message: String(error?.message || error).slice(0, 200),
+        })
+      );
+  }
+
+  /**
+   * Email the account a request asks for files (1.9), once the request has
+   * been answered, so it takes as long whether or not an email goes. The
+   * same limits as a waiting send's email, counted apart from them; over
+   * them the request is kept, only not emailed. A failure is logged, and the
+   * link, which opens the request, never is.
+   */
+  function emailRequest({ sender, account, card, message, request, token }) {
+    if (!sendRequestEmail || !requests.mayEmail(sender.userId, account.userId)) return;
+    Promise.resolve()
+      .then(() =>
+        sendRequestEmail({
+          to: account.email,
+          askerEmail: card.email,
+          askerComputer: card.name,
+          message,
+          requestUrl: requestLink(token),
+          fileRequestId: request,
+        })
+      )
+      .catch((error) =>
+        log("error", "forgedrop_link_request_email_failed", {
           code: error?.code ?? null,
           message: String(error?.message || error).slice(0, 200),
         })
@@ -535,6 +603,9 @@ export function createForgeDropLinkRouter({
 
       const to = parseAddress(body.to);
       if (!to) return res.status(400).json({ error: "bad_recipient" });
+      // A request page's guest (1.9) is answered by its account's desktops,
+      // never reached from a phone.
+      if (to.kind === "guest" && sender.kind !== "desktop") return res.status(400).json({ error: "bad_recipient" });
       // Phone to phone never; desktop to desktop only to dial (below), and
       // never to itself.
       const betweenDesktops = sender.kind === "desktop" && to.kind === "desktop";
@@ -815,6 +886,127 @@ export function createForgeDropLinkRouter({
     if (!approved.ok) return refuse(res, approved.error);
     return res.json(approved.invite);
   });
+
+  // ------------------------------------------------ requests for files (1.9)
+  //
+  // A desktop asks someone for files by their email. The answer is the same
+  // whoever the address is, after the same questions to the database; for a
+  // verified owner's address the request is kept a day and emailed to them.
+  // Its link opens the website's /s/, which signs in with nothing but the
+  // token after the link's "#", and reaches the asking desktop the way a
+  // phone does, as the guest "guest:<clientId>" under the asking account: it
+  // offers, and the desktop answers through /signal. The page reaches the
+  // desktop that asked and nothing else. CORS is app.js's, ahead of this
+  // router, so the site can call these.
+
+  router.post(
+    "/person/request",
+    desktopAuth,
+    requestLimiter,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      const to = parseEmail(body.to);
+      if (!to) return res.status(400).json({ error: "bad_email" });
+      const message = parseMessage(body.message);
+      if (message === undefined) return res.status(400).json({ error: "bad_message" });
+
+      let sender;
+      let found = { account: null, desktops: [] };
+      try {
+        sender = await vouchFor(req.link);
+        if (sender.ok) found = await recipientsOf(to, req.link);
+      } catch (error) {
+        return unavailable(res, "forgedrop_link_file_request_failed", error);
+      }
+      if (!sender.ok) return res.status(409).json({ error: sender.error });
+
+      const { request, token } = requests.ask(req.link, {
+        card: sender.card,
+        address: to,
+        message,
+        keep: found.account !== null,
+      });
+      // The email starts only after the answer has gone.
+      const answered = res.status(202).json({ request });
+      if (token) emailRequest({ sender: req.link, account: found.account, card: sender.card, message, request, token });
+      return answered;
+    })
+  );
+
+  /** The request a page's token opens, while it lasts; else null, malformed or not. */
+  const requestOf = (req) => {
+    const token = (req.body || {}).token;
+    return isRequestToken(token) ? requests.byToken(token) : null;
+  };
+
+  // Who is asking, and whether their computer can be reached now.
+  router.post("/request/open", requestPageLimiter, (req, res) => {
+    const request = requestOf(req);
+    if (!request) return refuse(res, "request_gone");
+    const { userId, address } = request.asker;
+    return res.json({
+      from: request.card.email,
+      name: request.card.name ?? null,
+      message: request.message,
+      identity: request.card.identity,
+      online: takesGuests(store.presence(userId, address)),
+    });
+  });
+
+  router.post("/request/poll", requestPageLimiter, guestPollLimiter, (req, res) => {
+    const body = req.body || {};
+    const request = requestOf(req);
+    if (!request) return refuse(res, "request_gone");
+    if (!isClientId(body.clientId)) return res.status(400).json({ error: "bad_client_id" });
+    const waitSeconds = parseWait(body.wait);
+    if (waitSeconds === null) return res.status(400).json({ error: "bad_wait" });
+    return longPoll(res, request.asker.userId, `guest:${body.clientId}`, waitSeconds, null);
+  });
+
+  router.post(
+    "/request/signal",
+    requestPageLimiter,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      const request = requestOf(req);
+      if (!request) return refuse(res, "request_gone");
+      if (!isClientId(body.clientId)) return res.status(400).json({ error: "bad_client_id" });
+      if (!isSession(body.session)) return res.status(400).json({ error: "bad_session" });
+      if (!GUEST_TYPES.has(body.type)) return res.status(400).json({ error: "bad_type" });
+      const data = body.data === undefined ? {} : body.data;
+      if (!isPlainObject(data)) return res.status(400).json({ error: "bad_data" });
+      if (Buffer.byteLength(JSON.stringify(data), "utf8") > LINK_LIMITS.dataBytes) {
+        return res.status(413).json({ error: "data_too_large" });
+      }
+
+      // Only to the desktop that asked, while it says it takes phones and
+      // still holds its slot.
+      const { userId, address } = request.asker;
+      if (!takesGuests(store.presence(userId, address))) return res.status(404).json({ error: "desktop_offline" });
+      let active;
+      try {
+        active = await devices.findActive(userId, parseAddress(address)?.id);
+      } catch (error) {
+        return unavailable(res, "forgedrop_link_device_check_failed", error);
+      }
+      if (!active) return res.status(404).json({ error: "desktop_offline" });
+
+      const guest = `guest:${body.clientId}`;
+      store.deliver(userId, address, {
+        from: guest,
+        session: body.session,
+        type: body.type,
+        // Which request this answers, as this server knows it; whatever the
+        // page said about that is replaced.
+        data: { ...data, request: { id: request.id, email: request.address } },
+        sentAt: new Date(now()).toISOString(),
+      });
+      // A guest that just spoke is there, as a phone that just spoke is: the
+      // answer may come before its first poll.
+      store.touch(userId, guest);
+      return res.status(202).json({ ok: true });
+    })
+  );
 
   router.use((_req, res) => res.status(404).json({ error: "not_found" }));
 

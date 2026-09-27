@@ -1434,7 +1434,7 @@ You're getting this because someone used ForgeDrop to send files to this email a
 
 test("the mounted module sends the real email, linking to the website's /r/ page", async () => {
   const index = await src("../src/modules/forgedrop-link/index.js");
-  assert.match(index, /import \{ sendForgeDropTransferEmail \} from "\.\.\/\.\.\/services\/email\.service\.js";/);
+  assert.match(index, /import \{[^}]*\bsendForgeDropTransferEmail\b[^}]*\} from "\.\.\/\.\.\/services\/email\.service\.js";/);
   assert.match(index, /sendTransferEmail: sendForgeDropTransferEmail,/);
   assert.match(index, /approvalLink: \(token\) => `\$\{siteUrl\("\/r\/"\)\}#\$\{token\}`,/);
 
@@ -1646,7 +1646,13 @@ test("addresses, session ids, tokens and summaries are read generously but safel
   assert.equal(PERSON_LIMITS.maxFiles, 1_000_000);
   assert.equal(PERSON_LIMITS.knocksPerDesktop, 64);
   assert.equal(PERSON_LIMITS.knocksPerPoll, 8);
-  assert.deepEqual(PERSON_LIMITS.rate, { knockPerMinute: 10, personSignalPerMinute: 120, invitePerMinute: 30 });
+  assert.deepEqual(PERSON_LIMITS.rate, {
+    knockPerMinute: 10,
+    personSignalPerMinute: 120,
+    invitePerMinute: 30,
+    requestPerMinute: 10,
+    requestPagePerMinute: 60,
+  });
   // What an app may send; "approved", like the knock, only ever comes from here.
   assert.deepEqual([...PERSON_TYPES].sort(), ["bye", "dial", "dial-answer", "here"]);
   assert.deepEqual([...KNOCK_PURPOSES].sort(), ["hello", "send"]);
