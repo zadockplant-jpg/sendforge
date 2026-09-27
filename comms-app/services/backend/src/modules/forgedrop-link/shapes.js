@@ -71,8 +71,57 @@ export const CODE_LIMITS = Object.freeze({
 // key of the identities the PAKE vouched for.
 export const CODE_TYPES = new Set(["pake", "proof", "dial", "dial-answer", "bye"]);
 
+// People (ForgeDrop 1.7, ForgeDrop/docs/people.md): sending to someone by the
+// email of their SendForge account. people.js holds the sessions a knock opens.
+export const PERSON_LIMITS = Object.freeze({
+  // A knock's sessions last an hour and carry 64 messages, as a code's do.
+  sessionMs: 60 * 60_000,
+  sessionMessages: 64,
+  // The longest an email address can be.
+  emailChars: 254,
+  rate: Object.freeze({
+    // Per account, whichever of its desktops knocks: a knock lands on someone
+    // else's computers, so knocking costs.
+    knockPerMinute: 10,
+    // Per account, the same allowance as /signal, counted apart from it.
+    personSignalPerMinute: LINK_LIMITS.rate.signalPerMinute,
+  }),
+});
+
+// Why a desktop knocks: to send files, or only to say hello, which puts it in
+// the other's list and opens no session.
+export const KNOCK_PURPOSES = new Set(["send", "hello"]);
+
+// What the two computers of a person session say to each other. "here" goes
+// from the desktop knocked on to the one that knocked, filled in by this
+// server; the rest are relayed as sent, like a code session's, and either
+// side may send them. The knock itself is only ever this server's to send.
+export const PERSON_TYPES = new Set(["here", "dial", "dial-answer", "bye"]);
+
 const NAMEPLATE = /^[0-9]{1,9}$/;
 const CODE_SESSION = /^[A-Za-z0-9_-]{22}$/;
+
+// local@domain.tld: whatever registration's own check (zod's) lets in, and a
+// little more. Letters, digits and the usual punctuation before the @, with
+// no leading, trailing or doubled dot; dot-separated labels after it, the
+// last a top-level domain of letters, or an internationalised one (xn--).
+const EMAIL =
+  /^(?!\.)(?!.*\.\.)[a-z0-9!#$%&'*+/=?^_`{|}~.-]+(?<!\.)@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
+
+/**
+ * A person's address as ForgeDrop writes it, the account's email trimmed and
+ * in lower case; null for anything that is not an email.
+ */
+export function parseEmail(value) {
+  if (typeof value !== "string") return null;
+  const email = value.trim().toLowerCase();
+  return email.length <= PERSON_LIMITS.emailChars && EMAIL.test(email) ? email : null;
+}
+
+/** A person session id, made as a code's is: 22 base64url characters. */
+export function isPersonSession(value) {
+  return typeof value === "string" && CODE_SESSION.test(value);
+}
 
 /** A nameplate, "7" or 7, as a number from 1; else null. "007" is 7. */
 export function parseNameplate(value) {
@@ -98,7 +147,8 @@ export function isCodeSession(value) {
 }
 
 // What a desktop is polling for. Absent means an older app: the phone link.
-const KNOWN_CAPS = new Set(["phone-link", "internet"]);
+// "people" (1.7) is knocks on its account's email.
+const KNOWN_CAPS = new Set(["phone-link", "internet", "people"]);
 
 /** The capabilities a desktop's poll declares, or null for none given. */
 export function parseCaps(value) {
@@ -114,6 +164,11 @@ export function answersPhones(live) {
 /** Whether a desktop's presence says it takes dials from its other desktops. */
 export function takesDials(live) {
   return Boolean(live) && Array.isArray(live.caps) && live.caps.includes("internet");
+}
+
+/** Whether a desktop's presence says it answers knocks on its account's email. */
+export function takesPeople(live) {
+  return Boolean(live) && Array.isArray(live.caps) && live.caps.includes("people");
 }
 
 const CLIENT_ID = /^[A-Za-z0-9_-]{22,64}$/;

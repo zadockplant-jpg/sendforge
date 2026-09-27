@@ -17,6 +17,10 @@
  *   POST /code/claim       desktop  claim someone's code, starting a session
  *   POST /code/signal      desktop  a message to the session's other side
  *   POST /code/close       desktop  withdraw a code, or end a session
+ *   GET  /person/me        desktop  its own address: its account's email
+ *   POST /person/knock     desktop  knock on someone's address, an email
+ *   POST /person/signal    desktop  a message to the session's other side
+ *   POST /person/close     desktop  end a session
  *
  * Desktops of one account also swap connection candidates here to reach each
  * other across the internet (ForgeDrop 1.4); the files then go directly
@@ -25,6 +29,10 @@
  * Codes (ForgeDrop 1.5) introduce two desktops that need not share an
  * account, for sending to someone who is not one of your own computers.
  * codes.js explains how; the files still go directly, never through here.
+ *
+ * People (ForgeDrop 1.7) introduce them by the email of an account instead,
+ * with this server vouching for who is who. people.js explains how; the files
+ * still go directly, never through here.
  *
  * A desktop signs in with its offline licence (auth.js), a phone with the
  * customer's Bearer token. Either way the account must own ForgeDrop.
@@ -35,7 +43,8 @@ import { createRateLimiter } from "../../middleware/rateLimit.js";
 import { licensedProduct } from "../../services/licensedProducts.js";
 import { createDesktopAuth, hasLicenceHeader } from "./auth.js";
 import { createCodeStore } from "./codes.js";
-import { createDeviceDirectory } from "./devices.js";
+import { createAccountDirectory, createDeviceDirectory } from "./devices.js";
+import { createPeopleStore } from "./people.js";
 import {
   answersPhones,
   canonicalUuid,
@@ -45,31 +54,43 @@ import {
   DESKTOP_TO_DESKTOP_TYPES,
   isClientId,
   isCodeSession,
+  isPersonSession,
   isPlainObject,
   isSession,
+  KNOCK_PURPOSES,
   LINK_LIMITS,
   parseAddress,
   parseCaps,
+  parseEmail,
   parseMinutes,
   parseNameplate,
   parseWait,
+  PERSON_LIMITS,
+  PERSON_TYPES,
   SENDABLE_TYPES,
   takesDials,
+  takesPeople,
 } from "./shapes.js";
 import { createLinkStore } from "./store.js";
 
-export { CODE_LIMITS, LINK_LIMITS };
+export { CODE_LIMITS, LINK_LIMITS, PERSON_LIMITS };
 
-// How the code store's refusals reach the client. A 404 is the same answer
-// whether the thing never existed, has run out or belongs to someone else.
-// The caps are 409, not 429: waiting does not lift them, only closing a code
-// does, and a session's messages never come back.
-const CODE_REFUSALS = Object.freeze({
+// How the code and person stores' refusals reach the client. A 404 is the
+// same answer whether the thing never existed, has run out or belongs to
+// someone else. The caps are 409, not 429: waiting does not lift them, only
+// closing a code does, and a session's messages never come back.
+const REFUSALS = Object.freeze({
   code_unknown: 404,
   code_gone: 404,
+  person_gone: 404,
   too_many_codes: 409,
   too_many_messages: 409,
 });
+
+// An account id no account has. A knock on an address nobody has asks the
+// database about it all the same, so how long a knock takes says nothing
+// about who has an account.
+const NOBODY = "00000000-0000-0000-0000-000000000000";
 
 /** Whether a body field was given at all; null counts as not given. */
 const given = (value) => value !== undefined && value !== null;
@@ -88,6 +109,7 @@ export function createForgeDropLinkRouter({
   now = Date.now,
   store: givenStore = null,
   codes: givenCodes = null,
+  people: givenPeople = null,
   rate = {},
   rateLimitPrefix = "forgedrop-link",
   log = () => {},
@@ -112,8 +134,18 @@ export function createForgeDropLinkRouter({
       onError: (error) =>
         log("error", "forgedrop_link_code_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
-  const limits = { ...LINK_LIMITS.rate, ...CODE_LIMITS.rate, ...rate };
+  // A knock and what follows it travel in the same mailboxes too.
+  const people =
+    givenPeople ||
+    createPeopleStore({
+      now,
+      deliver: (userId, address, message) => store.deliver(userId, address, message),
+      onError: (error) =>
+        log("error", "forgedrop_link_person_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
+    });
+  const limits = { ...LINK_LIMITS.rate, ...CODE_LIMITS.rate, ...PERSON_LIMITS.rate, ...rate };
   const devices = createDeviceDirectory(db, product.slug);
+  const accounts = createAccountDirectory(db);
   const owns = (userId) => hasProductEntitlement(userId, product.entitlementSlug || product.slug);
   const router = express.Router();
 
@@ -196,7 +228,60 @@ export function createForgeDropLinkRouter({
   // allowance of guesses. Every claim counts, whatever its answer.
   const codeClaimLimiter = limiter("code-claim", limits.codeClaimPerMinute, (req) => req.link.userId);
   const codeSignalLimiter = limiter("code-signal", limits.codeSignalPerMinute, (req) => req.link.userId);
-  const refuse = (res, error) => res.status(CODE_REFUSALS[error] || 400).json({ error });
+  // Per account, like claims: a second licence does not buy a second
+  // allowance of knocks. Every knock counts, whatever its answer.
+  const knockLimiter = limiter("person-knock", limits.knockPerMinute, (req) => req.link.userId);
+  const personSignalLimiter = limiter("person-signal", limits.personSignalPerMinute, (req) => req.link.userId);
+  // A desktop's own address is read from the database, so asking for it is
+  // limited like the desktop list, with an allowance of its own.
+  const personMeLimiter = limiter("person-me", limits.desktopsPerMinute, (req) => req.link.userId);
+  const refuse = (res, error) => res.status(REFUSALS[error] || 400).json({ error });
+
+  /** An account's email as an address: trimmed, in lower case. */
+  const addressOf = (email) => String(email).trim().toLowerCase();
+
+  /**
+   * What this server vouches for about a desktop: its account's verified
+   * email, its name (its poll's, else its device row's) and the identity key
+   * it proved it holds, with that key's fingerprint. Read from the database
+   * as it is vouched for, never taken from anything an app sent. A refusal
+   * names what is missing.
+   */
+  async function vouchFor({ userId, deviceId, address }) {
+    const [account, device] = await Promise.all([accounts.byId(userId), devices.findProven(userId, deviceId)]);
+    if (!account?.email || !account.email_verified) return { ok: false, error: "email_unverified" };
+    if (!device) return { ok: false, error: "identity_unproven" };
+    return {
+      ok: true,
+      card: {
+        email: addressOf(account.email),
+        name: store.presence(userId, address)?.name ?? device.name,
+        identity: device.identity,
+        fingerprint: device.fingerprint,
+      },
+    };
+  }
+
+  /**
+   * The desktops a knock on `address` lands on: those of the account whose
+   * verified email it is, if that account owns ForgeDrop, that hold a slot,
+   * have proved their key and are polling saying they take people; never the
+   * desktop knocking. No such account, not an owner and nobody online all
+   * come back as nobody, after the same three questions to the database.
+   */
+  async function recipientsOf(address, sender) {
+    const account = await accounts.findVerified(address);
+    const userId = account ? canonicalUuid(String(account.id)) || String(account.id) : NOBODY;
+    const [owned, desktops] = await Promise.all([owns(userId), devices.listProven(userId)]);
+    if (!account || !owned) return [];
+    return desktops
+      .map(({ deviceId }) => ({
+        userId,
+        address: `desktop:${canonicalUuid(String(deviceId)) || String(deviceId)}`,
+      }))
+      .filter((party) => !(party.userId === sender.userId && party.address === sender.address))
+      .filter((party) => takesPeople(store.presence(party.userId, party.address)));
+  }
 
   function longPoll(res, userId, address, waitSeconds, info) {
     if (res.destroyed) return;
@@ -477,6 +562,112 @@ export function createForgeDropLinkRouter({
       if (number === null) return res.status(400).json({ error: "bad_nameplate" });
       closed = codes.closeNameplate(req.link, number);
     }
+    if (!closed.ok) return refuse(res, closed.error);
+    return res.status(204).end();
+  });
+
+  // -------------------------------------------------------------- people
+  //
+  // Desktops only, like codes. A person's address is the email of the
+  // account their ForgeDrop is activated with; the two sides may belong to
+  // different accounts, and people.js keeps each one's mail in its own. What
+  // this server vouches for (ForgeDrop/docs/people.md, "What is trusted") is
+  // read from the database as it is said, never taken from an app.
+
+  router.get(
+    "/person/me",
+    desktopAuth,
+    personMeLimiter,
+    wrap(async (req, res) => {
+      let account;
+      try {
+        account = await accounts.byId(req.link.userId);
+      } catch (error) {
+        return unavailable(res, "forgedrop_link_person_me_failed", error);
+      }
+      return res.json({
+        email: account?.email ? addressOf(account.email) : null,
+        verified: Boolean(account?.email && account.email_verified),
+      });
+    })
+  );
+
+  // The answer is the same whether or not the address has anyone: a knock
+  // id, so nobody can use a knock to learn who has an account. Only what is
+  // wrong with the knock itself, or with the one knocking, is refused.
+  router.post(
+    "/person/knock",
+    desktopAuth,
+    knockLimiter,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      const to = parseEmail(body.to);
+      if (!to) return res.status(400).json({ error: "bad_email" });
+      if (!KNOCK_PURPOSES.has(body.purpose)) return res.status(400).json({ error: "bad_purpose" });
+
+      let sender;
+      let recipients = [];
+      try {
+        sender = await vouchFor(req.link);
+        if (sender.ok) recipients = await recipientsOf(to, req.link);
+      } catch (error) {
+        return unavailable(res, "forgedrop_link_knock_failed", error);
+      }
+      if (!sender.ok) return res.status(409).json({ error: sender.error });
+
+      const knock = people.knock(req.link, { purpose: body.purpose, card: sender.card, recipients });
+      return res.status(202).json({ knock });
+    })
+  );
+
+  router.post(
+    "/person/signal",
+    desktopAuth,
+    personSignalLimiter,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      if (!isPersonSession(body.session)) return res.status(400).json({ error: "bad_session" });
+      if (!PERSON_TYPES.has(body.type)) return res.status(400).json({ error: "bad_type" });
+      const data = body.data === undefined ? {} : body.data;
+      if (!isPlainObject(data)) return res.status(400).json({ error: "bad_data" });
+      if (Buffer.byteLength(JSON.stringify(data), "utf8") > LINK_LIMITS.dataBytes) {
+        return res.status(413).json({ error: "data_too_large" });
+      }
+
+      // "here" is the desktop knocked on answering, and what it says is
+      // dropped: this server says who it is. Nothing is looked up for anyone
+      // who is not the one knocked on.
+      let said = data;
+      if (body.type === "here") {
+        const mine = people.role(req.link, body.session);
+        if (!mine) return refuse(res, "person_gone");
+        if (mine.role !== "recipient") return res.status(400).json({ error: "bad_type" });
+        let recipient;
+        try {
+          recipient = await vouchFor(req.link);
+        } catch (error) {
+          return unavailable(res, "forgedrop_link_person_here_failed", error);
+        }
+        // Knocked on, but no longer anyone this server can vouch for: its
+        // slot freed, or its key or email no longer counting. The session
+        // ends, and the desktop that knocked never hears of it.
+        if (!recipient.ok) {
+          people.forget(req.link, body.session);
+          return refuse(res, "person_gone");
+        }
+        said = { knock: mine.knock, ...recipient.card };
+      }
+
+      const sent = people.signal(req.link, body.session, body.type, said);
+      if (!sent.ok) return refuse(res, sent.error);
+      return res.status(202).json({ ok: true });
+    })
+  );
+
+  router.post("/person/close", desktopAuth, (req, res) => {
+    const body = req.body || {};
+    if (!isPersonSession(body.session)) return res.status(400).json({ error: "bad_session" });
+    const closed = people.closeSession(req.link, body.session);
     if (!closed.ok) return refuse(res, closed.error);
     return res.status(204).end();
   });
