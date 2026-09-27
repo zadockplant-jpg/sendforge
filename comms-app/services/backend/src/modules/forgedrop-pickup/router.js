@@ -54,10 +54,19 @@ function noStore(_req, res, next) {
   next();
 }
 
-/** Every route answers 503 pickup_unavailable. */
+/**
+ * GET /status, for the website: whether Cloud pickup is offered, the same
+ * moment the app starts showing it. Public, no body, nothing looked up.
+ */
+function status(available) {
+  return (_req, res) => res.status(200).json({ available });
+}
+
+/** Every route answers 503 pickup_unavailable, and /status says so too. */
 export function unconfiguredRouter() {
   const router = express.Router();
   router.use(noStore);
+  router.get("/status", status(false));
   router.use((_req, res) => res.status(503).json({ error: "pickup_unavailable" }));
   router.stop = () => {};
   return router;
@@ -171,6 +180,9 @@ export function createForgeDropPickupRouter({
   };
 
   router.use(noStore);
+
+  // Ahead of /:id, which would take "status" for a pickup's id.
+  router.get("/status", status(true));
 
   // JSON only. Without this, a body without its Content-Type would be eaten
   // by the app-wide form parser and fail in confusing ways further down.

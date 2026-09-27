@@ -428,6 +428,26 @@ test("without R2's settings every pickup route answers 503 pickup_unavailable, a
   assert.match(index, /await import\("\.\/router\.js"\)/);
 });
 
+test("/status tells the website whether Cloud pickup is offered, with no sign-in", async () => {
+  // R2 set up: the site shows the plans, the same moment the app shows pickup.
+  for (const base of ["/v1/forgedrop/pickup", "/big"]) {
+    const res = await call("/status", { method: "GET", base });
+    assert.deepEqual([res.status, res.body], [200, { available: true }], base);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  }
+  // Not set up, or the module failed to load: "Coming soon" stays.
+  for (const base of ["/unconfigured", "/real", "/broken"]) {
+    const res = await call("/status", { method: "GET", base });
+    assert.deepEqual([res.status, res.body], [200, { available: false }], base);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  }
+  // A licence changes nothing, and "status" is never taken for a pickup's id.
+  const signedIn = await call("/status", { method: "GET", licence: devices.studio.token });
+  assert.deepEqual([signedIn.status, signedIn.body], [200, { available: true }]);
+  const posted = await call("/status", { body: {} });           // only ever a GET
+  assert.deepEqual([posted.status, posted.body], [404, { error: "not_found" }]);
+});
+
 // ------------------------------------------------------------------- sign-in
 
 test("every route is for a desktop signed in with its ForgeDrop licence", async () => {

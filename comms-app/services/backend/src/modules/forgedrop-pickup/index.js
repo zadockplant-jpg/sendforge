@@ -19,10 +19,13 @@ import { log } from "../../utils/logger.js";
 
 export function unavailableRouter() {
   const router = express.Router();
-  router.use((_req, res) => {
+  router.use((_req, res, next) => {
     res.set("Cache-Control", "no-store");
-    res.status(503).json({ error: "pickup_unavailable" });
+    next();
   });
+  // The website asks this to decide whether to sell Cloud pickup.
+  router.get("/status", (_req, res) => res.status(200).json({ available: false }));
+  router.use((_req, res) => res.status(503).json({ error: "pickup_unavailable" }));
   return router;
 }
 
