@@ -8,6 +8,21 @@ export const OBJECTS = "forgedrop_pickup_objects";
 
 export const CLOSED_STATUSES = Object.freeze(["picked_up", "expired", "cancelled"]);
 
+// When the last upload link a pickup handed out stops working, at the
+// latest. A link lasts a day from when it is handed out and never past the
+// pickup's end, and links are handed out only while it uploads: so before
+// uploaded_at, or for an upload never finished, by the end at the latest.
+// uploadLinksEnd below is the same in JavaScript, for a row in hand.
+const LINKS_END_SQL =
+  "(CASE WHEN uploaded_at IS NULL THEN expires_at " +
+  "ELSE LEAST(uploaded_at + (? * interval '1 second'), expires_at) END)";
+
+export function uploadLinksEnd(row, linkSeconds) {
+  const end = new Date(row.expires_at).getTime();
+  if (!row.uploaded_at) return end;
+  return Math.min(new Date(row.uploaded_at).getTime() + linkSeconds * 1000, end);
+}
+
 // What a row keeps once it is over: the sender's account, bytes and times,
 // for the allowance. Everything that says which computer sent what to whom
 // goes, with the key.
@@ -106,12 +121,9 @@ export function createPickupStore(db, { productSlug = "forgedrop" } = {}) {
       return db(PICKUPS).where({ status: "waiting" }).andWhere("expires_at", "<=", at).limit(limit).select("id");
     },
 
-    staleUploads(startedBefore, limit) {
-      return db(PICKUPS)
-        .where({ status: "uploading" })
-        .andWhere("created_at", "<=", startedBefore)
-        .limit(limit)
-        .select("id");
+    /** Still uploading when its days are up. */
+    expiredUploads(at, limit) {
+      return db(PICKUPS).where({ status: "uploading" }).andWhere("expires_at", "<=", at).limit(limit).select("id");
     },
 
     /** Over, but deleting its objects failed last time. */
@@ -120,16 +132,17 @@ export function createPickupStore(db, { productSlug = "forgedrop" } = {}) {
     },
 
     /**
-     * Deleted while its upload links still worked, now that they no longer
-     * do: created between `since` and `before` (a link lasts `linkSeconds`).
+     * Deleted while an upload link could still put an object back, now that
+     * none can (uploadLinksEnd, a link lasting `linkSeconds`): left after
+     * `since`, and over by `at`.
      */
-    deletedEarly(since, before, linkSeconds, limit) {
+    deletedBeforeLinksEnd(since, at, linkSeconds, limit) {
       return db(PICKUPS)
         .whereIn("status", CLOSED_STATUSES)
         .andWhere("created_at", ">", since)
-        .andWhere("created_at", "<=", before)
         .whereNotNull("deleted_at")
-        .whereRaw("deleted_at < created_at + (? * interval '1 second')", [linkSeconds])
+        .whereRaw(`deleted_at < ${LINKS_END_SQL}`, [linkSeconds])
+        .whereRaw(`${LINKS_END_SQL} <= ?`, [linkSeconds, at])
         .limit(limit)
         .select("id");
     },

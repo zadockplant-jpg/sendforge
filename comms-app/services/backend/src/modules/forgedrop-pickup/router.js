@@ -2,10 +2,12 @@
  * ForgeDrop Cloud pickup (ForgeDrop/docs/pickup.md), mounted by app.js at
  * /v1/forgedrop/pickup: files a sender's computer sealed and left in
  * Cloudflare R2 for a computer that was away, or for someone without
- * ForgeDrop, deleted as soon as they are picked up or after 7 days. The one
+ * ForgeDrop, deleted as soon as they are picked up or after 8 days. The one
  * paid part of ForgeDrop.
  *
  *   POST /               sender     leave files: an id and upload links
+ *   POST /:id/uploads    sender     carry on an upload that stopped: fresh
+ *                                   links, and the parts R2 already has
  *   POST /:id/done       sender     the upload is finished: check it, and
  *                                   email the recipient's account
  *   POST /:id/cancel     sender     take it back, deleted at once
@@ -214,6 +216,12 @@ export function createForgeDropPickupRouter({
     desktopAuth,
     requestLimiter,
     answer(200, (req) => service.downloads(caller(req), pickupId(req)))
+  );
+  router.post(
+    "/:id/uploads",
+    desktopAuth,
+    requestLimiter,
+    answer(200, (req) => service.uploads(caller(req), pickupId(req)))
   );
   router.post(
     "/:id/done",

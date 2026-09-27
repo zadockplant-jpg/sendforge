@@ -93,9 +93,10 @@ export function monthWindow(at) {
  * Bytes an account has sent this month: the sealed bytes of every pickup it
  * created in the month, whatever became of it, except one cancelled before
  * its upload was finished (uploaded_at is set when it is). A pickup still
- * uploading counts, so two at once cannot both fit in what is left.
- * A pickup abandoned mid-upload is cancelled by the sweep, and so not
- * counted either.
+ * uploading counts, so two at once cannot both fit in what is left: that
+ * holds for as long as its sender could carry the upload on, the pickup's
+ * whole life. One abandoned mid-upload is cancelled by the sweep when its
+ * days are up (or by its sender before), and so not counted from then on.
  */
 export async function bytesSentThisMonth(db, userId, at) {
   const { from, to } = monthWindow(at);

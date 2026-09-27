@@ -7,8 +7,8 @@
  *   - presigned links (query-string auth) handed to a desktop, which then
  *     uploads and downloads directly: GET, PUT and UploadPart;
  *   - requests this server makes itself (header auth): CreateMultipartUpload,
- *     CompleteMultipartUpload, AbortMultipartUpload, DeleteObject and
- *     HeadObject.
+ *     CompleteMultipartUpload, AbortMultipartUpload, ListParts, DeleteObject
+ *     and HeadObject.
  *
  * R2 wants region "auto" and service "s3". Objects are addressed path-style,
  * https://<account>.r2.cloudflarestorage.com/<bucket>/<key>. Virtual-hosted
@@ -311,6 +311,36 @@ export function createR2Client({
       });
       // S3 may say 200 and put an <Error> in the body when completion fails.
       if (answer.status !== 200 || /<Error>/.test(answer.text)) throw fail("CompleteMultipartUpload", answer);
+    },
+
+    /**
+     * The parts R2 has of a multipart upload that is still open, as
+     * [{ partNumber, etag, size }], ETags as R2 gave them to the desktop.
+     * R2 lists up to a thousand a page, so an upload of 10,000 parts takes
+     * ten. An upload R2 no longer has fails with code NoSuchUpload.
+     */
+    async listParts(key, uploadId, { pageSize = 1000 } = {}) {
+      const parts = [];
+      let marker = null;
+      for (let page = 0; page < 100; page += 1) {
+        const query = { uploadId, "max-parts": pageSize };
+        if (marker !== null) query["part-number-marker"] = marker;
+        const answer = await send("ListParts", "GET", key, { query });
+        if (answer.status !== 200) throw fail("ListParts", answer);
+        for (const [, part] of answer.text.matchAll(/<Part>([\s\S]*?)<\/Part>/g)) {
+          parts.push({
+            partNumber: Number(xmlValue(part, "PartNumber")),
+            etag: xmlValue(part, "ETag"),
+            size: Number(xmlValue(part, "Size")),
+          });
+        }
+        if (xmlValue(answer.text, "IsTruncated") !== "true") return parts;
+        const next = xmlValue(answer.text, "NextPartNumberMarker");
+        // A marker that does not move on would list the same page forever.
+        if (!next || next === marker) throw new R2Error("ListParts", 502, "no_next_marker");
+        marker = next;
+      }
+      throw new R2Error("ListParts", 502, "too_many_pages");
     },
 
     /** An upload R2 no longer has counts as aborted. */

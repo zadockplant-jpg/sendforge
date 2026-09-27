@@ -1,6 +1,7 @@
 // A stand-in for Cloudflare R2, in process: the S3 calls Cloud pickup makes
-// (PutObject, UploadPart, GetObject, HeadObject, DeleteObject and the three
-// multipart calls), path-style under one bucket, objects in memory.
+// (PutObject, UploadPart, GetObject, HeadObject, DeleteObject, ListParts and
+// the three other multipart calls), path-style under one bucket, objects in
+// memory.
 //
 // It checks every request's SigV4 signature as R2 would, recomputed from the
 // request as it arrived. That uses the signer under test, so it cannot prove
@@ -20,13 +21,15 @@ const etagOf = (body) => `"${crypto.createHash("md5").update(body).digest("hex")
 const bare = (etag) => String(etag).replace(/^"|"$/g, "");
 const unescapeXml = (text) =>
   text.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+const escapeXml = (text) =>
+  String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 function operationOf(method, query) {
   if (method === "PUT") return query.has("partNumber") ? "UploadPart" : "PutObject";
   if (method === "POST") return query.has("uploads") ? "CreateMultipartUpload" : "CompleteMultipartUpload";
   if (method === "DELETE") return query.has("uploadId") ? "AbortMultipartUpload" : "DeleteObject";
   if (method === "HEAD") return "HeadObject";
-  return "GetObject";
+  return query.has("uploadId") ? "ListParts" : "GetObject";
 }
 
 export async function startFakeR2({ bucket, accessKeyId, secretAccessKey, region = "auto" }) {
@@ -34,6 +37,9 @@ export async function startFakeR2({ bucket, accessKeyId, secretAccessKey, region
   const uploads = new Map(); // uploadId -> { key, parts: Map(number -> { etag, body }) }
   const requests = []; // { operation, key, auth }
   const faults = []; // { operation, status, code, times }
+  // At most this many parts a ListParts page, whatever max-parts asks: R2's
+  // own limit is a thousand; tests make it small to see the pages turn.
+  const listing = { pageSize: 1000 };
 
   function reply(res, status, code) {
     res.writeHead(status, { "content-type": "application/xml" });
@@ -139,6 +145,24 @@ export async function startFakeR2({ bucket, accessKeyId, secretAccessKey, region
         res.writeHead(204);
         return res.end();
       }
+      case "ListParts": {
+        const upload = uploads.get(query.get("uploadId"));
+        if (!upload || upload.key !== key) return reply(res, 404, "NoSuchUpload");
+        const max = Math.min(Number(query.get("max-parts") || 1000), listing.pageSize);
+        const after = Number(query.get("part-number-marker") || 0);
+        const numbers = [...upload.parts.keys()].sort((a, b) => a - b).filter((number) => number > after);
+        const page = numbers.slice(0, max);
+        const parts = page
+          .map((number) => {
+            const part = upload.parts.get(number);
+            return `<Part><PartNumber>${number}</PartNumber><LastModified>2026-09-27T00:00:00.000Z</LastModified><ETag>${escapeXml(part.etag)}</ETag><Size>${part.body.length}</Size></Part>`;
+          })
+          .join("");
+        res.writeHead(200, { "content-type": "application/xml" });
+        return res.end(
+          `<?xml version="1.0" encoding="UTF-8"?><ListPartsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${bucket}</Bucket><Key>${key}</Key><UploadId>${escapeXml(query.get("uploadId"))}</UploadId><PartNumberMarker>${after}</PartNumberMarker><NextPartNumberMarker>${page.at(-1) ?? after}</NextPartNumberMarker><MaxParts>${max}</MaxParts><IsTruncated>${numbers.length > page.length}</IsTruncated>${parts}</ListPartsResult>`
+        );
+      }
       case "DeleteObject": {
         objects.delete(key);
         res.writeHead(204);
@@ -178,6 +202,10 @@ export async function startFakeR2({ bucket, accessKeyId, secretAccessKey, region
     /** The next `times` calls of `operation` fail with `status` and `code`. */
     fail(operation, { status = 500, code = "InternalError", times = 1 } = {}) {
       faults.push({ operation, status, code, times });
+    },
+    /** ListParts answers at most `size` parts a page. */
+    listPageSize(size) {
+      listing.pageSize = size;
     },
     /** Keys under a pickup, as R2 holds them. */
     keysOf(pickupId) {

@@ -22,10 +22,13 @@ export const PICKUP_LIMITS = Object.freeze({
   // an object too big for 10,000 of them gets bigger parts, in whole MiB.
   partBytes: 64 * MiB,
   maxParts: 10_000,
-  keepMs: 7 * 24 * 60 * 60 * 1000,
-  // An upload not finished within a day is abandoned, and the sweep takes it
-  // away. Its links last as long, so a slow connection can use them to the end.
-  staleUploadMs: 24 * 60 * 60 * 1000,
+  // A pickup is kept 8 days from when it was left, the owner's figure
+  // (2026-09-27). An upload not finished by then is abandoned, and the sweep
+  // takes it away; until then the sending desktop can carry on after a bad
+  // connection or a restart (POST /:id/uploads).
+  keepMs: 8 * 24 * 60 * 60 * 1000,
+  // An upload link lasts a day from when it is handed out, and never past
+  // the pickup's end.
   uploadUrlSeconds: 24 * 60 * 60,
   downloadUrlSeconds: 60 * 60,
   sweepEveryMs: 10 * 60 * 1000,
@@ -130,8 +133,8 @@ export function parseCreate(body, limits = PICKUP_LIMITS) {
 
 /**
  * POST /:id/done : { parts: { "<n>": [etag, ...] } }, object indices as
- * strings. Only multipart objects need theirs; a single PUT's one ETag may
- * be there too and is not needed.
+ * strings. Only multipart objects need theirs, and only those not already
+ * put together; a single PUT's one ETag may be there too and is not needed.
  */
 export function parseParts(body) {
   const parts = isPlainObject(body) ? body.parts : undefined;

@@ -1,13 +1,14 @@
 /**
- * Cloud pickup's flows: leaving files, finishing the upload, listing,
- * collecting, cancelling, and the sweep that deletes what nobody collected
- * (ForgeDrop/docs/pickup.md).
+ * Cloud pickup's flows: leaving files, carrying on an upload that stopped,
+ * finishing the upload, listing, collecting, cancelling, and the sweep that
+ * deletes what nobody collected (ForgeDrop/docs/pickup.md).
  *
  * Objects live in R2 at pickups/<id>/<n> and pickups/<id>/manifest, each one
  * sealed on the sender's computer; nothing here can open one, or knows a
  * file's name. What the server decides is who may do what:
  *
- *   - the sending desktop leaves a pickup, finishes it or cancels it;
+ *   - the sending desktop leaves a pickup, carries its upload on, finishes
+ *     it or cancels it;
  *   - the recipient collects it. For a computer, that is the desktop that
  *     proved it holds the identity key the pickup is for. For a link, any
  *     licensed desktop that knows the id: the key is in the link, so the
@@ -34,7 +35,7 @@ import {
   partPlan,
   Refusal,
 } from "./shapes.js";
-import { CLOSED_STATUSES, SCRUBBED } from "./store.js";
+import { CLOSED_STATUSES, SCRUBBED, uploadLinksEnd } from "./store.js";
 
 const iso = (value) => new Date(value).toISOString();
 const range = (count) => Array.from({ length: Number(count) }, (_, n) => n);
@@ -180,9 +181,10 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
       throw error;
     }
 
-    // Every upload link is timed from created_at, so all of them stop working
-    // exactly when the sweep may call the upload abandoned, and the sweep's
-    // last pass after an early deletion knows when that is.
+    // Every upload link is timed from created_at and lasts a day. One that
+    // runs out before the upload is done is handed out again by uploads(),
+    // and the sweep's last pass after an early deletion allows for those
+    // (uploadLinksEnd).
     const seconds = limits.uploadUrlSeconds;
     const uploads = request.objects.map((size, n) => {
       const plan = plans[n];
@@ -222,6 +224,104 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
     }
   }
 
+  // ----------------------------------------------------------- carry on
+
+  /**
+   * The sending desktop carries on an upload that stopped (a dropped
+   * connection, a restart, links that ran out): fresh links for every
+   * object, and for each multipart object the parts R2 already has, as
+   * `done: { "<part number>": "<etag>" }`, so only the rest go up. Its links
+   * for those are null. A multipart object R2 has put together already is
+   * `complete: true`, with nothing to send.
+   *
+   * Only while it is uploading and its days are not up: the upload stays
+   * resumable for the pickup's whole life. Links last a day, as ever, but
+   * never past the pickup's end.
+   */
+  async function uploads(caller, id) {
+    return withLock(id, async () => {
+      const row = await store.find(id);
+      if (!row || !isSender(row, caller)) throw notFound();
+      if (row.status !== "uploading") throw new Refusal(409, "pickup_closed", { status: row.status });
+      const at = now();
+      const seconds = Math.min(
+        limits.uploadUrlSeconds,
+        Math.floor((new Date(row.expires_at).getTime() - at) / 1000)
+      );
+      // Its days are up: the sweep takes it away.
+      if (seconds <= 0) throw new Refusal(409, "pickup_closed");
+
+      const objects = await store.objects(id);
+      const links = new Array(objects.length);
+      let mismatch = objects.length === Number(row.object_count) ? null : { object: objects.length };
+      await eachLimit(objects, limits.r2Concurrency, async (object) => {
+        if (mismatch) return;
+        const n = Number(object.n);
+        const key = objectKey(id, n);
+        const size = Number(object.size);
+        if (!object.upload_id) {
+          links[n] = { url: r2.presignPut(key, size, seconds, at) };
+          return;
+        }
+        const plan = { partSize: Number(object.part_size), count: Math.ceil(size / Number(object.part_size)) };
+        let complete = Boolean(object.completed_at);
+        let listed = [];
+        if (!complete) {
+          try {
+            listed = await r2.listParts(key, object.upload_id);
+          } catch (error) {
+            if (!(error instanceof R2Error && error.code === "NoSuchUpload")) throw error;
+            // Put together already, by a done whose note of it was lost? Then
+            // the object is there, the size declared. If not, the upload is
+            // gone and can never finish: as done does, refused and deleted.
+            const found = await r2.headObject(key);
+            if (!found || found.size !== size) {
+              mismatch ??= { object: n };
+              return;
+            }
+            await store.completed(id, n, new Date(at));
+            complete = true;
+          }
+        }
+        // A part counts only whole, at the size it was signed for.
+        const done = {};
+        for (const part of listed) {
+          const index = part.partNumber - 1;
+          if (
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index < plan.count &&
+            part.size === partLength(size, plan, index) &&
+            isEtag(part.etag)
+          ) {
+            done[String(part.partNumber)] = part.etag;
+          }
+        }
+        links[n] = {
+          partSize: plan.partSize,
+          urls: range(plan.count).map((index) =>
+            complete || done[String(index + 1)]
+              ? null
+              : r2.presignUploadPart(key, object.upload_id, index + 1, partLength(size, plan, index), seconds, at)
+          ),
+          done,
+          ...(complete ? { complete: true } : {}),
+        };
+      });
+
+      if (mismatch) {
+        await discard(row, "cancelled");
+        throw new Refusal(422, "upload_mismatch", mismatch);
+      }
+      return {
+        id,
+        expiresAt: iso(row.expires_at),
+        uploads: links,
+        manifest: { url: r2.presignPut(manifestKey(id), Number(row.manifest_bytes), seconds, at) },
+      };
+    });
+  }
+
   // ------------------------------------------------------------ finish
 
   const finished = (row) => ({ id: row.id, status: "waiting", expiresAt: iso(row.expires_at) });
@@ -234,6 +334,9 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
       // Said twice (a reply lost on the way back): the same answer, no second email.
       if (row.status === "waiting") return finished(row);
       if (row.status !== "uploading") throw new Refusal(409, "pickup_closed", { status: row.status });
+      // Its days are up before it was finished: nobody is told of files they
+      // could not collect, and the sweep takes it away.
+      if (new Date(row.expires_at).getTime() <= now()) throw new Refusal(409, "pickup_closed");
 
       const objects = await store.objects(id);
       const open = objects.filter((object) => object.upload_id && !object.completed_at);
@@ -413,7 +516,7 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
     const at = now();
     const counts = { expired: 0, abandoned: 0, deleted: 0, redeleted: 0 };
 
-    // Waiting past its seven days.
+    // Waiting past its days (keepMs).
     for (let round = 0; round < 100; round += 1) {
       const found = await store.expired(new Date(at), BATCH);
       for (const { id } of found) {
@@ -427,15 +530,15 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
       if (found.length < BATCH) break;
     }
 
-    // Still uploading after a day: abandoned. It never finished, so it ends
-    // cancelled, and does not count against the allowance.
-    const startedBefore = at - limits.staleUploadMs;
+    // Still uploading when its days are up: abandoned. Until then the sender
+    // could carry on after a bad connection (uploads). It never finished, so
+    // it ends cancelled, and does not count against the allowance.
     for (let round = 0; round < 100; round += 1) {
-      const found = await store.staleUploads(new Date(startedBefore), BATCH);
+      const found = await store.expiredUploads(new Date(at), BATCH);
       for (const { id } of found) {
         await withLock(id, async () => {
           const row = await store.find(id);
-          if (row?.status !== "uploading" || new Date(row.created_at).getTime() > startedBefore) return;
+          if (row?.status !== "uploading" || new Date(row.expires_at).getTime() > at) return;
           await discard(row, "cancelled");
           counts.abandoned += 1;
         });
@@ -452,16 +555,17 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
       });
     }
 
-    // Deleted while its upload links still worked, so the sender could have
-    // put an object back since. Now that the links have run out, once more;
-    // that moves deleted_at past them, so it happens once.
-    const linkMs = limits.uploadUrlSeconds * 1000;
-    const since = new Date(at - linkMs - limits.keepMs);
-    for (const { id } of await store.deletedEarly(since, new Date(at - linkMs), limits.uploadUrlSeconds, 200)) {
+    // Deleted while an upload link could still work, so the sender could have
+    // put an object back since. Now that none can (uploadLinksEnd), once
+    // more; that moves deleted_at past them, so it happens once. A link is
+    // never good past the pickup's end, so looking back that far and a day
+    // finds them all.
+    const since = new Date(at - limits.keepMs - limits.uploadUrlSeconds * 1000);
+    for (const { id } of await store.deletedBeforeLinksEnd(since, new Date(at), limits.uploadUrlSeconds, 200)) {
       await withLock(id, async () => {
         const row = await store.find(id);
-        if (!row?.deleted_at) return;
-        const linksEnd = new Date(row.created_at).getTime() + linkMs;
+        if (!row?.deleted_at || !CLOSED_STATUSES.includes(row.status)) return;
+        const linksEnd = uploadLinksEnd(row, limits.uploadUrlSeconds);
         if (new Date(row.deleted_at).getTime() >= linksEnd || linksEnd > at) return;
         if (await removeObjects(row.id, row.object_count)) counts.redeleted += 1;
       });
@@ -485,5 +589,5 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
     return sweeping;
   }
 
-  return { create, done, waiting, downloads, pickedUp, cancel, sweep };
+  return { create, uploads, done, waiting, downloads, pickedUp, cancel, sweep };
 }

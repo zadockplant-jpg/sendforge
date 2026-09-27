@@ -1,5 +1,5 @@
 // ForgeDrop Cloud pickup: files a desktop sealed and left in R2 for another
-// computer, deleted once picked up or after 7 days (ForgeDrop/docs/pickup.md).
+// computer, deleted once picked up or after 8 days (ForgeDrop/docs/pickup.md).
 //
 // The HTTP tests run the real router, real licences minted by the activation
 // service, real device_activations and product_entitlements rows and the
@@ -33,7 +33,7 @@ const { forgedropFingerprint } = await import("../src/services/identityProof.ser
 const { sendForgeDropPickupWaitingEmail } = await import("../src/services/email.service.js");
 const { up: pickupsUp } = await import("../src/db/migrations/20260928_create_forgedrop_pickups.js");
 const { createForgeDropPickupRouter, PICKUP_LIMITS } = await import("../src/modules/forgedrop-pickup/router.js");
-const { createR2Client, EMPTY_SHA256, r2ConfigProblems, readR2Config, signV4 } = await import(
+const { amzDateOf, createR2Client, EMPTY_SHA256, r2ConfigProblems, readR2Config, signV4 } = await import(
   "../src/modules/forgedrop-pickup/r2.js"
 );
 const { bytesSentThisMonth, CLOUD_PICKUP_TIERS, GB, monthWindow, TB, tierFromEntitlements } = await import(
@@ -221,6 +221,7 @@ async function call(path, { method = "POST", body, raw, licence, headers = {}, b
 /** The pickup API as one desktop calls it (forgedrop/core/pickup_transfer.py). */
 const as = (device, base) => ({
   create: (body) => call("", { licence: device.token, body, base }),
+  uploads: (id) => call(`/${id}/uploads`, { licence: device.token, body: {}, base }),
   done: (id, parts = {}) => call(`/${id}/done`, { licence: device.token, body: { parts }, base }),
   waiting: () => call("/waiting", { method: "GET", licence: device.token, base }),
   get: (id) => call(`/${id}`, { method: "GET", licence: device.token, base }),
@@ -275,6 +276,7 @@ const ROUTES = (id) => [
   ["POST", ""],
   ["GET", "/waiting"],
   ["GET", `/${id}`],
+  ["POST", `/${id}/uploads`],
   ["POST", `/${id}/done`],
   ["POST", `/${id}/picked-up`],
   ["POST", `/${id}/cancel`],
@@ -485,7 +487,7 @@ test("a computer's pickup: left, uploaded, finished, listed, downloaded, picked 
   const { id, expiresAt, uploads } = created.body;
   assert.match(id, UUID);
   assert.deepEqual(Object.keys(created.body).sort(), ["expiresAt", "id", "manifest", "uploads"]);
-  assert.equal(expiresAt, new Date(clock + 7 * DAY).toISOString());
+  assert.equal(expiresAt, new Date(clock + 8 * DAY).toISOString());
   assert.equal(uploads.length, 2);
   for (const upload of uploads) assert.deepEqual(Object.keys(upload), ["url"]);
   const link = new URL(uploads[1].url);
@@ -744,9 +746,10 @@ test("64 MiB goes up in one PUT; more in 64 MiB parts; past 10,000 parts, bigger
 
   assert.equal(PICKUP_LIMITS.maxObjects, 10_000);
   assert.equal(PICKUP_LIMITS.maxTotalBytes, TB);
-  assert.equal(PICKUP_LIMITS.keepMs, 7 * DAY);
+  assert.equal(PICKUP_LIMITS.keepMs, 8 * DAY);
   assert.equal(PICKUP_LIMITS.downloadUrlSeconds, 3600);
-  assert.equal(PICKUP_LIMITS.staleUploadMs, DAY);
+  assert.equal(PICKUP_LIMITS.uploadUrlSeconds, 24 * 60 * 60);
+  assert.equal(PICKUP_LIMITS.staleUploadMs, undefined, "an unfinished upload is kept as long as the pickup");
   assert.equal(PICKUP_LIMITS.sweepEveryMs, 10 * 60 * 1000);
 });
 
@@ -880,6 +883,142 @@ test("an object R2 already put together is taken as finished, not as missing", a
   assert.equal(done.status, 200, JSON.stringify(done.body));
   assert.deepEqual(await getFrom((await as(bobDesktop).get(id)).body.objects[0]), big);
   assert.equal((await as(bobDesktop).pickedUp(id)).status, 204);
+});
+
+// ----------------------------------------------------------- carrying on
+
+test("an upload that stopped carries on: fresh links, and the parts R2 has are not sent again", async () => {
+  const { studio, bobDesktop } = devices;
+  const big = crypto.randomBytes(3 * PART + 100); // four parts
+  const small = crypto.randomBytes(20);
+  const manifest = crypto.randomBytes(50);
+  const created = await as(studio).create({
+    recipient: { fingerprint: bobDesktop.fingerprint },
+    objects: [big.length, small.length],
+    manifestSize: manifest.length,
+    sealedKey: SEALED_KEY,
+  });
+  assert.equal(created.status, 201);
+  const { id, uploads } = created.body;
+  // Two parts went up before the connection dropped; nothing else did.
+  const etags = [];
+  for (const index of [0, 1]) etags.push(await putTo(uploads[0].urls[index], big.subarray(index * PART, (index + 1) * PART)));
+
+  // Two days on, the first links have run out.
+  advance(2 * DAY);
+  const resumed = await as(studio).uploads(id);
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.deepEqual(Object.keys(resumed.body).sort(), ["expiresAt", "id", "manifest", "uploads"]);
+  assert.equal(resumed.body.id, id);
+  assert.equal(resumed.body.expiresAt, created.body.expiresAt, "the pickup keeps its end");
+  const [multi, single] = resumed.body.uploads;
+  assert.deepEqual(Object.keys(multi).sort(), ["done", "partSize", "urls"]);
+  assert.equal(multi.partSize, PART);
+  assert.deepEqual(multi.done, { 1: etags[0], 2: etags[1] });
+  assert.deepEqual(multi.urls.slice(0, 2), [null, null], "no links for parts R2 has");
+  assert.equal(multi.urls.length, 4);
+  assert.deepEqual(Object.keys(single), ["url"]);
+  for (const link of [multi.urls[2], multi.urls[3], single.url, resumed.body.manifest.url]) {
+    const url = new URL(link);
+    assert.equal(url.searchParams.get("X-Amz-Date"), amzDateOf(clock), "fresh");
+    assert.equal(url.searchParams.get("X-Amz-Expires"), "86400");
+  }
+  const uploadId = (link) => new URL(link).searchParams.get("uploadId");
+  assert.equal(uploadId(multi.urls[2]), uploadId(uploads[0].urls[2]), "the same multipart upload");
+  assert.equal(new URL(multi.urls[3]).searchParams.get("partNumber"), "4");
+
+  // Only the rest goes up, and done puts it together.
+  for (const index of [2, 3]) etags.push(await putTo(multi.urls[index], big.subarray(index * PART, (index + 1) * PART)));
+  const parts = { 0: etags, 1: [await putTo(single.url, small)] };
+  await putTo(resumed.body.manifest.url, manifest);
+  const done = await as(studio).done(id, parts);
+  assert.equal(done.status, 200, JSON.stringify(done.body));
+  const links = await as(bobDesktop).get(id);
+  assert.deepEqual(await getFrom(links.body.objects[0]), big);
+  assert.deepEqual(await getFrom(links.body.objects[1]), small);
+  assert.equal((await as(bobDesktop).pickedUp(id)).status, 204);
+});
+
+test("the parts R2 has are read a page at a time, and only those count", async () => {
+  const { studio } = devices;
+  const big = crypto.randomBytes(4 * PART + 10); // five parts
+  const { id, created } = await leave(studio, { link: true }, [big], { skip: [0] });
+  const etags = {};
+  for (const index of [0, 1, 3]) {
+    etags[index + 1] = await putTo(created.uploads[0].urls[index], big.subarray(index * PART, (index + 1) * PART));
+  }
+  const listed = () => fake.requests.filter((entry) => entry.operation === "ListParts" && entry.key === `pickups/${id}/0`).length;
+  fake.listPageSize(2);
+  try {
+    const resumed = await as(studio).uploads(id);
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(resumed.body.uploads[0].done, etags);
+    assert.deepEqual(
+      resumed.body.uploads[0].urls.map((url) => url && new URL(url).searchParams.get("partNumber")),
+      [null, null, "3", null, "5"]
+    );
+    assert.equal(listed(), 2, "two pages of two");
+    assert.ok(fake.requests.filter((entry) => entry.operation === "ListParts").every((entry) => entry.auth === "header"));
+  } finally {
+    fake.listPageSize(1000);
+  }
+  assert.equal((await as(studio).cancel(id)).status, 204);
+});
+
+test("only the sending desktop carries an upload on, and only while it uploads", async () => {
+  const { studio, aliceLaptop, bobDesktop, carolPc } = devices;
+  const stopped = await leave(studio, { link: true }, [crypto.randomBytes(PART + 5)], { skip: [0] });
+  // The sender's own other desktop too: only the one that left it.
+  for (const device of [aliceLaptop, bobDesktop, carolPc]) {
+    const res = await as(device).uploads(stopped.id);
+    assert.deepEqual([res.status, res.body], [404, { error: "not_found" }], device.name);
+  }
+  for (const other of ["nope", randomUUID()]) {
+    assert.deepEqual((await as(studio).uploads(other)).body, { error: "not_found" }, other);
+  }
+  assert.equal((await as(studio).uploads(stopped.id)).status, 200);
+
+  const finished = await leave(studio, { link: true }, [crypto.randomBytes(9)]);
+  assert.equal((await as(studio).done(finished.id, finished.parts)).status, 200);
+  const over = await as(studio).uploads(finished.id);
+  assert.deepEqual([over.status, over.body], [409, { error: "pickup_closed", status: "waiting" }]);
+
+  assert.equal((await as(studio).cancel(stopped.id)).status, 204);
+  const gone = await as(studio).uploads(stopped.id);
+  assert.deepEqual([gone.status, gone.body], [409, { error: "pickup_closed", status: "cancelled" }]);
+  assert.equal((await as(studio).cancel(finished.id)).status, 204);
+});
+
+test("a multipart object R2 has put together already has nothing left to send; one R2 lost ends the pickup", async () => {
+  const { studio } = devices;
+  // done put it together, then R2 had trouble before the pickup was finished.
+  const big = crypto.randomBytes(PART + 50);
+  const troubled = await leave(studio, { link: true }, [big, crypto.randomBytes(7)]);
+  fake.fail("HeadObject", { status: 500, code: "InternalError", times: 1 });
+  assert.equal((await as(studio).done(troubled.id, troubled.parts)).status, 503);
+  const after = await as(studio).uploads(troubled.id);
+  assert.equal(after.status, 200);
+  assert.deepEqual(after.body.uploads[0], { partSize: PART, urls: [null, null], done: {}, complete: true });
+  assert.equal((await as(studio).done(troubled.id, troubled.parts)).status, 200);
+
+  // R2 put it together without this server's note of it.
+  const quiet = await leave(studio, { link: true }, [crypto.randomBytes(PART + 3)]);
+  const client = createR2Client({ ...R2, endpoint: fake.origin, now });
+  const quietUpload = new URL(quiet.created.uploads[0].urls[0]).searchParams.get("uploadId");
+  await client.completeMultipartUpload(`pickups/${quiet.id}/0`, quietUpload, quiet.parts[0]);
+  const noted = await as(studio).uploads(quiet.id);
+  assert.equal(noted.body.uploads[0].complete, true);
+  assert.equal((await as(studio).done(quiet.id, quiet.parts)).status, 200);
+
+  // A multipart upload R2 no longer has can never finish: refused and deleted, as done does.
+  const lost = await leave(studio, { link: true }, [crypto.randomBytes(PART + 9)], { skip: [0] });
+  fake.uploads.delete(new URL(lost.created.uploads[0].urls[0]).searchParams.get("uploadId"));
+  const res = await as(studio).uploads(lost.id);
+  assert.deepEqual([res.status, res.body], [422, { error: "upload_mismatch", object: 0 }]);
+  assert.equal((await pickupRow(lost.id)).status, "cancelled");
+  assert.deepEqual(fake.keysOf(lost.id), []);
+
+  for (const id of [troubled.id, quiet.id]) assert.equal((await as(studio).cancel(id)).status, 204);
 });
 
 test("if R2 cannot start an upload, the pickup is dropped and nothing is counted", async () => {
@@ -1076,40 +1215,67 @@ test("the email names the sending computer and when the files go, and nothing el
 
 // ------------------------------------------------------------------- sweep
 
-test("the sweep: a pickup waiting 7 days expires, an upload left for a day is abandoned; both are deleted", async () => {
+test("the sweep: a pickup waiting 8 days expires, and an unfinished upload is kept as long, resumable, then deleted", async () => {
   const { studio, bobDesktop } = devices;
+  const HOUR = 60 * 60 * 1000;
   const waiting = await leave(studio, { fingerprint: bobDesktop.fingerprint }, [crypto.randomBytes(30)]);
   assert.equal((await as(studio).done(waiting.id, waiting.parts)).status, 200);
   const stuck = await leave(studio, { link: true }, [crypto.randomBytes(2 * PART)], { skip: [0] });
   const uploadId = new URL(stuck.created.uploads[0].urls[0]).searchParams.get("uploadId");
+  // All of it up, and done never said.
+  const late = await leave(studio, { fingerprint: bobDesktop.fingerprint }, [crypto.randomBytes(25)]);
+  // Taken back after links were handed out again, and an object put back with one.
+  const withdrawn = await leave(studio, { link: true }, [crypto.randomBytes(20)], { skip: [0] });
 
-  advance(DAY - 60_000);
+  // Days on, long past its first links: still there, and it can carry on.
+  advance(3 * DAY);
   await main.service.sweep();
-  assert.equal((await pickupRow(stuck.id)).status, "uploading", "not a day yet");
+  assert.equal((await pickupRow(stuck.id)).status, "uploading", "an upload is kept as long as its pickup");
+  assert.ok(fake.uploads.has(uploadId));
+  assert.equal((await as(studio).uploads(stuck.id)).status, 200);
+  const again = await as(studio).uploads(withdrawn.id);
+  assert.equal((await as(studio).cancel(withdrawn.id)).status, 204);
+  await putTo(again.body.uploads[0].url, crypto.randomBytes(20));
+  await main.service.sweep();
+  assert.deepEqual(fake.keysOf(withdrawn.id), [`pickups/${withdrawn.id}/0`], "its link could put it back again");
 
-  advance(2 * 60_000);
-  const swept = await main.service.sweep();
-  assert.ok(swept.abandoned >= 1);
-  const abandoned = await pickupRow(stuck.id);
-  assert.equal(abandoned.status, "cancelled", "never finished, so not counted");
-  assert.equal(abandoned.uploaded_at, null);
-  assert.ok(abandoned.deleted_at);
-  assert.equal(fake.uploads.has(uploadId), false);
-  assert.deepEqual(fake.keysOf(stuck.id), []);
+  // An hour before the end, links last only as long as the pickup does.
+  advance(5 * DAY - HOUR);
+  const lastHour = await as(studio).uploads(stuck.id);
+  assert.equal(new URL(lastHour.body.uploads[0].urls[0]).searchParams.get("X-Amz-Expires"), "3600");
+  assert.equal(new URL(lastHour.body.manifest.url).searchParams.get("X-Amz-Expires"), "3600");
+  await main.service.sweep();
+  assert.equal((await pickupRow(stuck.id)).status, "uploading", "not 8 days yet");
   assert.equal((await pickupRow(waiting.id)).status, "waiting");
 
-  // Seven days after it was left: no longer offered, even before the sweep.
-  advance(6 * DAY);
+  // Eight days after they were left: nothing is offered or carried on any
+  // more, even before the sweep, and nobody is told of files too late to collect.
+  advance(HOUR + 60_000);
   assert.equal((await as(bobDesktop).get(waiting.id)).status, 404);
   assert.equal((await as(bobDesktop).waiting()).body.pickups.some((pickup) => pickup.id === waiting.id), false);
-  const later = await main.service.sweep();
-  assert.ok(later.expired >= 1);
+  assert.deepEqual((await as(studio).uploads(stuck.id)).body, { error: "pickup_closed" });
+  const mailed = mail.length;
+  const tooLate = await as(studio).done(late.id, late.parts);
+  assert.deepEqual([tooLate.status, tooLate.body], [409, { error: "pickup_closed" }]);
+  assert.equal(mail.length, mailed);
+
+  const swept = await main.service.sweep();
+  assert.ok(swept.abandoned >= 2 && swept.expired >= 1 && swept.redeleted >= 1);
+  for (const id of [stuck.id, late.id]) {
+    const abandoned = await pickupRow(id);
+    assert.equal(abandoned.status, "cancelled", "never finished, so not counted");
+    assert.equal(abandoned.uploaded_at, null);
+    assert.ok(abandoned.deleted_at);
+    assert.deepEqual(fake.keysOf(id), []);
+  }
+  assert.equal(fake.uploads.has(uploadId), false);
   const expired = await pickupRow(waiting.id);
   assert.equal(expired.status, "expired");
   assert.ok(expired.deleted_at);
   assert.equal(expired.recipient_fingerprint, null);
   assert.equal(expired.sealed_key, null);
   assert.deepEqual(fake.keysOf(waiting.id), []);
+  assert.deepEqual(fake.keysOf(withdrawn.id), [], "no link of it works any more: deleted once more");
 });
 
 test("a deletion R2 turns down is tried again by the sweep", async () => {
@@ -1155,6 +1321,30 @@ test("an object put back while the upload links still worked is deleted once the
   assert.ok(new Date(row.deleted_at).getTime() >= new Date(row.created_at).getTime() + DAY);
 
   // And only the once.
+  const seen = fake.requests.length;
+  await main.service.sweep();
+  assert.equal(fake.requests.slice(seen).filter((entry) => entry.key.startsWith(`pickups/${id}/`)).length, 0);
+});
+
+test("an object put back with a link handed out to carry on is deleted once that link has run out too", async () => {
+  const { studio, bobDesktop } = devices;
+  const files = [crypto.randomBytes(40)];
+  const { id, parts } = await leave(studio, { fingerprint: bobDesktop.fingerprint }, files);
+  // Two days on the first links have run out; the sender carries on, finishes, and it is collected.
+  advance(2 * DAY);
+  const resumed = await as(studio).uploads(id);
+  assert.equal((await as(studio).done(id, parts)).status, 200);
+  assert.equal((await as(bobDesktop).pickedUp(id)).status, 204);
+  await putTo(resumed.body.uploads[0].url, files[0]);
+  assert.deepEqual(fake.keysOf(id), [`pickups/${id}/0`]);
+
+  advance(DAY - 60_000);
+  await main.service.sweep();
+  assert.deepEqual(fake.keysOf(id), [`pickups/${id}/0`], "not yet: that link works for a day");
+  advance(2 * 60_000);
+  const swept = await main.service.sweep();
+  assert.ok(swept.redeleted >= 1);
+  assert.deepEqual(fake.keysOf(id), []);
   const seen = fake.requests.length;
   await main.service.sweep();
   assert.equal(fake.requests.slice(seen).filter((entry) => entry.key.startsWith(`pickups/${id}/`)).length, 0);
