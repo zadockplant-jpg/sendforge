@@ -79,12 +79,31 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
     unpaid. Marking it unpaid reopens it and forgets its receipt and payment notice, so a
     later payment sends fresh ones.
   - Stripe payments keep what Stripe recorded.
-  - Paid invoices stay editable (title, lines, notes); the recorded payment is unchanged.
+  - Paid invoices stay editable (title, lines, notes). A payment recorded by hand is the
+    invoice paid in full, so its amount follows the edited total. A Stripe payment keeps the
+    amount Stripe charged.
+- Each project (client portal) keeps a list of up to 10 email addresses (`emails` in its
+  JSON).
+  - Every quote, invoice and receipt for the project is addressed to the whole list as one
+    email, with every address in To.
+  - The Send to fields are filled in from the list. Any new address the admin emails from the
+    project (quote, invoice or receipt) is added to it. Addresses are removed on the client
+    panel, where the list can also be typed directly.
+  - Stripe Checkout is given the first address.
+  - The admin email fields take several addresses, separated by commas, semicolons, spaces or
+    lines, or pasted as "Name <address>". The site's `billing.js` shows each address as a
+    removable chip and flags an incomplete one before sending. A problem found on the server
+    is named on the page, which keeps what was typed.
+  - Migration `20260927_myhomebuilder_portal_project_emails.js` made each saved single
+    `email` a list. A project with none started with the addresses its most recent quote or
+    invoice was emailed to. The migration also set hand-recorded payment amounts to their
+    invoice totals.
 - Every address a quote, invoice or receipt is emailed to is kept in `mhb_recipients` with
   its last send; builder notices and admin codes are not. The admin panel's email fields
   offer them as a pick list, newest first, eight rows tall with the rest scrolling. The list
-  is drawn by the site's `billing.js`; without scripts it is a plain `<datalist>`. Migration
-  `20260925_myhomebuilder_portal_recipients.js` loaded the addresses emailed before it.
+  leaves out addresses already in the field. It is drawn by the site's `billing.js`; without
+  scripts it is a plain `<datalist>`. Migration `20260925_myhomebuilder_portal_recipients.js`
+  loaded the addresses emailed before it.
 - Uploaded documents, signature images and signed PDFs are stored in `mhb_files` (up to
   20 MB each).
 - Invoices are numbered 1, 2, 3 … with no prefix, dash or leading zeros, and quotes have

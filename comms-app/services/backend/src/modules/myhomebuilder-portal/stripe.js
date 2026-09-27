@@ -1,5 +1,6 @@
 import { constantTimeMatches, hmacHex } from "./security.js";
 import { billingLabel, checkoutLine } from "./billing.js";
+import { clientEmails } from "./email.js";
 
 const STRIPE_API = "https://api.stripe.com/v1";
 // Pinned so response shapes (latest_charge, customer_details) do not change with the account default.
@@ -33,6 +34,8 @@ async function stripeRequest(env, method, path, params = undefined) {
 export async function createCheckoutSession(env, { invoice, client, successUrl, cancelUrl }) {
   const line = checkoutLine(invoice);
   const label = `${billingLabel(invoice)} · ${invoice.title}`.slice(0, 250);
+  // Checkout takes one address; the project's first is filled in and the payer can change it.
+  const [customerEmail] = clientEmails(client);
   return stripeRequest(env, "POST", "/checkout/sessions", {
     mode: "payment",
     "line_items[0][quantity]": "1",
@@ -40,7 +43,7 @@ export async function createCheckoutSession(env, { invoice, client, successUrl, 
     "line_items[0][price_data][unit_amount]": String(line.unitCents),
     "line_items[0][price_data][product_data][name]": line.name,
     ...(line.description ? { "line_items[0][price_data][product_data][description]": line.description } : {}),
-    ...(client.email ? { customer_email: client.email } : {}),
+    ...(customerEmail ? { customer_email: customerEmail } : {}),
     client_reference_id: `${client.slug}:${invoice.id}`,
     "metadata[clientSlug]": client.slug,
     "metadata[invoiceId]": invoice.id,

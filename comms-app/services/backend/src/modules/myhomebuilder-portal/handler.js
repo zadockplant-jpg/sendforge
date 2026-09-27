@@ -66,14 +66,17 @@ import {
   verifyWebhookSignature
 } from "./stripe.js";
 import {
+  MAX_RECIPIENTS,
   adminCodeMessage,
   adminEmail,
   adminPaidMessage,
   billingIssuedMessage,
+  clientEmails,
   clientSender,
   duplicatePaymentMessage,
   emailConfigured,
   isValidEmail,
+  parseEmailList,
   paymentFailedMessage,
   paymentReceiptMessage,
   quoteAcceptedMessage,
@@ -226,12 +229,11 @@ const NOTICES = {
   "billing-updated": { text: "Changes saved." },
   "client-added": { text: "Client portal created." },
   "client-exists": { text: "A client portal with that id already exists.", tone: "error" },
-  "client-updated": { text: "Client email saved." },
+  "client-updated": { text: "Client emails saved." },
   invalid: { text: "Please check the form and try again.", tone: "error" },
   voided: { text: "Marked void." },
   sent: { text: "Emailed to the client." },
   "send-failed": { text: "The email did not go out. Check the address and try again.", tone: "error" },
-  "email-invalid": { text: "Enter a valid email address.", tone: "error" },
   "email-not-configured": { text: "Email delivery is not set up yet.", tone: "error" },
   "payment-recorded": { text: "Payment recorded." },
   "payment-recorded-receipt": { text: "Payment recorded and a receipt was emailed to the client." },
@@ -348,23 +350,56 @@ async function saveNewBillingItem(store, item) {
   await putBilling(store, item);
 }
 
-// Emails a quote or invoice. Returns the item with sentAt/sentTo set for the caller to save.
+// Emails a quote or invoice to a list of addresses, as one email. Returns the item with
+// sentAt/sentTo set for the caller to save.
 async function emailBillingItem(env, store, item, client, to, origin) {
   const links = shareLinks(origin, item);
   const message = billingIssuedMessage({ item, client, viewUrl: links.view, payUrl: item.kind === "invoice" && stripeConfigured(env) ? links.pay : "" });
   const delivery = await sendEmail(env, { to, ...message, ...clientSender(env), category: item.kind });
   if (!delivery.ok) return { ok: false, item };
-  await remember(store, to);
-  return { ok: true, item: { ...item, sentAt: new Date().toISOString(), sentTo: to } };
+  await rememberForProject(store, client, to);
+  return { ok: true, item: { ...item, sentAt: new Date().toISOString(), sentTo: to.join(", ") } };
 }
 
-// Adds an address to the admin pick list. A failure here never fails the email it follows.
-async function remember(store, address) {
+// Adds addresses to the admin pick list. A failure here never fails the email it follows.
+async function remember(store, addresses) {
   try {
-    await rememberRecipient(store, address);
+    for (const address of Array.isArray(addresses) ? addresses : [addresses]) await rememberRecipient(store, address);
   } catch (error) {
     console.error(JSON.stringify({ message: "recipient not remembered", error: error instanceof Error ? error.message : "Unknown error" }));
   }
+}
+
+// A project's saved list replaces the single `email` field projects had before lists.
+function withClientEmails(client, emails) {
+  const { email: _single, ...rest } = client;
+  return { ...rest, emails };
+}
+
+// Addresses the admin emails from a project join the pick list and the project's own list, so
+// the project's other quotes, invoices and receipts are addressed to them too. Addresses are
+// removed on the client panel. A failure here never fails the email it follows.
+async function rememberForProject(store, client, addresses) {
+  await remember(store, addresses);
+  try {
+    const current = await getClient(store, client.slug);
+    if (!current) return;
+    const saved = clientEmails(current);
+    const known = new Set(saved.map((address) => address.toLowerCase()));
+    const added = addresses.filter((address) => !known.has(address.toLowerCase()));
+    if (added.length) await putClient(store, withClientEmails(current, [...saved, ...added].slice(0, MAX_RECIPIENTS)));
+  } catch (error) {
+    console.error(JSON.stringify({ message: "project emails not saved", error: error instanceof Error ? error.message : "Unknown error" }));
+  }
+}
+
+// What is wrong with the addresses typed into an email field, or "" when they can be used.
+function recipientProblem({ addresses, invalid }) {
+  if (invalid.length === 1) return `${invalid[0]} is not a complete email address. Check it and try again.`;
+  if (invalid.length > 1) return `These are not complete email addresses: ${invalid.join(", ")}. Check them and try again.`;
+  if (!addresses.length) return "Enter at least one email address.";
+  if (addresses.length > MAX_RECIPIENTS) return `Enter up to ${MAX_RECIPIENTS} email addresses.`;
+  return "";
 }
 
 class EmailDeliveryError extends Error {}
@@ -378,7 +413,7 @@ function sentKey(item, name) {
 // send still in progress reports not-ok, so the webhook answers 500 and Stripe retries later.
 // Client-facing messages (receipts) pass remember so the address joins the admin pick list.
 async function sendOnce(env, store, key, message, { remember: rememberTo = false } = {}) {
-  const claim = await claimSentEmail(store, key, message.to);
+  const claim = await claimSentEmail(store, key, Array.isArray(message.to) ? message.to.join(", ") : message.to);
   if (!claim.claimed) return claim.status === "sent" ? { ok: true, record: claim.record } : { ok: false };
   const delivery = await sendEmail(env, message);
   if (!delivery.ok) {
@@ -394,9 +429,11 @@ function receiptMessage(env, item, client, to, origin) {
   return { to, ...paymentReceiptMessage({ item, client, viewUrl: shareLinks(origin, item).view }), ...clientSender(env), category: "receipt" };
 }
 
-function receiptRecipient(client, item) {
-  const candidates = [client?.email, item.payment?.email];
-  return candidates.find((value) => isValidEmail(value)) || "";
+// The project's email list, or else the address the payer gave Stripe.
+function receiptRecipients(client, item) {
+  const saved = clientEmails(client);
+  if (saved.length) return saved;
+  return isValidEmail(item.payment?.email) ? [item.payment.email] : [];
 }
 
 // With a webhook configured, only the webhook sends payment emails; the client's return from
@@ -446,9 +483,9 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
   }
   if (!notify) return paid;
 
-  const receiptTo = receiptRecipient(client, paid);
+  const receiptTo = receiptRecipients(client, paid);
   let receipt = null;
-  if (receiptTo) {
+  if (receiptTo.length) {
     receipt = await sendOnce(env, store, sentKey(paid, "receipt"), receiptMessage(env, paid, client, receiptTo, origin), { remember: true });
     if (!receipt.ok) throw new EmailDeliveryError("payment receipt");
   }
@@ -778,8 +815,9 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
 
     let item = await buildBillingItem(store, target, parsed.values);
     let notice = "billing-added";
-    if (sendNow && readiness.email && isValidEmail(target.email)) {
-      const result = await emailBillingItem(env, store, item, target, target.email, origin);
+    const projectEmails = clientEmails(target);
+    if (sendNow && readiness.email && projectEmails.length) {
+      const result = await emailBillingItem(env, store, item, target, projectEmails, origin);
       item = result.item;
       notice = result.ok ? "billing-sent" : "billing-send-failed";
     }
@@ -792,8 +830,9 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   if (!item) return notFoundResponse(null, true);
   const itemPath = adminBillingPath(slug, item.id);
 
-  if (!action) {
-    if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+  // The item's admin page. After a problem with typed addresses it names the problem and keeps
+  // what was typed in the field it came from.
+  const itemPage = async ({ notice = noticeFromQuery(url), typed = null, status = 200 } = {}) => {
     if (!item.shareToken) {
       item = await withShareToken(store, item);
       await putBilling(store, item);
@@ -801,14 +840,31 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const links = { ...shareLinks(origin, item), today };
     const receipt = item.status === "paid" ? await getSentEmail(store, sentKey(item, "receipt")) : null;
     const recipients = await listRecipients(store);
-    return scriptedHtmlResponse(adminBillingPage({ client: target, item, links, receipt, recipients, readiness, notice: noticeFromQuery(url) }));
+    return scriptedHtmlResponse(adminBillingPage({ client: target, item, links, receipt, recipients, readiness, notice, typed }), status);
+  };
+
+  // Reads the addresses typed into a Send to field. Returns them, or the page explaining the problem.
+  const typedAddresses = async (field) => {
+    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+    const typedText = String(form?.get("to") || "");
+    const parsed = parseEmailList(typedText);
+    const problem = form ? recipientProblem(parsed) : "The form could not be read. Please try again.";
+    if (!problem) return { addresses: parsed.addresses };
+    return { response: await itemPage({ notice: { text: problem, tone: "error" }, typed: { field, value: typedText.trim() }, status: 400 }) };
+  };
+
+  if (!action) {
+    if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+    return itemPage();
   }
 
   if (action === "edit") {
     if (!isEditable(item)) return redirectResponse(`${itemPath}?notice=not-editable`);
     const editorPath = `${itemPath}/edit`;
+    // How a paid invoice was paid ("manual" or "stripe"), for the editor's note; "" when unpaid.
+    const paid = item.status === "paid" ? (item.payment?.source === "stripe" ? "stripe" : "manual") : "";
     if (isRead) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: editorValuesFromItem(item), actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid: item.status === "paid" }));
+      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: editorValuesFromItem(item), actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }));
     }
     if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
     const form = await readBoundedForm(context.request, MAX_BILLING_FORM_BYTES);
@@ -816,11 +872,14 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     form.set("kind", item.kind);
     const parsed = parseBillingForm(form);
     if (parsed.error) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid: item.status === "paid" }), 400);
+      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }), 400);
     }
     if (item.checkoutSessionId && parsed.values.amountCents !== item.amountCents) await expireCheckoutSession(env, item.checkoutSessionId);
     const { title, description, lineItems, amountCents, dueDate } = parsed.values;
-    await putBilling(store, { ...item, title, description, lineItems, amountCents, dueDate, updatedAt: new Date().toISOString() });
+    // A payment recorded by hand is the invoice paid in full, so its amount follows the new total.
+    // A Stripe payment keeps the amount Stripe charged.
+    const payment = item.payment?.source === "manual" ? { payment: { ...item.payment, amountCents } } : {};
+    await putBilling(store, { ...item, title, description, lineItems, amountCents, dueDate, ...payment, updatedAt: new Date().toISOString() });
     return redirectResponse(`${itemPath}?notice=billing-updated`);
   }
 
@@ -828,10 +887,9 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
 
   if (action === "send") {
     if (!readiness.email) return redirectResponse(`${itemPath}?notice=email-not-configured`);
-    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-    const to = String(form?.get("to") || "").trim();
-    if (!isValidEmail(to)) return redirectResponse(`${itemPath}?notice=email-invalid`);
-    const result = await emailBillingItem(env, store, await withShareToken(store, item), target, to, origin);
+    const { addresses, response } = await typedAddresses("send");
+    if (response) return response;
+    const result = await emailBillingItem(env, store, await withShareToken(store, item), target, addresses, origin);
     await putBilling(store, result.item);
     return redirectResponse(`${itemPath}?notice=${result.ok ? "sent" : "send-failed"}`);
   }
@@ -859,22 +917,24 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     });
     await putBilling(store, updated);
     let notice = "payment-recorded";
-    if (form.get("sendReceipt") === "yes" && readiness.email && isValidEmail(target.email)) {
-      const receipt = await sendOnce(env, store, sentKey(updated, "receipt"), receiptMessage(env, updated, target, target.email, origin), { remember: true });
+    const receiptTo = clientEmails(target);
+    if (form.get("sendReceipt") === "yes" && readiness.email && receiptTo.length) {
+      const receipt = await sendOnce(env, store, sentKey(updated, "receipt"), receiptMessage(env, updated, target, receiptTo, origin), { remember: true });
       if (receipt.ok) notice = "payment-recorded-receipt";
     }
     return redirectResponse(`${itemPath}?notice=${notice}`);
   }
 
-  // Corrects a payment recorded by hand (method, reference or date). Stripe payments keep what
-  // Stripe recorded. The receipt is not re-sent; "Resend receipt" sends the corrected one.
+  // Corrects a payment recorded by hand (method, reference or date; the amount is the invoice
+  // total). Stripe payments keep what Stripe recorded. The receipt is not re-sent; "Resend
+  // receipt" sends the corrected one.
   if (action === "payment") {
     if (item.kind !== "invoice" || item.status !== "paid") return redirectResponse(itemPath);
     if (item.payment?.source !== "manual") return redirectResponse(`${itemPath}?notice=payment-from-stripe`);
     const entered = parseManualPayment(await readBoundedForm(context.request, MAX_FORM_BYTES));
     if (entered.error) return redirectResponse(`${itemPath}?notice=${entered.error}`);
     const { paidOn, ...details } = entered;
-    await putBilling(store, { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, updatedAt: new Date().toISOString() } });
+    await putBilling(store, { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, amountCents: item.amountCents, updatedAt: new Date().toISOString() } });
     return redirectResponse(`${itemPath}?notice=payment-updated`);
   }
 
@@ -889,19 +949,18 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     return redirectResponse(`${itemPath}?notice=payment-removed`);
   }
 
-  // Sends the receipt again on request, to any address, and records the latest send.
+  // Sends the receipt again on request, to any addresses, and records the latest send.
   if (action === "receipt") {
     if (item.kind !== "invoice" || item.status !== "paid") return redirectResponse(itemPath);
     if (!readiness.email) return redirectResponse(`${itemPath}?notice=email-not-configured`);
-    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-    const to = String(form?.get("to") || "").trim();
-    if (!isValidEmail(to)) return redirectResponse(`${itemPath}?notice=email-invalid`);
+    const { addresses, response } = await typedAddresses("receipt");
+    if (response) return response;
     const withToken = await withShareToken(store, item);
     if (withToken !== item) await putBilling(store, withToken);
-    const delivery = await sendEmail(env, receiptMessage(env, withToken, target, to, origin));
+    const delivery = await sendEmail(env, receiptMessage(env, withToken, target, addresses, origin));
     if (delivery.ok) {
-      await putSentEmail(store, sentKey(item, "receipt"), { to, sentAt: new Date().toISOString(), messageId: delivery.id || "" });
-      await remember(store, to);
+      await putSentEmail(store, sentKey(item, "receipt"), { to: addresses.join(", "), sentAt: new Date().toISOString(), messageId: delivery.id || "" });
+      await rememberForProject(store, target, addresses);
     }
     return redirectResponse(`${itemPath}?notice=${delivery.ok ? "receipt-sent" : "receipt-failed"}`);
   }
@@ -1101,7 +1160,7 @@ export async function handlePortalRequest(context) {
     if (pathname === "/clients/admin" || pathname.startsWith("/clients/admin/")) {
       if (!admin) return redirectResponse("/clients");
 
-      const dashboard = async ({ requested, newClient = null, clientError = "", status = 200 }) => {
+      const dashboard = async ({ requested, notice = noticeFromQuery(url), newClient = null, clientError = "", typedEmails = null, status = 200 }) => {
         const clients = await listClients(store);
         const selected = clients.find((entry) => entry.slug === requested) || null;
         const [billing, documents, templates, recipients] = await Promise.all([
@@ -1111,7 +1170,7 @@ export async function handlePortalRequest(context) {
           listRecipients(store)
         ]);
         return scriptedHtmlResponse(adminDashboardPage({
-          clients, selected, billing, documents, templates, recipients, readiness, notice: noticeFromQuery(url), authenticated, newClient, clientError
+          clients, selected, billing, documents, templates, recipients, readiness, notice, authenticated, newClient, clientError, typedEmails
         }), status);
       };
 
@@ -1128,22 +1187,26 @@ export async function handlePortalRequest(context) {
         const entered = {
           name: String(form?.get("name") || "").trim(),
           slug: String(form?.get("slug") || "").trim(),
-          email: String(form?.get("email") || "").trim()
+          emails: String(form?.get("emails") || "").trim()
         };
         const clientPassword = String(form?.get("password") || "");
         const slug = slugify(entered.slug || entered.name);
+        const emails = parseEmailList(entered.emails);
         let clientError = "";
         if (!form) clientError = "The form could not be read. Please try again.";
         else if (!entered.name || entered.name.length > 120) clientError = "Enter the client or project name, up to 120 characters.";
         else if (!isValidSlug(slug)) clientError = "Enter a portal id with letters or numbers, for example smith-residence.";
         else if (clientPassword.length < 10 || clientPassword.length > 120) clientError = "The project login needs 10 to 120 characters.";
-        else if (entered.email && !isValidEmail(entered.email)) clientError = "Check the client email address.";
-        else if (slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug))) clientError = `A client portal with the id ${slug} already exists. Choose a different portal id.`;
-        // Each login must open exactly one portal.
-        else if (await resolveLogin(env, store, clientPassword)) clientError = "That project login already opens another client portal. Choose a different login.";
+        // The emails are optional, so only addresses that were typed are checked.
+        else if (emails.addresses.length || emails.invalid.length) clientError = recipientProblem(emails);
+        if (!clientError) {
+          if (slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug))) clientError = `A client portal with the id ${slug} already exists. Choose a different portal id.`;
+          // Each login must open exactly one portal.
+          else if (await resolveLogin(env, store, clientPassword)) clientError = "That project login already opens another client portal. Choose a different login.";
+        }
         if (clientError) return dashboard({ requested: null, newClient: { ...entered, slug: entered.slug ? slug : "" }, clientError, status: 400 });
 
-        await putClient(store, { slug, name: entered.name, email: entered.email, active: true, passwordHash: await hashPassword(clientPassword), createdAt: new Date().toISOString() });
+        await putClient(store, { slug, name: entered.name, emails: emails.addresses, active: true, passwordHash: await hashPassword(clientPassword), createdAt: new Date().toISOString() });
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=client-added`);
       }
 
@@ -1158,12 +1221,17 @@ export async function handlePortalRequest(context) {
 
         if (area === "billing") return handleAdminBilling(context, store, target, id, action || "", readiness, origin);
 
+        // The project's email list: saving an empty field clears it.
         if (area === "profile" && !id && !action) {
           if (method !== "POST") return methodNotAllowedResponse(["POST"]);
           const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-          const email = String(form?.get("email") || "").trim();
-          if (email && !isValidEmail(email)) return redirectResponse(`${back}&notice=email-invalid`);
-          if ((target.email || "") !== email) await putClient(store, { ...target, email });
+          if (!form) return redirectResponse(`${back}&notice=invalid`);
+          const typed = String(form.get("emails") || "").trim();
+          const emails = parseEmailList(typed);
+          const problem = emails.addresses.length || emails.invalid.length ? recipientProblem(emails) : "";
+          if (problem) return dashboard({ requested: slug, notice: { text: problem, tone: "error" }, typedEmails: typed, status: 400 });
+          const saved = clientEmails(target);
+          if (saved.join("\n") !== emails.addresses.join("\n") || !Array.isArray(target.emails)) await putClient(store, withClientEmails(target, emails.addresses));
           return redirectResponse(`${back}&notice=client-updated`);
         }
 

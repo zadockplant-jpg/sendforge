@@ -12,6 +12,41 @@ export function isValidEmail(value) {
   return typeof value === "string" && value.length <= 254 && EMAIL_PATTERN.test(value);
 }
 
+// One email (and one project's list) goes to at most this many addresses.
+export const MAX_RECIPIENTS = 10;
+
+// Reads the addresses typed into an admin email field: separated by commas, semicolons, spaces or
+// new lines, or pasted from a mail program as "Name <address>". Repeats are dropped (ignoring
+// case) and anything that is not a complete address is returned in `invalid`.
+export function parseEmailList(value) {
+  const addresses = [];
+  const invalid = [];
+  const seen = new Set();
+  for (const segment of String(value || "").split(/[,;\n]+/u)) {
+    const bracketed = segment.match(/<([^<>]*)>/u);
+    for (const token of bracketed ? [bracketed[1]] : segment.split(/\s+/u)) {
+      const address = token.trim().replace(/^mailto:/iu, "");
+      if (!address || seen.has(address.toLowerCase())) continue;
+      seen.add(address.toLowerCase());
+      (isValidEmail(address) ? addresses : invalid).push(address);
+    }
+  }
+  return { addresses, invalid };
+}
+
+// A project's email list: every quote, invoice and receipt for the project is addressed to it.
+// Projects saved before lists existed kept a single `email`.
+export function clientEmails(client) {
+  if (Array.isArray(client?.emails)) return client.emails.filter((address) => isValidEmail(address));
+  return isValidEmail(client?.email) ? [client.email] : [];
+}
+
+// "a@example.com" · "a@example.com and b@example.com" · "a@example.com, b@example.com and c@example.com"
+export function addressesText(addresses) {
+  const list = Array.isArray(addresses) ? addresses : [addresses].filter(Boolean);
+  return list.length < 3 ? list.join(" and ") : `${list.slice(0, -1).join(", ")} and ${list.at(-1)}`;
+}
+
 export function emailConfigured(env) {
   return typeof env.SENDGRID_API_KEY === "string" && env.SENDGRID_API_KEY.length > 0;
 }
@@ -34,11 +69,12 @@ function mailbox(value) {
 
 // SendGrid queues a message when it answers 202. Rate limits and server errors get one retry;
 // a network error does not, because SendGrid may already have accepted the message.
+// `to` is one address or a list; a list goes out as one email with every address in To.
 export async function sendEmail(env, { to, subject, text, html, from, replyTo, category = "portal" }) {
   if (!emailConfigured(env)) return { ok: false, reason: "email-not-configured" };
 
   const body = {
-    personalizations: [{ to: [{ email: to }] }],
+    personalizations: [{ to: (Array.isArray(to) ? to : [to]).map((address) => ({ email: address })) }],
     from: mailbox(from || env.EMAIL_FROM || DEFAULT_FROM),
     subject: subject.replaceAll(/[\r\n]+/gu, " "),
     content: [{ type: "text/plain", value: text }, ...(html ? [{ type: "text/html", value: html }] : [])],

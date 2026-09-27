@@ -24,9 +24,11 @@ const { attachPglite } = await import("./helpers/pglite-db.js");
 const { up } = await import("../src/db/migrations/20260925_create_myhomebuilder_portal.js");
 const { up: plainNumbers } = await import("../src/db/migrations/20260925_myhomebuilder_portal_plain_numbers.js");
 const { up: recipientsTable } = await import("../src/db/migrations/20260925_myhomebuilder_portal_recipients.js");
+const { up: projectEmails } = await import("../src/db/migrations/20260927_myhomebuilder_portal_project_emails.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
 const { hmacHex, isValidSlug, slugify } = await import("../src/modules/myhomebuilder-portal/security.js");
+const { addressesText, parseEmailList } = await import("../src/modules/myhomebuilder-portal/email.js");
 const { parseLineItems, parseMoney, addDays, todayInMichigan } = await import("../src/modules/myhomebuilder-portal/billing.js");
 const { STRIPE_API_VERSION } = await import("../src/modules/myhomebuilder-portal/stripe.js");
 const { PDFDocument } = await import("../src/modules/myhomebuilder-portal/vendor/pdf-lib.js");
@@ -129,6 +131,29 @@ let server;
 let base;
 let renumbered = [];
 let backfilled = [];
+let migratedClients = [];
+let migratedBilling = [];
+
+// Projects and payments as they were before project email lists, for the fourth migration.
+async function insertLegacyProjects() {
+  const client = (slug, data) => ({ slug, data: JSON.stringify({ slug, name: slug, active: true, ...data }) });
+  await db("mhb_clients").insert([
+    client("single-email", { email: "Single@Example.com" }),
+    client("never-emailed", { email: "" }),
+    client("emailed-before", {})
+  ]);
+  const billing = (id, slug, number, extra) => {
+    const data = { id, clientSlug: slug, kind: "invoice", number, createdAt: "2026-09-20T12:00:00.000Z", amountCents: 500000, ...extra };
+    return { id, client_slug: slug, kind: "invoice", number, data: JSON.stringify(data), created_at: data.createdAt };
+  };
+  await db("mhb_billing").insert([
+    billing("older-send", "emailed-before", "900", { sentTo: "old@example.com", sentAt: "2026-09-20T12:00:00.000Z" }),
+    billing("newer-send", "emailed-before", "901", { sentTo: "pcm@example.com", sentAt: "2026-09-27T12:00:00.000Z" }),
+    billing("single-send", "single-email", "902", { sentTo: "other@example.com", sentAt: "2026-09-27T12:00:00.000Z" }),
+    billing("zelle-edited", "emailed-before", "903", { status: "paid", payment: { source: "manual", method: "zelle", label: "Zelle", amountCents: 1500000 } }),
+    billing("stripe-edited", "emailed-before", "904", { status: "paid", payment: { source: "stripe", label: "Visa •••• 4242", amountCents: 1500000 } })
+  ]);
+}
 
 // Records made before numbers became plain, to check the second migration rewrites them.
 async function insertLegacyNumbers() {
@@ -155,6 +180,10 @@ before(async () => {
   ]);
   await recipientsTable(db);
   backfilled = await db("mhb_recipients").orderBy("last_sent_at", "desc").select("email", "display");
+  await insertLegacyProjects();
+  await projectEmails(db);
+  migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
+  migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
   app.use("/v1/myhomebuilder/portal", myhomebuilderPortalRouter);
   server = app.listen(0, "127.0.0.1");
@@ -248,9 +277,14 @@ async function loginAsAdmin(env = portal(), cookies = "") {
   return cookies ? `${cookies}; ${adminCookie}` : adminCookie;
 }
 
-async function setClientEmail(adminCookie, address = "client@example.com") {
-  const response = await request("/clients/admin/clients/muskegon-addition/profile", form({ email: address }, adminCookie));
+async function setClientEmail(adminCookie, addresses = "client@example.com") {
+  const response = await request("/clients/admin/clients/muskegon-addition/profile", form({ emails: addresses }, adminCookie));
   assert.equal(response.status, 303);
+}
+
+async function projectRecord(slug = "muskegon-addition") {
+  const row = await db("mhb_clients").where({ slug }).first();
+  return row ? json(row.data) : null;
 }
 
 async function postInvoice(adminCookie, fields) {
@@ -438,12 +472,12 @@ test("adding a client portal fixes up the portal id and explains any problem, ke
   const blank = await request("/clients/admin/clients", form({ name: "Lakeshore Cottage & Dock", slug: "", password: "lakeshore-cottage-2026" }, adminCookie));
   assert.equal(blank.headers.get("Location"), "/clients/admin?client=lakeshore-cottage-and-dock&notice=client-added");
 
-  const short = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: "short", email: "pine@example.com" }, adminCookie));
+  const short = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: "short", emails: "pine@example.com, pat@example.com" }, adminCookie));
   assert.equal(short.status, 400);
   const shortBody = await short.text();
   assert.match(shortBody, /The project login needs 10 to 120 characters/u);
   assert.match(shortBody, /id="client-name" name="name" type="text" maxlength="120" required value="Pine Street"/u);
-  assert.match(shortBody, /value="pine@example\.com"/u);
+  assert.match(shortBody, /id="new-client-emails" name="emails"[^>]* value="pine@example\.com, pat@example\.com"/u);
 
   const reused = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: process.env.MHB_CLIENT_PORTAL_PASSWORD }, adminCookie));
   assert.equal(reused.status, 400);
@@ -522,13 +556,149 @@ test("every address the admin emails joins the pick list on the admin pages, new
   const body = await page.text();
   const listed = [...body.matchAll(/<option value="([^"]+)" label="[^"]+"><\/option>/gu)].map((match) => match[1]);
   assert.deepEqual(listed, ["first@example.com", "Second@Example.com"]);
-  assert.match(body, /id="send-to" name="to" type="email" maxlength="254" required list="mhb-recipients" autocomplete="off" data-recipient-input/u);
+  assert.match(body, /id="send-to" name="to" type="text" inputmode="email"[^>]* required list="mhb-recipients" autocomplete="off" data-recipient-input/u);
 
   const dashboard = await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } });
   assert.match(dashboard.headers.get("Content-Security-Policy"), /script-src 'self'/u);
   const dashboardBody = await dashboard.text();
   assert.match(dashboardBody, /<datalist id="mhb-recipients">/u);
-  assert.match(dashboardBody, /id="client-email" name="email" type="email" maxlength="254" list="mhb-recipients"/u);
+  assert.match(dashboardBody, /id="client-emails" name="emails" type="text" inputmode="email"[^>]* list="mhb-recipients"/u);
+});
+
+test("email fields read several addresses, however they are separated or pasted", () => {
+  assert.deepEqual(parseEmailList(" pcm@example.com, Spouse@Example.com;third@example.com\nfourth@example.com fifth@example.com "), {
+    addresses: ["pcm@example.com", "Spouse@Example.com", "third@example.com", "fourth@example.com", "fifth@example.com"],
+    invalid: []
+  });
+  assert.deepEqual(parseEmailList('"Pat Hayes" <pcm@example.com>; Sam <sam@example.com>, mailto:office@example.com').addresses, ["pcm@example.com", "sam@example.com", "office@example.com"]);
+  assert.deepEqual(parseEmailList("pcm@example.com, PCM@example.com, pcm@example"), { addresses: ["pcm@example.com"], invalid: ["pcm@example"] });
+  assert.deepEqual(parseEmailList(" , ; "), { addresses: [], invalid: [] });
+  assert.equal(addressesText(["a@example.com"]), "a@example.com");
+  assert.equal(addressesText(["a@example.com", "b@example.com"]), "a@example.com and b@example.com");
+  assert.equal(addressesText(["a@example.com", "b@example.com", "c@example.com"]), "a@example.com, b@example.com and c@example.com");
+});
+
+test("a quote or invoice goes to several addresses at once, and they fill in the project's other quotes, invoices and receipts", async () => {
+  const adminCookie = await loginAsAdmin();
+  const newInvoice = async () => (await request("/clients/admin/clients/muskegon-addition/billing/new?kind=invoice", { headers: { Cookie: adminCookie } })).text();
+  assert.match(await newInvoice(), /Add client emails on the client panel/u);
+
+  const { item: first } = await postInvoice(adminCookie, { title: "Pre Construction Services", amount: "5,000" });
+  const firstPath = `/clients/admin/clients/muskegon-addition/billing/${first.id}`;
+  const sent = await request(`${firstPath}/send`, form({ to: "pcm@example.com, Spouse@Example.com; pcm@example.com" }, adminCookie));
+  assert.match(sent.headers.get("Location"), /notice=sent/u);
+  assert.deepEqual(email.delivered.at(-1).to, ["pcm@example.com", "Spouse@Example.com"], "one email with both addresses in To");
+  assert.equal((await stored(first)).sentTo, "pcm@example.com, Spouse@Example.com");
+  assert.deepEqual((await projectRecord()).emails, ["pcm@example.com", "Spouse@Example.com"]);
+
+  // Every other quote and invoice for the project is addressed to them.
+  assert.match(await newInvoice(), /Email it to pcm@example\.com and Spouse@Example\.com after posting/u);
+  const { item: second } = await postInvoice(adminCookie, { title: "Framing draw", amount: "8,000", sendNow: "yes" });
+  assert.deepEqual(email.delivered.at(-1).to, ["pcm@example.com", "Spouse@Example.com"]);
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  const quote = (await billingRecords()).find((entry) => entry.kind === "quote");
+  const quotePage = await (await request(`/clients/admin/clients/muskegon-addition/billing/${quote.id}`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(quotePage, /id="send-to" name="to"[^>]* value="pcm@example\.com, Spouse@Example\.com"/u);
+
+  // A new address joins the project; one already on it (in any case) is not repeated.
+  await request(`/clients/admin/clients/muskegon-addition/billing/${second.id}/send`, form({ to: "SPOUSE@example.com, office@example.com" }, adminCookie));
+  assert.deepEqual((await projectRecord()).emails, ["pcm@example.com", "Spouse@Example.com", "office@example.com"]);
+  const dashboard = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(dashboard, /id="client-emails" name="emails"[^>]* value="pcm@example\.com, Spouse@Example\.com, office@example\.com"/u);
+
+  // Receipts go to the whole list, as one email.
+  await request(`${firstPath}/record-payment`, form({ method: "zelle", paidOn: "2026-07-30", sendReceipt: "yes" }, adminCookie));
+  const receipt = email.delivered.at(-1);
+  assert.equal(receipt.subject, `Receipt for invoice ${first.number} from My Home Builder LLC`);
+  assert.deepEqual(receipt.to, ["pcm@example.com", "Spouse@Example.com", "office@example.com"]);
+  assert.match(await (await request(firstPath, { headers: { Cookie: adminCookie } })).text(), /Emailed to pcm@example\.com, Spouse@Example\.com, office@example\.com on/u);
+
+  // Stripe Checkout takes one address: the project's first.
+  await request(`/clients/pay/${second.shareToken}`);
+  assert.equal(stripe.created.at(-1).customer_email, "pcm@example.com");
+});
+
+test("a problem with typed addresses is named and what was typed is kept", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pcm@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  const deliveredBefore = email.delivered.length;
+
+  const typo = await request(`${path}/send`, form({ to: "pcm@example.com, spouse@@example.com" }, adminCookie));
+  assert.equal(typo.status, 400);
+  const typoBody = await typo.text();
+  assert.match(typoBody, /spouse@@example\.com is not a complete email address/u);
+  assert.match(typoBody, /id="send-to" name="to"[^>]* value="pcm@example\.com, spouse@@example\.com"/u);
+
+  const eleven = Array.from({ length: 11 }, (_, index) => `person${index}@example.com`).join(", ");
+  assert.match(await (await request(`${path}/send`, form({ to: eleven }, adminCookie))).text(), /Enter up to 10 email addresses/u);
+  assert.match(await (await request(`${path}/send`, form({ to: " , " }, adminCookie))).text(), /Enter at least one email address/u);
+  assert.equal(email.delivered.length, deliveredBefore, "nothing is sent");
+
+  const profile = await request("/clients/admin/clients/muskegon-addition/profile", form({ emails: "pcm@example.com, sam@example" }, adminCookie));
+  assert.equal(profile.status, 400);
+  const profileBody = await profile.text();
+  assert.match(profileBody, /sam@example is not a complete email address/u);
+  assert.match(profileBody, /id="client-emails" name="emails"[^>]* value="pcm@example\.com, sam@example"/u);
+  assert.deepEqual((await projectRecord()).emails, ["pcm@example.com"]);
+
+  // Clearing the list on the client panel leaves the project with no addresses.
+  await setClientEmail(adminCookie, "");
+  assert.deepEqual((await projectRecord()).emails, []);
+  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /id="send-to" name="to"[^>]* value=""/u);
+});
+
+test("a new client portal can start with several emails", async () => {
+  const adminCookie = await loginAsAdmin();
+  const created = await request("/clients/admin/clients", form({ name: "Smith Residence", password: "smith-residence-2026", emails: "pat@example.com; sam@example.com" }, adminCookie));
+  assert.equal(created.headers.get("Location"), "/clients/admin?client=smith-residence&notice=client-added");
+  assert.deepEqual((await projectRecord("smith-residence")).emails, ["pat@example.com", "sam@example.com"]);
+  assert.match(await (await request("/clients/admin?client=smith-residence", { headers: { Cookie: adminCookie } })).text(), /Portal id: smith-residence · pat@example\.com, sam@example\.com/u);
+
+  const bad = await request("/clients/admin/clients", form({ name: "Pine Street", password: "pine-street-2026", emails: "pine@example" }, adminCookie));
+  assert.equal(bad.status, 400);
+  const badBody = await bad.text();
+  assert.match(badBody, /pine@example is not a complete email address/u);
+  assert.match(badBody, /id="new-client-emails" name="emails"[^>]* value="pine@example"/u);
+  assert.equal(await projectRecord("pine-street"), null);
+});
+
+test("projects keep their saved email as a list, or start with the addresses their last quote or invoice went to", () => {
+  const bySlug = Object.fromEntries(migratedClients.map((client) => [client.slug, client]));
+  assert.deepEqual(bySlug["single-email"].emails, ["Single@Example.com"], "a saved email wins over past sends");
+  assert.equal("email" in bySlug["single-email"], false);
+  assert.deepEqual(bySlug["emailed-before"].emails, ["pcm@example.com"], "the most recent send, not every past one");
+  assert.equal(bySlug["never-emailed"].emails, undefined);
+  assert.deepEqual(bySlug["muskegon-addition"], { slug: "muskegon-addition", emails: ["Owner@Example.com"] }, "Muskegon's other details stay in code");
+});
+
+test("a payment recorded by hand is set to its invoice's total, while a Stripe payment keeps what Stripe charged", () => {
+  const [stripePaid, byHand] = migratedBilling;
+  assert.equal(byHand.payment.amountCents, 500000);
+  assert.equal(stripePaid.payment.amountCents, 1500000);
+});
+
+test("editing a paid invoice's lines keeps a payment recorded by hand equal to the new total", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Pre Construction Services", amount: "15,000" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  await request(`${path}/record-payment`, form({ method: "zelle", paidOn: "2026-07-30" }, adminCookie));
+  assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), /the recorded payment changes to match/u);
+
+  const edited = await request(`${path}/edit`, form({ title: "Pre Construction Services", ...lines(["Pre Construction Services", "1", "5,000"]) }, adminCookie));
+  assert.match(edited.headers.get("Location"), /notice=billing-updated/u);
+  const paid = await stored(item);
+  assert.equal(paid.amountCents, 500000);
+  assert.equal(paid.payment.amountCents, 500000);
+  const view = await (await request(`/clients/invoice/${item.shareToken}`)).text();
+  assert.match(view, /-\$5,000\.00/u);
+  assert.doesNotMatch(view, /15,000/u);
+
+  // Saving the payment also sets its amount to the total.
+  await db("mhb_billing").where({ id: item.id }).update({ data: JSON.stringify({ ...paid, payment: { ...paid.payment, amountCents: 1500000 } }) });
+  await request(`${path}/payment`, form({ method: "zelle", paidOn: "2026-07-30" }, adminCookie));
+  assert.equal((await stored(item)).payment.amountCents, 500000);
 });
 
 test("invoices and quotes number 1, 2, 3 in separate sequences, shown as Invoice 1 and Quote 1", async () => {
@@ -819,6 +989,7 @@ test("a reopened invoice paid later through Stripe gets a fresh receipt, and Str
   assert.match((await request(`${path}/reopen`, form({}, adminCookie))).headers.get("Location"), /notice=payment-from-stripe/u);
   assert.equal((await stored(item)).status, "paid");
   assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Paid online through Stripe/u);
+  assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), /the Stripe payment stays as Stripe recorded it/u);
 });
 
 test("templates are saved, listed, used for a new quote, edited and deleted", async () => {

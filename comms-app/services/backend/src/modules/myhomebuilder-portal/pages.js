@@ -1,4 +1,5 @@
 import { billingLabel, billingLineItems, isEditable, moneyInput, PAYMENT_METHODS, quantityText } from "./billing.js";
+import { addressesText, clientEmails, MAX_RECIPIENTS } from "./email.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 
 export { escapeHtml, money };
@@ -40,6 +41,16 @@ function checkOption(item) {
 // under each email field in the admin panel; without scripts the browser offers the same addresses.
 const RECIPIENT_LIST_ID = "mhb-recipients";
 const RECIPIENT_INPUT = `list="${RECIPIENT_LIST_ID}" autocomplete="off" data-recipient-input`;
+
+// An admin email field: one or more addresses separated by commas. billing.js shows each address
+// as a removable chip; the server accepts the same text typed by hand.
+function emailsField({ id, name, label, addresses = [], typed = null, required = false, hint = "" }) {
+  const value = typed ?? addresses.join(", ");
+  return `<label class="admin-emails-field" for="${id}">${label}
+              <input id="${id}" name="${name}" type="text" inputmode="email" autocapitalize="off" spellcheck="false" maxlength="${MAX_RECIPIENTS * 100}"${required ? " required" : ""} ${RECIPIENT_INPUT} data-max-recipients="${MAX_RECIPIENTS}" value="${escapeAttribute(value)}" placeholder="client@example.com">
+              ${hint ? `<small class="admin-field-hint">${hint}</small>` : ""}
+            </label>`;
+}
 
 function recipientList(recipients) {
   if (!recipients.length) return "";
@@ -559,10 +570,11 @@ function templatePicker(templates, action) {
           </form>`;
 }
 
-export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "" }) {
+export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null }) {
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
-    const detail = [client.managedBySecret ? "Login set in Render (MHB_CLIENT_PORTAL_PASSWORD)" : `Portal id: ${escapeHtml(client.slug)}`, client.email ? escapeHtml(client.email) : "No email on file"].join(" · ");
+    const emails = clientEmails(client);
+    const detail = [client.managedBySecret ? "Login set in Render (MHB_CLIENT_PORTAL_PASSWORD)" : `Portal id: ${escapeHtml(client.slug)}`, emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].join(" · ");
     return `<li><a class="admin-client-link${current ? " is-current" : ""}" href="/clients/admin?client=${encodeURIComponent(client.slug)}"${current ? ' aria-current="page"' : ""}>
         <strong>${escapeHtml(client.name)}</strong><small>${detail}</small></a></li>`;
   }).join("");
@@ -575,10 +587,15 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           <p class="portal-kicker">Client portal</p>
           <h2 id="selected-heading">${escapeHtml(selected.name)}</h2>
           <form class="admin-inline-form" action="${base}/profile" method="post">
-            <label for="client-email">Client email for invoices and receipts
-              <input id="client-email" name="email" type="email" maxlength="254" ${RECIPIENT_INPUT} value="${escapeAttribute(selected.email || "")}" placeholder="client@example.com">
-            </label>
-            <button class="portal-logout-button" type="submit">Save email</button>
+            ${emailsField({
+              id: "client-emails",
+              name: "emails",
+              label: "Client emails for quotes, invoices and receipts",
+              addresses: clientEmails(selected),
+              typed: typedEmails,
+              hint: "Every quote, invoice and receipt for this project is addressed to all of them. Addresses you email from this project are added here."
+            })}
+            <button class="portal-logout-button" type="submit">Save emails</button>
           </form>
         </div>
 
@@ -645,9 +662,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
               <input id="client-password" name="password" type="text" minlength="10" maxlength="120" autocomplete="off" required>
               <small class="admin-field-hint">At least 10 characters, and different from every other portal's login.</small>
             </label>
-            <label for="new-client-email">Client email (optional)
-              <input id="new-client-email" name="email" type="email" maxlength="254" ${RECIPIENT_INPUT} value="${escapeAttribute(newClient?.email || "")}" placeholder="client@example.com">
-            </label>
+            ${emailsField({ id: "new-client-emails", name: "emails", label: "Client emails (optional)", typed: newClient?.emails ?? null })}
             <button class="button button-solid" type="submit">Create portal</button>
             <p class="portal-security-note">The login is hashed before it is stored. Share it with the client directly.</p>
           </form>
@@ -699,14 +714,15 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
 
   let sendOption = "";
   if (creating) {
+    const emails = clientEmails(client);
     if (!readiness.email) {
       sendOption = '<p class="portal-security-note">Email delivery is not set up, so the client cannot be emailed yet. You can still copy the link from the next page.</p>';
-    } else if (!client?.email) {
-      sendOption = '<p class="portal-security-note">Add a client email on the client panel to email quotes, invoices and receipts. You can still copy the link from the next page.</p>';
+    } else if (!emails.length) {
+      sendOption = '<p class="portal-security-note">Add client emails on the client panel, or email it from the next page, to email quotes, invoices and receipts. You can also copy its link there.</p>';
     } else {
       sendOption = `<label class="portal-check" for="send-now">
             <input id="send-now" name="sendNow" type="checkbox" value="yes"${values.sendNow === false ? "" : " checked"}>
-            <span>Email it to ${escapeHtml(client.email)} after posting</span>
+            <span>Email it to ${escapeHtml(addressesText(emails))} after posting</span>
           </label>`;
     }
   }
@@ -729,7 +745,9 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
       ${loadTemplate}
       <form class="portal-form admin-form billing-editor" action="${escapeAttribute(actionPath)}" method="post">
         ${error ? `<p class="portal-error" role="alert">${escapeHtml(error)}</p>` : ""}
-        ${paid ? '<p class="portal-notice">This invoice is marked paid. Changing its lines changes its total; the recorded payment stays as it is.</p>' : ""}
+        ${paid === "stripe"
+          ? '<p class="portal-notice">This invoice was paid through Stripe. Changing its lines changes its total; the Stripe payment stays as Stripe recorded it.</p>'
+          : paid ? '<p class="portal-notice">This invoice is marked paid. Changing its lines changes its total, and the recorded payment changes to match.</p>' : ""}
         ${template ? `<label for="template-name">Template name
           <input id="template-name" name="templateName" type="text" maxlength="80" required value="${escapeAttribute(values.templateName || "")}" placeholder="Framing draw">
         </label>` : ""}
@@ -827,9 +845,12 @@ function paymentFields(prefix, { payment = null, date }) {
             </label>`;
 }
 
-export function adminBillingPage({ client, item, links, receipt = null, recipients = [], readiness, notice = null }) {
+// `typed` keeps what was typed into a Send to field ({ field: "send" | "receipt", value }) when
+// the addresses had a problem.
+export function adminBillingPage({ client, item, links, receipt = null, recipients = [], readiness, notice = null, typed = null }) {
   const base = `/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.id)}`;
   const invoice = item.kind === "invoice";
+  const projectEmails = clientEmails(client);
   const cards = [];
 
   const linkFields = invoice
@@ -845,9 +866,15 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
     const sendBody = !readiness.email
       ? '<p class="portal-security-note">Email delivery is not set up yet.</p>'
       : `<form class="admin-inline-form" action="${base}/send" method="post">
-            <label for="send-to">Send to
-              <input id="send-to" name="to" type="email" maxlength="254" required ${RECIPIENT_INPUT} value="${escapeAttribute(client.email || "")}" placeholder="client@example.com">
-            </label>
+            ${emailsField({
+              id: "send-to",
+              name: "to",
+              label: "Send to",
+              addresses: projectEmails,
+              typed: typed?.field === "send" ? typed.value : null,
+              required: true,
+              hint: `Filled in from this project's emails. New addresses are added to the project.`
+            })}
             <button class="button button-solid" type="submit">Email ${invoice ? "invoice" : "quote"}</button>
           </form>`;
     cards.push(`<section class="admin-card">
@@ -863,9 +890,9 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
           <p class="admin-meta">For checks, Zelle, cash and other payments received outside Stripe.</p>
           <form class="admin-stack-form" action="${base}/record-payment" method="post">
             ${paymentFields("payment", { date: links.today })}
-            ${readiness.email && client.email ? `<label class="portal-check" for="payment-receipt">
+            ${readiness.email && projectEmails.length ? `<label class="portal-check" for="payment-receipt">
               <input id="payment-receipt" name="sendReceipt" type="checkbox" value="yes" checked>
-              <span>Email a receipt to ${escapeHtml(client.email)}</span>
+              <span>Email a receipt to ${escapeHtml(addressesText(projectEmails))}</span>
             </label>` : ""}
             <button class="button button-solid" type="submit">Mark as paid</button>
           </form>
@@ -896,14 +923,12 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   }
 
   if (invoice && item.status === "paid" && readiness.email) {
-    const receiptTo = client.email || item.payment?.email || "";
+    const receiptTo = projectEmails.length ? projectEmails : [item.payment?.email].filter(Boolean);
     cards.push(`<section class="admin-card">
           <h2>Receipt</h2>
           ${receipt ? `<p class="admin-meta">Emailed to ${escapeHtml(receipt.to)} on ${dateText(receipt.sentAt)}.</p>` : '<p class="admin-meta">No receipt has been emailed yet.</p>'}
           <form class="admin-inline-form" action="${base}/receipt" method="post">
-            <label for="receipt-to">Send to
-              <input id="receipt-to" name="to" type="email" maxlength="254" required ${RECIPIENT_INPUT} value="${escapeAttribute(receiptTo)}">
-            </label>
+            ${emailsField({ id: "receipt-to", name: "to", label: "Send to", addresses: receiptTo, typed: typed?.field === "receipt" ? typed.value : null, required: true })}
             <button class="portal-logout-button" type="submit">${receipt ? "Resend receipt" : "Send receipt"}</button>
           </form>
         </section>`);
