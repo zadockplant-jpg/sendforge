@@ -31,6 +31,7 @@ import {
   issueCustomerAccessToken,
   verifyCustomerAccessToken,
 } from "../services/auth.service.js";
+import { safeSitePath } from "../utils/sitePaths.js";
 
 export const authRouter = Router();
 
@@ -42,6 +43,9 @@ const Register = z.object({
   referralCode: z.string().max(80).optional().nullable(),
   cashAppTag: z.string().max(100).optional().nullable(),
   inviteToken: z.string().max(256).optional().nullable(),
+  // Where to carry on after verifying: a page on the website, such as a
+  // program's checkout. It rides in the emailed link.
+  next: z.string().max(300).optional().nullable(),
 });
 
 const Login = z.object({
@@ -161,6 +165,25 @@ const accountEmailIpRateLimiter = createRateLimiter({
 });
 
 // Helpers
+// The emailed verification link. It points at the backend (publicBaseUrl),
+// which verifies, signs its reader in and sends them to the website: to
+// `next` when the signup came from somewhere, such as a program's checkout.
+export function verificationLink(token, next = "") {
+  const back = safeSitePath(next || "");
+  const tail = back ? `&next=${encodeURIComponent(back)}` : "";
+  return `${env.publicBaseUrl}/v1/auth/verify?token=${token}${tail}`;
+}
+
+// Signing up again with an address that is not verified yet makes that
+// signup's password the account's. The verify link signs in whoever clicks
+// it, so keeping the first password ever typed would let someone who typed
+// this address before its owner did sign in to the owner's account later.
+// Only an unverified account changes: a verified one is its owner's.
+export async function takeNewestSignupPassword(userId, password) {
+  const hash = await bcrypt.hash(password, 12);
+  await db("users").where({ id: userId, email_verified: false }).update({ password_hash: hash });
+}
+
 function sha256(input) {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
@@ -265,8 +288,7 @@ authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (
   const verifyTokenHash = sha256(verifyToken);
   const now = new Date();
 
-  // verify URL points to backend verify endpoint (publicBaseUrl is the backend base)
-  const verifyUrl = `${env.publicBaseUrl}/v1/auth/verify?token=${verifyToken}`;
+  const verifyUrl = verificationLink(verifyToken, parsed.data.next);
 
   log("info", "register_attempt", { requestId, email: sanitizeEmail(email) });
 
@@ -298,15 +320,15 @@ authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (
           return { kind: "exists_verified", userId: existing.id };
         }
 
-        // Existing but not verified: refresh token + sent_at.
-        // Do not change password here, but allow referral/cash app metadata to be captured
-        // if the user is still completing first-time account setup.
+        // Existing but not verified: refresh token + sent_at, and capture
+        // referral/cash app metadata while first-time setup is still going.
+        // The password typed now replaces the old one only once its link has
+        // gone out (below).
         await trx("users")
           .where({ id: existing.id })
           .update({
             verification_token_hash: verifyTokenHash,
             verification_sent_at: now,
-            // do NOT change password here
           });
 
         await applySignupReferral({
@@ -422,6 +444,9 @@ authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (
 
       // A timeout/disconnect may happen after SendGrid accepted the request.
       // Preserve the new token and tell the client not to trigger a duplicate.
+      if (deliveryUnknown && result.kind === "exists_unverified") {
+        await takeNewestSignupPassword(result.userId, password);
+      }
       return res.status(202).json({
         ok: true,
         status: result.kind,
@@ -432,6 +457,10 @@ authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (
           ? "verification_email_status_unknown"
           : "verification_email_failed",
       });
+    }
+
+    if (result.kind === "exists_unverified") {
+      await takeNewestSignupPassword(result.userId, password);
     }
 
     // Email sent OK
@@ -492,7 +521,10 @@ authRouter.post("/register", registerIpRateLimiter, registerRateLimiter, async (
 authRouter.post("/resend-verification", accountEmailIpRateLimiter, verificationEmailRateLimiter, async (req, res) => {
   const requestId = getRequestId(req);
 
-  const schema = z.object({ email: z.string().email() });
+  const schema = z.object({
+    email: z.string().email(),
+    next: z.string().max(300).optional().nullable(),
+  });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
 
@@ -501,7 +533,7 @@ authRouter.post("/resend-verification", accountEmailIpRateLimiter, verificationE
   const verifyToken = crypto.randomBytes(32).toString("hex");
   const verifyTokenHash = sha256(verifyToken);
   const now = new Date();
-  const verifyUrl = `${env.publicBaseUrl}/v1/auth/verify?token=${verifyToken}`;
+  const verifyUrl = verificationLink(verifyToken, parsed.data.next);
 
   try {
     const user = await db("users").where({ email }).first();
@@ -609,7 +641,7 @@ authRouter.post("/forgot-password", accountEmailIpRateLimiter, accountEmailRateL
       const verifyToken = crypto.randomBytes(32).toString("hex");
       const verifyTokenHash = sha256(verifyToken);
       const now = new Date();
-      const verifyUrl = `${env.publicBaseUrl}/v1/auth/verify?token=${verifyToken}`;
+      const verifyUrl = verificationLink(verifyToken);
 
       await db("users")
         .where({ id: user.id })

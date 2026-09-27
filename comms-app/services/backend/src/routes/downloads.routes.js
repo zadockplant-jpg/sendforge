@@ -45,6 +45,13 @@ export const DOWNLOADS = Object.freeze({
       "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/forgedrop/Install.ForgeDrop.exe",
     entitlement: "forgedrop",
   }),
+  tuneforge: Object.freeze({
+    filename: "Install TuneForge.exe",
+    source:
+      process.env.DOWNLOAD_SOURCE_TUNEFORGE ||
+      "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/tuneforge/Install.TuneForge.exe",
+    entitlement: "tuneforge",
+  }),
   // ForgeDrop's release notice (forgedrop/core/update.py in the ForgeDrop
   // repo): the app asks here first and GitHub second. The notice is signed
   // with a key this server never holds, so relaying it gives the server no

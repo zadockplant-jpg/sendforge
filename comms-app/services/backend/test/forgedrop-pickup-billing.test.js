@@ -1168,6 +1168,26 @@ test("the webhook still checks Stripe's signature before it handles anything, an
   assert.ok(approval.indexOf("rewardPayoutEligibility(") < approval.indexOf("isCloudPickupShareReward(existing)"));
 });
 
+test("TuneForge sells once for $20, and a second purchase is refused", async () => {
+  // The owner, 2026-09-27: $20 once, five devices (licensedProducts.js).
+  useStripe();
+  const buyer = await signUp("tuneforge-buyer");
+  const bought = await checkout(buyer, { productSlug: "tuneforge" });
+  assert.equal(bought.status, 200, JSON.stringify(bought.body));
+  const config = stripe.state.sessions.at(-1).config;
+  assert.equal(config.mode, "payment");
+  assert.equal(config.line_items[0].price_data.unit_amount, 2000);
+  assert.equal(config.line_items[0].price_data.product_data.name, "TuneForge");
+
+  const owner = await signUp("tuneforge-owner", { owns: ["tuneforge"] });
+  const again = await checkout(owner, { productSlug: "tuneforge" });
+  assert.equal(again.status, 409);
+  assert.equal(again.body.error, "already_owned");
+  // The flyer's code is ForgeDrop's alone.
+  assert.equal((await checkout(buyer, { productSlug: "tuneforge", promoCode: "ART25" })).body.error,
+    "promo_not_for_product");
+});
+
 test("ART25 takes 25% off ForgeDrop at the catalog's own price, and nothing else", async () => {
   // The art-competition flyer's code (2026-09-27): no Stripe coupon, the
   // inline price is lowered, and a code that is not good is refused plainly.

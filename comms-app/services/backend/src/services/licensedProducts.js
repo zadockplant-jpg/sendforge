@@ -39,6 +39,16 @@ export const LICENSED_PRODUCTS = Object.freeze([
     seatBased: true,
     codePrefix: "RC",
   }),
+  // One-time $20 like ForgeDrop, five devices (the owner, 2026-09-27). The
+  // app activates by signing in to the SendForge account, or with a code.
+  Object.freeze({
+    slug: "tuneforge",
+    displayName: "TuneForge",
+    entitlementSlug: "tuneforge",
+    deviceLimit: 5,
+    seatBased: false,
+    codePrefix: "TF",
+  }),
 ]);
 
 const BY_SLUG = new Map(LICENSED_PRODUCTS.map((p) => [p.slug, p]));

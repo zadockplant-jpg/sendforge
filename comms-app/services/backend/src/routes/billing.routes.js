@@ -132,6 +132,19 @@ const PRODUCT_CATALOG = {
     defaultSuccessPath: "/account/index.html?purchase_context=forgedrop",
     defaultCancelPath: "/products/forgedrop/index.html",
   },
+  // One-time $20 (the owner, 2026-09-27): a perpetual entitlement, and one
+  // purchase covers five devices (licensedProducts.js), so like ForgeDrop a
+  // second purchase would buy nothing.
+  tuneforge: {
+    slug: "tuneforge",
+    displayName: "TuneForge",
+    mode: "payment",
+    unitAmountCents: 2000,
+    entitlementSlug: "tuneforge",
+    singlePurchase: true,
+    defaultSuccessPath: "/account/index.html?purchase_context=tuneforge",
+    defaultCancelPath: "/products/tuneforge/index.html",
+  },
   tabforge: {
     slug: "tabforge",
     displayName: "TabForge Pro",

@@ -6,17 +6,46 @@ import { env } from "../config/env.js";
 import { log, getRequestId } from "../utils/logger.js";
 import { recordVerifiedReferralPurchases, recordVerifiedReferralSignup } from "../services/referrals/referral.service.js";
 import { redeemPendingCompCodeForVerifiedUser } from "../services/compCodes.service.js";
+import { issueCustomerAccessToken } from "../services/auth.service.js";
+import { safeSitePath, siteUrl } from "../utils/sitePaths.js";
 
 export const verificationRouter = Router();
 
 const TOKEN_TTL_HOURS = 24;
 
+// A person clicking the emailed link is sent back to the website, signed in,
+// and on to where they were headed (`next`, such as a program's checkout):
+// the owner asked for verifying to go straight back to paying (2026-09-27).
+// The link could only have reached the address's owner, so it signs them in
+// the way a password would. Anything that does not ask for a page (scripts,
+// tests) keeps the JSON answer.
+function wantsPage(req) {
+  return String(req.get("accept") || "").toLowerCase().includes("text/html");
+}
+
+// The session rides in the fragment, which browsers never send to a server
+// and never put in a Referer header; /verified.html stores it and moves on.
+export function verifiedPageUrl({ token = "", error = "", next = "" } = {}) {
+  const page = siteUrl("/verified.html");
+  const back = next ? `&next=${encodeURIComponent(next)}` : "";
+  if (token) return `${page}#token=${encodeURIComponent(token)}${back}`;
+  return `${page}?error=${encodeURIComponent(error || "server_error")}${back}`;
+}
+
 verificationRouter.get("/verify", async (req, res) => {
   const requestId = getRequestId(req);
+  const page = wantsPage(req);
+  const next = safeSitePath(String(req.query.next || ""));
+
+  const fail = (status, error) => {
+    if (!page) return res.status(status).json({ ok: false, error });
+    res.set("Cache-Control", "no-store");
+    return res.redirect(302, verifiedPageUrl({ error, next }));
+  };
 
   const token = String(req.query.token || "").trim();
   if (!token) {
-    return res.status(400).json({ ok: false, error: "missing_token" });
+    return fail(400, "missing_token");
   }
 
   const tokenHash = sha256(token);
@@ -28,7 +57,7 @@ verificationRouter.get("/verify", async (req, res) => {
 
     if (!user) {
       log("warn", "verify_invalid_token", { requestId });
-      return res.status(400).json({ ok: false, error: "invalid_or_used_token" });
+      return fail(400, "invalid_or_used_token");
     }
 
     // Expiry check
@@ -37,7 +66,7 @@ verificationRouter.get("/verify", async (req, res) => {
       const ttlMs = TOKEN_TTL_HOURS * 60 * 60 * 1000;
       if (Date.now() - sentAt > ttlMs) {
         log("warn", "verify_token_expired", { requestId, userId: user.id });
-        return res.status(400).json({ ok: false, error: "token_expired" });
+        return fail(400, "token_expired");
       }
     }
 
@@ -50,7 +79,7 @@ verificationRouter.get("/verify", async (req, res) => {
         verification_sent_at: null,
       });
 
-    log("info", "verify_success", { requestId, userId: user.id });
+    log("info", "verify_success", { requestId, userId: user.id, next: next || null });
 
     // Verification does not qualify a payout by itself. It only records the
     // verified account and promotes any already-completed TabForge Pro purchase
@@ -99,14 +128,28 @@ verificationRouter.get("/verify", async (req, res) => {
       log("error", "comp_code_signup_failed", { requestId, userId: user.id, error: String(compError?.message || compError) });
     }
 
-    // Keep it simple for now: JSON response. (You can later redirect to app deep link.)
-    return res.json({ ok: true });
+    if (!page) return res.json({ ok: true });
+
+    res.set("Cache-Control", "no-store");
+    res.set("Referrer-Policy", "no-referrer");
+    let session = "";
+    try {
+      session = env.jwtSecret
+        ? issueCustomerAccessToken({ id: user.id, email: user.email, authVersion: user.auth_version || 0 })
+        : "";
+    } catch (tokenError) {
+      log("error", "verify_session_failed", { requestId, userId: user.id, code: tokenError?.code || null });
+    }
+    // Verified either way; without a session the page asks them to sign in.
+    return res.redirect(302, session
+      ? verifiedPageUrl({ token: session, next })
+      : verifiedPageUrl({ error: "sign_in_needed", next }));
   } catch (e) {
     log("error", "verify_server_error", {
       requestId,
       error: String(e?.message || e),
     });
-    return res.status(500).json({ ok: false, error: "server_error" });
+    return fail(500, "server_error");
   }
 });
 

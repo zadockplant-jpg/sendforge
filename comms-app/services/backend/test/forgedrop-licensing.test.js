@@ -110,7 +110,7 @@ test("ForgeDrop is registered as a licensed product with a 5-device limit", () =
   assert.equal(product.seatBased, false, "one purchase covers all five");
   assert.deepEqual(
     LICENSED_PRODUCTS.map((p) => p.slug),
-    ["forgedrop", "rose-colored-glasses"]
+    ["forgedrop", "rose-colored-glasses", "tuneforge"]
   );
 });
 

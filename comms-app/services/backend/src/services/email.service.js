@@ -306,7 +306,7 @@ export async function sendVerificationEmail({
 Verify your email:
 ${verifyUrl}
 
-This link expires in 24 hours. After verification, you can sign in and open your TabForge referral dashboard.
+This link expires in 24 hours. It signs you in and takes you back to where you left off.
 
 If you did not create this account, ignore this email.`;
 
@@ -315,7 +315,7 @@ If you did not create this account, ignore this email.`;
       <div style="max-width:580px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
         <p style="margin:0 0 8px;color:#52627a;font-size:13px;font-weight:700;">SENDFORGE ACCOUNT</p>
         <h1 style="margin:0 0 12px;font-size:27px;line-height:1.15;color:#172033;">Verify your email</h1>
-        <p style="margin:0 0 22px;color:#52627a;">Finish setting up your account and unlock your TabForge referral dashboard.</p>
+        <p style="margin:0 0 22px;color:#52627a;">Finish setting up your account. The button signs you in and takes you back to where you left off.</p>
         <p style="margin:0 0 22px;">
           <a href="${safeUrl}" style="display:inline-block;padding:12px 18px;border-radius:10px;background:#1e6fe8;color:#ffffff;text-decoration:none;font-weight:700;">Verify email</a>
         </p>
