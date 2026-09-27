@@ -32,6 +32,7 @@ import {
   verifyCustomerAccessToken,
 } from "../services/auth.service.js";
 import { safeSitePath } from "../utils/sitePaths.js";
+import { claimGuestPurchasesOnSignIn } from "./verification.routes.js";
 
 export const authRouter = Router();
 
@@ -974,6 +975,8 @@ authRouter.post("/login", loginRateLimiter, async (req, res) => {
       return res.status(403).json({ error: "email_not_verified", expired });
     }
 
+    await claimGuestPurchasesOnSignIn(user, { requestId, event: "guest_purchases_claimed_at_login" });
+
     const token = issueCustomerAccessToken({
       id: user.id,
       email,
@@ -1070,6 +1073,9 @@ authRouter.post("/google", googleSignInRateLimiter, async (req, res) => {
         .update({ email_verified: true, verified_at: new Date() });
       user = await db("users").where({ id: user.id }).first();
     }
+
+    // Google has proven the address, as verifying it would.
+    await claimGuestPurchasesOnSignIn(user, { requestId, event: "guest_purchases_claimed_at_google_signin" });
 
     const token = issueCustomerAccessToken({
       id: user.id,

@@ -7,9 +7,35 @@ import { log, getRequestId } from "../utils/logger.js";
 import { recordVerifiedReferralPurchases, recordVerifiedReferralSignup } from "../services/referrals/referral.service.js";
 import { redeemPendingCompCodeForVerifiedUser } from "../services/compCodes.service.js";
 import { issueCustomerAccessToken } from "../services/auth.service.js";
+import { claimGuestPurchasesForUser } from "../services/guestPurchases.service.js";
 import { safeSitePath, siteUrl } from "../utils/sitePaths.js";
+import { handleCheckoutSessionCompleted } from "./stripe.webhooks.routes.js";
+import Stripe from "stripe";
 
 export const verificationRouter = Router();
+
+// Only a held subscription (TabForge Pro's Private Sync) needs Stripe to be
+// fulfilled; a one-time purchase is fulfilled from what was stored.
+function guestPurchaseStripe() {
+  return env.stripeSecretKey ? new Stripe(env.stripeSecretKey) : null;
+}
+
+/**
+ * Hands a verified account the purchases paid at Stripe with its email before
+ * it had signed in (guestPurchases.service.js): on verifying, and on every
+ * sign-in after, so one that failed is tried again. Never blocks either.
+ */
+export async function claimGuestPurchasesOnSignIn(user, { requestId, event }) {
+  try {
+    const result = await claimGuestPurchasesForUser(
+      { ...user, email_verified: true },
+      { stripe: guestPurchaseStripe(), fulfill: handleCheckoutSessionCompleted }
+    );
+    if (result.claimed) log("info", event, { requestId, userId: user.id, claimed: result.claimed });
+  } catch (error) {
+    log("error", "guest_purchases_claim_failed", { requestId, userId: user.id, error: String(error?.message || error) });
+  }
+}
 
 const TOKEN_TTL_HOURS = 24;
 
@@ -127,6 +153,11 @@ verificationRouter.get("/verify", async (req, res) => {
     } catch (compError) {
       log("error", "comp_code_signup_failed", { requestId, userId: user.id, error: String(compError?.message || compError) });
     }
+
+    // A purchase paid at Stripe before this account existed becomes theirs
+    // now that the address it was paid with is verified, so the download the
+    // link carries on to is ready.
+    await claimGuestPurchasesOnSignIn(user, { requestId, event: "guest_purchases_claimed_at_verify" });
 
     if (!page) return res.json({ ok: true });
 

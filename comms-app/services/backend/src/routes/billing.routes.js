@@ -15,6 +15,7 @@ import {
   buildTabForgeProBundleLineItems,
   buildTabForgeSubscriptionCheckoutOptions,
   buildTabForgeSyncLineItem,
+  isFulfillableCheckoutPaymentStatus,
   isManageableTabForgeSubscriptionStatus,
   stripeCustomerNeedsReplacing,
   stripeErrorIsMissingResource,
@@ -56,6 +57,12 @@ import {
 } from "../modules/forgedrop-pickup/billing.js";
 import { cloudPickupTier } from "../modules/forgedrop-pickup/plans.js";
 import { r2ConfigProblems } from "../modules/forgedrop-pickup/r2.js";
+import { createRateLimiter } from "../middleware/rateLimit.js";
+import {
+  GUEST_CHECKOUT_FLAG,
+  guestCheckoutAccountState,
+  guestCheckoutEmail,
+} from "../services/guestPurchases.service.js";
 import { log } from "../utils/logger.js";
 
 export const billingRouter = Router();
@@ -1594,6 +1601,222 @@ export function createCatalogCheckoutHandler({ getStripe: stripeClient = getStri
 }
 
 billingRouter.post("/catalog/checkout-session", requireAuth, createCatalogCheckoutHandler());
+
+/**
+ * Checkout before there is an account (the owner, 2026-09-27): "click button
+ * opens stripe purchase with required email field that states this will be
+ * your sendforge login, completed stripe purchase auto opens account creation
+ * with prefilled email". Stripe collects the email; the paid purchase is held
+ * against it (guestPurchases.service.js) and becomes the account's when that
+ * address is verified. Only what a new customer buys outright is sold this
+ * way. Anything priced from, or requiring, what an account already holds
+ * (Private Sync alone, Cloud pickup, a returning owner's extra devices) stays
+ * behind sign-in, and a signed-in visitor uses the checkout above.
+ */
+export const GUEST_CHECKOUT_PRODUCTS = Object.freeze([
+  "forgedrop",
+  "tuneforge",
+  "rose-colored-glasses",
+  "tabforge",
+]);
+export const GUEST_CHECKOUT_LOGIN_NOTE = "This email will be your SendForge login.";
+
+const GuestCheckoutSchema = z.object({
+  productSlug: z.string().min(1),
+  quantity: z.number().int().min(1).max(10).optional(),
+  promoCode: z.string().trim().max(32).optional(),
+  // A referral link's code, handed back when the account is created.
+  referralCode: z.string().trim().max(80).optional(),
+  cancelPath: z.string().optional(),
+});
+
+// Stripe fills in {CHECKOUT_SESSION_ID} only where it appears as written, so
+// this URL is put together by hand rather than through URLSearchParams.
+function guestCheckoutSuccessUrl(productSlug) {
+  const page = new URL("/get/index.html", env.publicSiteUrl).toString();
+  return `${page}?product=${encodeURIComponent(productSlug)}&checkout=success&session_id={CHECKOUT_SESSION_ID}`;
+}
+
+async function guestCatalogCheckoutSession(req, res, stripeClient = getStripe) {
+  const parsed = GuestCheckoutSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_input" });
+  }
+
+  const slug = normalizeSlug(parsed.data.productSlug);
+  const listed = GUEST_CHECKOUT_PRODUCTS.includes(slug) ? getProductDefinition(slug) : null;
+  if (!listed) {
+    return res.status(404).json({ error: "unknown_product" });
+  }
+
+  let product = listed;
+  if (parsed.data.promoCode) {
+    const found = findPromo(parsed.data.promoCode, listed);
+    if (found.error) return res.status(400).json(found.error);
+    product = withPromo(listed, found.promo);
+  }
+
+  const quantity = Number.isInteger(parsed.data.quantity) ? parsed.data.quantity : 1;
+  const quantityAllowed = product.seatBased
+    ? quantity >= (product.quantityMin || 1) && quantity <= (product.quantityMax || 1)
+    : quantity === 1;
+  if (!quantityAllowed) {
+    return res.status(400).json({ error: "invalid_quantity" });
+  }
+
+  const stripe = stripeClient();
+  if (!stripe) {
+    return res.status(500).json({ error: "stripe_not_configured" });
+  }
+
+  try {
+    // A new customer holds no devices yet, so the first is priced as the first.
+    const seatLines = product.seatBased && seatPricing(product.slug)
+      ? seatPriceLines(product.slug, 0, quantity)
+      : null;
+    const checkoutItems = seatLines
+      ? [buildSeatCheckoutItem(product, seatLines)]
+      : buildCheckoutSummary({ product, packs: [], skins: [], quantity });
+    const lineItems = seatLines
+      ? buildSeatLineItems(product, seatLines)
+      : buildLineItems({
+          priceIds: await usableTabForgePriceIds(stripe),
+          product,
+          packs: [],
+          skins: [],
+          quantity,
+        });
+
+    const metadata = {
+      guest_checkout: GUEST_CHECKOUT_FLAG,
+      product_slug: product.slug,
+      fulfillment_type: "multi_entitlement_cart",
+      checkout_items: serializeCheckoutItems(checkoutItems),
+    };
+    if (product.promo) metadata.promo_code = product.promo.code;
+    const referralCode = String(parsed.data.referralCode || "").replace(/[^A-Za-z0-9._@+-]/g, "");
+    if (referralCode) metadata.referral_code = referralCode;
+
+    const cancelPath = sanitizeRelativePath(parsed.data.cancelPath, product.defaultCancelPath);
+    const sessionConfig = {
+      mode: product.mode === "subscription" ? "subscription" : "payment",
+      payment_method_types: ["card"],
+      line_items: lineItems,
+      allow_promotion_codes: true,
+      success_url: guestCheckoutSuccessUrl(product.slug),
+      cancel_url: buildSiteUrl(cancelPath, { checkout: "cancelled" }),
+      metadata,
+    };
+    if (sessionConfig.mode === "subscription") {
+      // TabForge Pro with its 60-day Private Sync trial. The subscription
+      // names no account until the email is verified; then it is given one.
+      const options = buildTabForgeSubscriptionCheckoutOptions({
+        userId: "",
+        checkoutItems,
+        initialProPurchase: true,
+      });
+      const { user_id: _noAccountYet, ...subscriptionMetadata } = options.subscription_data.metadata;
+      options.subscription_data.metadata = { ...subscriptionMetadata, guest_checkout: GUEST_CHECKOUT_FLAG };
+      options.custom_text.submit.message = `${GUEST_CHECKOUT_LOGIN_NOTE} ${options.custom_text.submit.message}`;
+      Object.assign(sessionConfig, options);
+    } else {
+      sessionConfig.customer_creation = "always";
+      sessionConfig.custom_text = { submit: { message: GUEST_CHECKOUT_LOGIN_NOTE } };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionConfig, {
+      idempotencyKey: `guest-checkout-v1:${crypto.randomUUID()}`,
+    });
+
+    return res.json({
+      ok: true,
+      url: session.url,
+      sessionId: session.id,
+      checkout: { items: checkoutItems },
+      ...(product.promo
+        ? {
+            promo: {
+              code: product.promo.code,
+              percentOff: product.promo.percentOff,
+              listPriceCents: product.promo.listPriceCents,
+              priceCents: product.unitAmountCents,
+            },
+          }
+        : {}),
+    });
+  } catch (err) {
+    log("error", "guest_checkout_failed", { productSlug: slug, error: String(err?.message || err) });
+    return res.status(500).json({ error: "server_error" });
+  }
+}
+
+/**
+ * The page Stripe sends a guest back to asks who paid, so account creation
+ * opens with that email filled in. It answers only for a guest checkout this
+ * site created, only once it is paid, and only with what that page needs.
+ */
+async function guestCheckoutInfo(req, res, stripeClient = getStripe) {
+  const sessionId = String(req.params.sessionId || "");
+  if (!/^cs_(test|live)_[A-Za-z0-9]{10,240}$/.test(sessionId)) {
+    return res.status(400).json({ error: "invalid_session" });
+  }
+  const stripe = stripeClient();
+  if (!stripe) {
+    return res.status(500).json({ error: "stripe_not_configured" });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session?.metadata?.guest_checkout !== GUEST_CHECKOUT_FLAG) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const productSlug = normalizeSlug(session.metadata?.product_slug || "");
+    const referralCode = String(session.metadata?.referral_code || "");
+    res.set("Cache-Control", "no-store");
+    const paid = session.status === "complete" && isFulfillableCheckoutPaymentStatus(session.payment_status);
+    if (!paid) {
+      return res.json({ ok: true, paid: false, email: "", productSlug, referralCode, account: "none" });
+    }
+    const email = guestCheckoutEmail(session);
+    return res.json({
+      ok: true,
+      paid: true,
+      email,
+      productSlug,
+      referralCode,
+      account: await guestCheckoutAccountState(email),
+    });
+  } catch (err) {
+    if (stripeErrorIsMissingResource(err)) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    log("error", "guest_checkout_info_failed", { error: String(err?.message || err) });
+    return res.status(500).json({ error: "server_error" });
+  }
+}
+
+/** The two guest routes, with the Stripe client they use: the tests hand them a stand-in. */
+export function createGuestCheckoutHandlers({ getStripe: stripeClient = getStripe } = {}) {
+  return {
+    checkout: (req, res) => guestCatalogCheckoutSession(req, res, stripeClient),
+    info: (req, res) => guestCheckoutInfo(req, res, stripeClient),
+  };
+}
+
+const guestCheckoutLimiter = createRateLimiter({
+  name: "guest-checkout",
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  message: "too_many_checkouts",
+});
+const guestCheckoutInfoLimiter = createRateLimiter({
+  name: "guest-checkout-info",
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+});
+const guestCheckoutHandlers = createGuestCheckoutHandlers();
+billingRouter.post("/catalog/guest-checkout-session", guestCheckoutLimiter, guestCheckoutHandlers.checkout);
+billingRouter.get("/guest-checkout/:sessionId", guestCheckoutInfoLimiter, guestCheckoutHandlers.info);
 
 /**
  * 409 already_subscribed for a Cloud pickup tier: `requested` is the tier

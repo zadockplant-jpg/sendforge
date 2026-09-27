@@ -4,6 +4,11 @@ import Stripe from "stripe";
 import { db } from "../config/db.js";
 import { env } from "../config/env.js";
 import {
+  GUEST_CHECKOUT_FLAG,
+  holdOrClaimGuestCheckout,
+  isGuestCheckoutSession,
+} from "../services/guestPurchases.service.js";
+import {
   grantProductEntitlement,
 } from "../services/entitlement.service.js";
 import {
@@ -112,6 +117,15 @@ async function attachStripeCustomerToUser(userId, customerId) {
     });
 }
 
+// A purchase made as a guest comes with a Stripe customer of its own. An
+// account that already has a customer keeps it, or the subscriptions and
+// billing portal tied to that customer would stop finding the account.
+async function keepsOtherStripeCustomer(metadata, userId, customerId) {
+  if (metadata?.guest_checkout !== GUEST_CHECKOUT_FLAG) return false;
+  const user = await db("users").select("stripe_customer_id").where({ id: userId }).first();
+  return Boolean(user?.stripe_customer_id) && user.stripe_customer_id !== String(customerId);
+}
+
 
 async function syncTabForgeSubscriptionEntitlements({
   userId,
@@ -173,7 +187,7 @@ async function upsertStripeSubscription(sub) {
     return;
   }
 
-  if (customerId) {
+  if (customerId && !(await keepsOtherStripeCustomer(sub.metadata, userId, customerId))) {
     await attachStripeCustomerToUser(userId, customerId);
   }
 
@@ -677,6 +691,14 @@ async function grantCheckoutEntitlements({
 
 // Exported for the seat tests, which drive a real checkout through it.
 export async function handleCheckoutSessionCompleted(session, stripe) {
+  // Bought before any account exists: held for the account that verifies the
+  // email it was paid with, and fulfilled through this same function then.
+  // It must come before the no-user return below, which would drop it.
+  if (isGuestCheckoutSession(session)) {
+    await holdOrClaimGuestCheckout(session, { stripe, fulfill: handleCheckoutSessionCompleted });
+    return;
+  }
+
   const customerId = stripeObjectId(session.customer);
   const subscriptionId = stripeObjectId(session.subscription);
   const paymentIntentId = stripeObjectId(session.payment_intent);
@@ -695,7 +717,7 @@ export async function handleCheckoutSessionCompleted(session, stripe) {
     return;
   }
 
-  if (customerId) {
+  if (customerId && !(await keepsOtherStripeCustomer(session.metadata, userId, customerId))) {
     await attachStripeCustomerToUser(userId, customerId);
   }
 
