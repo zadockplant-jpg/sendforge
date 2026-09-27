@@ -98,6 +98,18 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
     `email` a list. A project with none started with the addresses its most recent quote or
     invoice was emailed to. The migration also set hand-recorded payment amounts to their
     invoice totals.
+- A quote or invoice can go to another project from its admin page ("Another project" card).
+  - **Copy to another project** opens that project's new quote or invoice editor, filled in
+    from it. It is reviewed and posted there with its own number and link. A due date that has
+    already passed is left blank.
+  - **Send to another project** moves one entered in the wrong project. It keeps its number
+    and link. A quote and the invoice made from it move together.
+  - The moved item's sent-email records (keyed by project) move with it, so a receipt is not
+    sent twice.
+  - An unpaid invoice's open Checkout is closed, and paying starts a new one. A bank payment
+    still processing blocks the move.
+  - Stripe events and Checkout returns find an invoice by id alone. A payment through a
+    Checkout started before a move is still recorded, on the new project.
 - Every address a quote, invoice or receipt is emailed to is kept in `mhb_recipients` with
   its last send; builder notices and admin codes are not. The admin panel's email fields
   offer them as a pick list, newest first, eight rows tall with the rest scrolling. The list

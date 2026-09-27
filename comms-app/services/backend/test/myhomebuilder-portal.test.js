@@ -701,6 +701,128 @@ test("editing a paid invoice's lines keeps a payment recorded by hand equal to t
   assert.equal((await stored(item)).payment.amountCents, 500000);
 });
 
+// ---------- Copying and sending to another project ----------
+
+async function addPortal(adminCookie, name, emails = "") {
+  const response = await request("/clients/admin/clients", form({ name, password: `${slugify(name)}-login-2026`, emails }, adminCookie));
+  assert.equal(response.status, 303, await response.clone().text());
+  return slugify(name);
+}
+
+test("an invoice copied to another project opens that project's editor, and posts there with its own number", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Cabinet package", dueDate: "2026-01-15", description: "Net 15.", ...lines(["Base cabinets", "12", "450"], ["Hardware", "1", "380.50"]) });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Add another client portal to copy this invoice to it or send it there/u);
+
+  const smith = await addPortal(adminCookie, "Smith Residence", "pat@example.com, sam@example.com");
+  const page = await (await request(path, { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /<option value="smith-residence">Smith Residence<\/option>/u);
+  assert.doesNotMatch(page, /<option value="muskegon-addition">/u, "the project it is in is not offered");
+  assert.match(page, />Copy to another project<\/button>/u);
+  assert.match(page, /formaction="[^"]+\/move" formmethod="post">Send to another project<\/button>/u);
+
+  const editor = await request(`${path}/copy?to=${smith}`, { headers: { Cookie: adminCookie } });
+  assert.equal(editor.status, 200);
+  const editorBody = await editor.text();
+  assert.match(editorBody, /Copied from Invoice 1 in Muskegon Addition\. Review it, then post it to Smith Residence\./u);
+  assert.match(editorBody, /action="\/clients\/admin\/clients\/smith-residence\/billing" method="post"/u);
+  for (const value of ["Cabinet package", "Base cabinets", "12", "450.00", "Hardware", "380.50"]) assert.ok(editorBody.includes(`value="${value}"`), value);
+  assert.match(editorBody, /Net 15\./u);
+  assert.match(editorBody, /id="billing-due" name="dueDate" type="date" value=""/u, "a due date already past is left to set");
+  assert.match(editorBody, /Email it to pat@example\.com and sam@example\.com after posting/u);
+  assert.ok(editorBody.includes(`href="${path}">Cancel`), "Cancel goes back to the original");
+
+  // Posting it there makes a new invoice in that project; the original stays as it was.
+  const posted = await request(`/clients/admin/clients/${smith}/billing`, form({ kind: "invoice", title: "Cabinet package", description: "Net 15.", sendNow: "yes", ...lines(["Base cabinets", "12", "450"], ["Hardware", "1", "380.50"]) }, adminCookie));
+  assert.equal(posted.status, 303);
+  const copy = (await billingRecords()).find((entry) => entry.clientSlug === smith);
+  assert.equal(copy.number, "2");
+  assert.equal(copy.amountCents, 578050);
+  assert.notEqual(copy.shareToken, item.shareToken);
+  assert.deepEqual(email.delivered.at(-1).to, ["pat@example.com", "sam@example.com"]);
+  assert.equal((await stored(item)).clientSlug, "muskegon-addition");
+
+  for (const to of ["muskegon-addition", "nowhere"]) {
+    assert.match((await request(`${path}/copy?to=${to}`, { headers: { Cookie: adminCookie } })).headers.get("Location"), /notice=project-invalid/u);
+  }
+});
+
+test("an invoice sent to another project keeps its number, link, payments and sent emails", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "wrong@example.com");
+  const smith = await addPortal(adminCookie, "Smith Residence", "pat@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Framing draw", amount: "8,000" });
+  const oldPath = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  await request(`/clients/pay/${item.shareToken}`);
+  const earlySession = [...stripe.sessions.keys()].at(-1);
+
+  const moved = await request(`${oldPath}/move`, form({ to: smith }, adminCookie));
+  assert.equal(moved.headers.get("Location"), `/clients/admin/clients/smith-residence/billing/${item.id}?notice=moved`);
+  const record = await stored(item);
+  assert.equal(record.clientSlug, smith);
+  assert.equal(record.number, "1");
+  assert.equal(record.shareToken, item.shareToken);
+  assert.equal(record.checkoutSessionId, undefined);
+  assert.ok(stripe.expired.includes(earlySession), "the Checkout naming the old project is closed");
+  assert.equal((await db("mhb_billing").where({ id: item.id }).first()).client_slug, smith);
+
+  const newPath = `/clients/admin/clients/${smith}/billing/${item.id}`;
+  const newPage = await (await request(moved.headers.get("Location"), { headers: { Cookie: adminCookie } })).text();
+  assert.match(newPage, /Sent to this project\. It keeps its number and link/u);
+  assert.match(newPage, /Moved from Muskegon Addition/u);
+  assert.match(newPage, /id="send-to" name="to"[^>]* value="pat@example\.com"/u);
+  assert.equal((await request(oldPath, { headers: { Cookie: adminCookie } })).status, 404);
+  assert.doesNotMatch(await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text(), /Framing draw/u);
+  assert.match(await (await request(`/clients/invoice/${item.shareToken}`)).text(), /Smith Residence/u);
+
+  // A payment through a Checkout started before the move is recorded on the new project.
+  await signedWebhook("checkout.session.completed", payStripeSession(earlySession, { amount_total: 800000 }));
+  assert.equal((await stored(item)).status, "paid");
+  assert.ok(deliveredTo("pat@example.com").some((message) => message.subject.startsWith("Receipt")), "the receipt goes to the new project's emails");
+  assert.equal(deliveredTo("wrong@example.com").length, 0);
+
+  // Its sent emails move with it: sent back, it still shows its receipt and sends nothing twice.
+  await request(`${newPath}/move`, form({ to: "muskegon-addition" }, adminCookie));
+  const back = await (await request(oldPath, { headers: { Cookie: adminCookie } })).text();
+  assert.match(back, /Moved from Smith Residence/u);
+  assert.match(back, /Receipt emailed to pat@example\.com/u);
+  const deliveredBefore = email.delivered.length;
+  assert.equal((await signedWebhook("checkout.session.completed", stripe.sessions.get(earlySession))).status, 200);
+  assert.equal(email.delivered.length, deliveredBefore, "no second receipt or payment notice");
+});
+
+test("a quote sent to another project takes the invoice made from it, and a processing bank payment stays put", async () => {
+  const adminCookie = await loginAsAdmin();
+  const smith = await addPortal(adminCookie, "Smith Residence");
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  const quote = (await billingRecords()).find((entry) => entry.kind === "quote");
+  const quotePath = `/clients/admin/clients/muskegon-addition/billing/${quote.id}`;
+  await request(`${quotePath}/invoice`, form({}, adminCookie));
+  const invoice = (await billingRecords()).find((entry) => entry.kind === "invoice");
+  assert.match(await (await request(quotePath, { headers: { Cookie: adminCookie } })).text(), /Send to another project moves this quote there with Invoice 1, which was made from it/u);
+
+  const moved = await request(`${quotePath}/move`, form({ to: smith }, adminCookie));
+  assert.match(moved.headers.get("Location"), /notice=moved-pair/u);
+  assert.equal((await stored(quote)).clientSlug, smith);
+  assert.equal((await stored(invoice)).clientSlug, smith);
+  const quotePage = await (await request(`/clients/admin/clients/${smith}/billing/${quote.id}`, { headers: { Cookie: adminCookie } })).text();
+  assert.ok(quotePage.includes(`href="/clients/admin/clients/smith-residence/billing/${invoice.id}">Invoice 1</a>`), "the link to its invoice still works");
+
+  // A bank payment still processing keeps the invoice (and so its quote) where it is.
+  const invoicePath = `/clients/admin/clients/${smith}/billing/${invoice.id}`;
+  await request(`/clients/pay/${invoice.shareToken}`);
+  await signedWebhook("checkout.session.completed", payStripeSession([...stripe.sessions.keys()].at(-1), { payment_status: "unpaid", amount_total: 400000 }));
+  assert.equal((await stored(invoice)).status, "processing");
+  const processingPage = await (await request(invoicePath, { headers: { Cookie: adminCookie } })).text();
+  assert.doesNotMatch(processingPage, />Send to another project</u);
+  assert.match(processingPage, /A bank payment is still processing/u);
+  assert.match((await request(`${invoicePath}/move`, form({ to: "muskegon-addition" }, adminCookie))).headers.get("Location"), /notice=move-processing/u);
+  assert.equal((await stored(invoice)).clientSlug, smith);
+  assert.equal((await stored(quote)).clientSlug, smith);
+  assert.match((await request(`${invoicePath}/move`, form({ to: smith }, adminCookie))).headers.get("Location"), /notice=project-invalid/u);
+});
+
 test("invoices and quotes number 1, 2, 3 in separate sequences, shown as Invoice 1 and Quote 1", async () => {
   const adminCookie = await loginAsAdmin();
   const first = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });

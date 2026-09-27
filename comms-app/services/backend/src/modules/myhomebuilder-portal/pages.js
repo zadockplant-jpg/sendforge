@@ -810,7 +810,8 @@ function copyField(id, label, value) {
 function activity(item, receipt) {
   const entries = [
     ["Created", item.createdAt],
-    item.updatedAt ? ["Edited", item.updatedAt] : null,
+    item.movedFrom ? [`Moved from ${item.movedFrom.name}`, item.movedFrom.movedAt] : null,
+    item.updatedAt && item.updatedAt !== item.movedFrom?.movedAt ? ["Edited", item.updatedAt] : null,
     item.sentAt ? [`Emailed to ${item.sentTo}`, item.sentAt] : null,
     item.acceptedAt ? [`Accepted${item.acceptedBy ? ` by ${item.acceptedBy}` : ""}`, item.acceptedAt] : null,
     item.processingAt ? ["Bank payment started", item.processingAt] : null,
@@ -845,9 +846,48 @@ function paymentFields(prefix, { payment = null, date }) {
             </label>`;
 }
 
+// Copy to another project opens that project's editor filled in from this quote or invoice. Send
+// to another project moves it there, with the quote or invoice linked to it, for one entered in
+// the wrong project. One project list serves both buttons.
+function otherProjectCard({ base, client, item, projects }) {
+  const noun = item.kind === "invoice" ? "invoice" : "quote";
+  const others = projects.filter((entry) => entry.slug !== client.slug);
+  if (!others.length) {
+    return `<section class="admin-card">
+          <h2>Another project</h2>
+          <p class="admin-meta">Add another client portal to copy this ${noun} to it or send it there.</p>
+        </section>`;
+  }
+  const partner = item.kind === "quote" && item.invoiceNumber
+    ? ` with Invoice ${escapeHtml(item.invoiceNumber)}, which was made from it; both keep their numbers and links`
+    : item.kind === "invoice" && item.fromQuoteNumber
+      ? ` with Quote ${escapeHtml(item.fromQuoteNumber)}, which it was made from; both keep their numbers and links`
+      : "; it keeps its number and link";
+  const send = item.status === "processing"
+    ? `<p class="portal-security-note">A bank payment is still processing, so this invoice can be sent to another project once it finishes.</p>`
+    : `<p class="portal-security-note">Send to another project moves this ${noun} there${partner}.</p>`;
+  return `<section class="admin-card">
+          <h2>Another project</h2>
+          <form class="admin-stack-form" action="${base}/copy" method="get">
+            <label for="other-project">Project
+              <select id="other-project" name="to" required>
+                <option value="" selected disabled>Choose a project</option>
+                ${others.map((entry) => `<option value="${escapeAttribute(entry.slug)}">${escapeHtml(entry.name)}</option>`).join("")}
+              </select>
+            </label>
+            <div class="admin-manage">
+              <button class="button button-solid" type="submit">Copy to another project</button>
+              ${item.status === "processing" ? "" : `<button class="portal-logout-button" type="submit" formaction="${base}/move" formmethod="post">Send to another project</button>`}
+            </div>
+            <p class="portal-security-note">Copy to another project opens a new ${noun} for that project with these lines filled in, to review and post.</p>
+            ${send}
+          </form>
+        </section>`;
+}
+
 // `typed` keeps what was typed into a Send to field ({ field: "send" | "receipt", value }) when
-// the addresses had a problem.
-export function adminBillingPage({ client, item, links, receipt = null, recipients = [], readiness, notice = null, typed = null }) {
+// the addresses had a problem. `projects` lists every client portal, for Copy and Send.
+export function adminBillingPage({ client, item, links, receipt = null, recipients = [], projects = [], readiness, notice = null, typed = null }) {
   const base = `/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.id)}`;
   const invoice = item.kind === "invoice";
   const projectEmails = clientEmails(client);
@@ -945,6 +985,8 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
           <p class="portal-security-note">Copies the title, line items and notes into a new open invoice.</p>`}
         </section>`);
   }
+
+  cards.push(otherProjectCard({ base, client, item, projects }));
 
   const manage = [];
   if (isEditable(item)) manage.push(`<a class="button button-outline" href="${base}/edit">Edit ${invoice ? "invoice" : "quote"}</a>`);

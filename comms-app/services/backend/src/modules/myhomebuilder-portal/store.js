@@ -84,6 +84,31 @@ export async function getBilling(store, slug, id) {
   return data(await store.db("mhb_billing").where({ id: String(id), client_slug: slug }).first().timeout(QUERY_TIMEOUT_MS));
 }
 
+// Ids are unique across projects. Stripe events find an invoice this way, since an invoice sent
+// to another project keeps its id while its Checkout still names the old project.
+export async function getBillingById(store, id) {
+  return data(await store.db("mhb_billing").where({ id: String(id) }).first().timeout(QUERY_TIMEOUT_MS));
+}
+
+// Moves quotes or invoices (already carrying their new clientSlug) out of fromSlug. Their
+// sent-email records are keyed by project, so they move too: a receipt already sent is not sent
+// again, and the admin page still shows it.
+export async function moveBilling(store, items, fromSlug) {
+  await store.db.transaction(async (trx) => {
+    for (const item of items) {
+      await trx("mhb_billing")
+        .where({ id: item.id, client_slug: fromSlug })
+        .update({ client_slug: item.clientSlug, data: JSON.stringify(item), updated_at: trx.fn.now() })
+        .timeout(QUERY_TIMEOUT_MS);
+      const from = `${fromSlug}:${item.id}:`;
+      await trx.raw(
+        "UPDATE mhb_sent_emails SET key = ? || substr(key, ?) WHERE left(key, ?) = ?",
+        [`${item.clientSlug}:${item.id}:`, from.length + 1, from.length, from]
+      ).timeout(QUERY_TIMEOUT_MS);
+    }
+  });
+}
+
 export async function putBilling(store, item) {
   const row = {
     id: item.id,

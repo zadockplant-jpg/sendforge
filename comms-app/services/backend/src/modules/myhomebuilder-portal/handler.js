@@ -33,6 +33,7 @@ import {
   deleteTemplate,
   getAdminChallenge,
   getBilling,
+  getBillingById,
   getClient,
   getDocument,
   getFile,
@@ -44,6 +45,7 @@ import {
   listDocuments,
   listRecipients,
   listTemplates,
+  moveBilling,
   nextBillingNumber,
   putAdminChallenge,
   putBilling,
@@ -85,6 +87,8 @@ import {
 import {
   MIN_INVOICE_CENTS,
   addDays,
+  billingLabel,
+  billingLineItems,
   isEditable,
   isPayable,
   parseBillingForm,
@@ -252,6 +256,10 @@ const NOTICES = {
   "payment-from-stripe": { text: "This payment came through Stripe, so its details stay as Stripe recorded them.", tone: "info" },
   "payment-other-required": { text: "Type the payment method when you choose Other.", tone: "error" },
   "payment-date-invalid": { text: "Enter the date the payment was received.", tone: "error" },
+  moved: { text: "Sent to this project. It keeps its number and link, and this project's emails are used from now on." },
+  "moved-pair": { text: "Sent to this project with its linked quote or invoice. Both keep their numbers and links." },
+  "move-processing": { text: "A bank payment for this invoice is still processing, so it stays in this project until the payment finishes.", tone: "error" },
+  "project-invalid": { text: "Choose one of the other client portals.", tone: "error" },
   "name-required": { text: "Enter your name to accept the quote.", tone: "error" },
   "files-not-configured": { text: "File storage is not configured, so documents cannot be stored yet.", tone: "error" }
 };
@@ -536,11 +544,13 @@ async function checkoutUrl(env, store, invoice, client, { successUrl, cancelUrl 
 
 // Confirms a Checkout Session when the client comes back from Stripe. Errors are not shown to
 // the client once Stripe says the payment went through; the webhook records the same payment.
-async function confirmReturn(env, store, invoice, client, sessionId, origin) {
+async function confirmReturn(env, store, invoice, sessionId, origin) {
   if (invoice.status === "paid") return "paid";
   if (!stripeConfigured(env) || !CHECKOUT_SESSION_PATTERN.test(sessionId)) return "payment-pending";
   const checkout = await retrieveCheckoutSession(env, sessionId);
-  const belongs = checkout?.metadata?.invoiceId === invoice.id && checkout?.metadata?.clientSlug === client.slug;
+  // Matched by invoice id alone: an invoice sent to another project keeps its id, while a
+  // Checkout started before the move still names the old project.
+  const belongs = checkout?.metadata?.invoiceId === invoice.id;
   if (!belongs) return "payment-pending";
   try {
     if (checkout.payment_status === "paid") {
@@ -618,7 +628,7 @@ async function handleShare(context, store, match, origin) {
 
   if (route === "pay" && action === "return") {
     if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
-    const result = await confirmReturn(env, store, item, client, url.searchParams.get("session_id") || "", origin);
+    const result = await confirmReturn(env, store, item, url.searchParams.get("session_id") || "", origin);
     return redirectResponse(`${viewPath}?notice=${result}`);
   }
 
@@ -652,11 +662,12 @@ async function handleWebhook(context, store, origin) {
   }
 
   const session = event.data?.object || {};
-  const slug = session.metadata?.clientSlug;
   const invoiceId = session.metadata?.invoiceId;
   const handled = ["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed"];
-  if (handled.includes(event.type) && isValidSlug(slug) && typeof invoiceId === "string") {
-    const invoice = await getBilling(store, slug, invoiceId);
+  if (handled.includes(event.type) && typeof invoiceId === "string" && invoiceId) {
+    // By id alone: the session's clientSlug is the project the invoice was in when Checkout
+    // started, and the invoice may have been sent to another project since.
+    const invoice = await getBillingById(store, invoiceId);
     if (invoice && invoice.kind === "invoice") {
       try {
         if (event.type === "checkout.session.async_payment_failed") {
@@ -839,9 +850,12 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     }
     const links = { ...shareLinks(origin, item), today };
     const receipt = item.status === "paid" ? await getSentEmail(store, sentKey(item, "receipt")) : null;
-    const recipients = await listRecipients(store);
-    return scriptedHtmlResponse(adminBillingPage({ client: target, item, links, receipt, recipients, readiness, notice, typed }), status);
+    const [recipients, projects] = await Promise.all([listRecipients(store), listClients(store)]);
+    return scriptedHtmlResponse(adminBillingPage({ client: target, item, links, receipt, recipients, projects, readiness, notice, typed }), status);
   };
+
+  // The other project named by a Copy or Send form, or null.
+  const otherProject = async (toSlug) => (toSlug !== slug && isValidSlug(toSlug) ? getClient(store, toSlug) : null);
 
   // Reads the addresses typed into a Send to field. Returns them, or the page explaining the problem.
   const typedAddresses = async (field) => {
@@ -883,7 +897,45 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     return redirectResponse(`${itemPath}?notice=billing-updated`);
   }
 
+  // Copy to another project: that project's new quote or invoice editor, filled in from this one
+  // to review and post there. A due date already past is left for the admin to set.
+  if (action === "copy") {
+    if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+    const destination = await otherProject(url.searchParams.get("to") || "");
+    if (!destination) return redirectResponse(`${itemPath}?notice=project-invalid`);
+    const values = { ...editorValuesFromItem(item), lineItems: billingLineItems(item), dueDate: item.dueDate && item.dueDate >= today ? item.dueDate : "" };
+    const notice = { text: `Copied from ${billingLabel(item)} in ${target.name}. Review it, then post it to ${destination.name}.` };
+    return scriptedHtmlResponse(billingEditorPage({
+      mode: "create", client: destination, values, notice, actionPath: `/clients/admin/clients/${encodeURIComponent(destination.slug)}/billing`, backPath: itemPath, readiness
+    }));
+  }
+
   if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+
+  // Send to another project, for one entered in the wrong project: it moves there with its
+  // number and link, together with the quote or invoice linked to it. An unpaid invoice's open
+  // Checkout names the old project, so it is closed; paying starts a new one.
+  if (action === "move") {
+    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+    const destination = await otherProject(String(form?.get("to") || ""));
+    if (!destination) return redirectResponse(`${itemPath}?notice=project-invalid`);
+    const partnerId = item.kind === "quote" ? item.invoiceId : item.fromQuoteId;
+    const partner = partnerId ? await getBilling(store, slug, partnerId) : null;
+    const moving = partner ? [item, partner] : [item];
+    if (moving.some((entry) => entry.status === "processing")) return redirectResponse(`${itemPath}?notice=move-processing`);
+    const movedAt = new Date().toISOString();
+    const moved = [];
+    for (const entry of moving) {
+      const next = { ...entry, clientSlug: destination.slug, movedFrom: { slug, name: target.name, movedAt }, updatedAt: movedAt };
+      if (entry.status === "open" && entry.checkoutSessionId) {
+        await expireCheckoutSession(env, entry.checkoutSessionId);
+        for (const field of ["checkoutSessionId", "checkoutExpiresAt", "checkoutSuccessUrl", "checkoutAmountCents"]) delete next[field];
+      }
+      moved.push(next);
+    }
+    await moveBilling(store, moved, slug);
+    return redirectResponse(`${adminBillingPath(destination.slug, item.id)}?notice=${partner ? "moved-pair" : "moved"}`);
+  }
 
   if (action === "send") {
     if (!readiness.email) return redirectResponse(`${itemPath}?notice=email-not-configured`);
@@ -1302,7 +1354,7 @@ export async function handlePortalRequest(context) {
           }
         }
         if (action === "return" && isRead) {
-          const result = await confirmReturn(env, store, item, client, url.searchParams.get("session_id") || "", origin);
+          const result = await confirmReturn(env, store, item, url.searchParams.get("session_id") || "", origin);
           return redirectResponse(`${detailPath}?notice=${result}`);
         }
         if (action === "accept" && method === "POST") {
