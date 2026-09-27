@@ -1167,3 +1167,34 @@ test("the webhook still checks Stripe's signature before it handles anything, an
   assert.ok(approval.indexOf("rewardPayoutEligibility(") > 0);
   assert.ok(approval.indexOf("rewardPayoutEligibility(") < approval.indexOf("isCloudPickupShareReward(existing)"));
 });
+
+test("ART25 takes 25% off ForgeDrop at the catalog's own price, and nothing else", async () => {
+  // The art-competition flyer's code (2026-09-27): no Stripe coupon, the
+  // inline price is lowered, and a code that is not good is refused plainly.
+  useStripe();
+  const buyer = await signUp("flyer-buyer");
+  const full = await checkout(buyer, { productSlug: "forgedrop" });
+  assert.equal(full.status, 200, JSON.stringify(full.body));
+  assert.equal(full.body.promo, undefined);
+  assert.equal(stripe.state.sessions.at(-1).config.line_items[0].price_data.unit_amount, 2000);
+
+  const off = await checkout(buyer, { productSlug: "forgedrop", promoCode: " art25 " });
+  assert.equal(off.status, 200, JSON.stringify(off.body));
+  assert.deepEqual(off.body.promo, { code: "ART25", percentOff: 25, listPriceCents: 2000, priceCents: 1500 });
+  assert.equal(off.body.reused, false, "never the full-price session again");
+  const config = stripe.state.sessions.at(-1).config;
+  assert.equal(config.line_items[0].price_data.unit_amount, 1500);
+  assert.equal(config.line_items[0].price_data.product_data.name, "ForgeDrop (ART25, 25% off)");
+  assert.equal(config.metadata.promo_code, "ART25");
+  assert.equal(off.body.checkout.items[0].unitAmountCents, 1500);
+
+  assert.deepEqual(await checkout(buyer, { productSlug: "forgedrop", promoCode: "ART50" }), {
+    status: 400,
+    body: { error: "promo_unknown", message: "That code isn't one we have." },
+  });
+  const owner = await signUp("flyer-owner", { owns: ["forgedrop"] });
+  assert.deepEqual(await checkout(owner, { productSlug: "forgedrop-cloud-pickup-100gb", promoCode: "ART25" }), {
+    status: 400,
+    body: { error: "promo_not_for_product", message: "That code isn't for this product." },
+  });
+});

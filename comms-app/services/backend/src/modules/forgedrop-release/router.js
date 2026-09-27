@@ -17,6 +17,7 @@
 
 import { Readable } from "node:stream";
 import express from "express";
+import { fetchReleaseAsset } from "../../routes/downloads.routes.js";
 import { licensedProduct } from "../../services/licensedProducts.js";
 import { createDesktopAuth } from "../forgedrop-link/auth.js";
 import { createDeviceDirectory } from "../forgedrop-link/devices.js";
@@ -32,16 +33,20 @@ export function releaseSource(version) {
   return `${RELEASE_BASE}/forgedrop-v${version}/Install.ForgeDrop.exe`;
 }
 
-/** The public file, until the website's fetchReleaseAsset (with the token) replaces it. */
-async function fetchPublic(url) {
-  return fetch(url, { redirect: "follow", headers: { "User-Agent": "SendForge" } });
+/**
+ * Through the downloads router's helper: with GITHUB_DOWNLOADS_TOKEN set it
+ * goes by the releases API, which works once the repo is private; without
+ * it, the public link. A missing release is a 404 Response.
+ */
+function fetchRelease(url) {
+  return fetchReleaseAsset(url);
 }
 
 export function createForgeDropReleaseRouter({
   db,
   hasProductEntitlement,
   signingKey,
-  fetchAsset = fetchPublic,
+  fetchAsset = fetchRelease,
   now = Date.now,
   licenceCacheMs = 60_000,
   log = () => {},

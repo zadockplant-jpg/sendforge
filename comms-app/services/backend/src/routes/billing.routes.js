@@ -60,6 +60,47 @@ import { log } from "../utils/logger.js";
 
 export const billingRouter = Router();
 
+/**
+ * Discount codes for the site's own checkout. No Stripe coupon is involved
+ * (the owner, 2026-09-26: no separate pricing in Stripe): the catalog's
+ * inline price is lowered before Stripe is asked, so Checkout shows the
+ * price paid. ART25 came with a flyer for an art competition (2026-09-27):
+ * 25% off ForgeDrop, $20 to $15. Codes are read case-insensitively.
+ */
+export const PROMO_CODES = Object.freeze({
+  ART25: Object.freeze({ percentOff: 25, products: Object.freeze(["forgedrop"]) }),
+});
+
+/** { promo } for a code good for `product`, else { error } to answer 400 with. */
+export function findPromo(code, product) {
+  const key = String(code || "").trim().toUpperCase();
+  const promo = PROMO_CODES[key];
+  if (!promo) {
+    return { error: { error: "promo_unknown", message: "That code isn't one we have." } };
+  }
+  if (!product || !promo.products.includes(product.slug) || product.mode === "subscription") {
+    return {
+      error: { error: "promo_not_for_product", message: "That code isn't for this product." },
+    };
+  }
+  return { promo: { code: key, percentOff: promo.percentOff } };
+}
+
+/** `product` at its price with `promo` taken off, named so the receipt says why. */
+export function withPromo(product, promo) {
+  const unitAmountCents = Math.round((product.unitAmountCents * (100 - promo.percentOff)) / 100);
+  return Object.freeze({
+    ...product,
+    unitAmountCents,
+    displayName: `${product.displayName} (${promo.code}, ${promo.percentOff}% off)`,
+    promo: Object.freeze({
+      code: promo.code,
+      percentOff: promo.percentOff,
+      listPriceCents: product.unitAmountCents,
+    }),
+  });
+}
+
 const PRODUCT_CATALOG = {
   // One device per purchase: $5 for an account's first device, $4 for each
   // one after (see productSeats.service.js). The purchase grants the
@@ -246,6 +287,7 @@ const CatalogCheckoutSchema = z
     packSlugs: z.array(z.string().min(1)).max(100).optional(),
     skinSlugs: z.array(z.string().min(1)).max(3).optional(),
     quantity: z.number().int().min(1).max(10).optional(),
+    promoCode: z.string().trim().max(32).optional(),
     successPath: z.string().optional(),
     cancelPath: z.string().optional(),
   })
@@ -1104,12 +1146,21 @@ async function catalogCheckoutSession(req, res, stripeClient = getStripe, r2Env 
     ? normalizeSlug(parsed.data.productSlug)
     : "";
 
-  const product = requestedProductSlug
+  const listed = requestedProductSlug
     ? getProductDefinition(requestedProductSlug)
     : null;
 
-  if (requestedProductSlug && !product) {
+  if (requestedProductSlug && !listed) {
     return res.status(404).json({ error: "unknown_product" });
+  }
+
+  // A discount code (a flyer's QR code carries one): refused plainly when it
+  // is not good, never a silent checkout at full price.
+  let product = listed;
+  if (parsed.data.promoCode) {
+    const found = findPromo(parsed.data.promoCode, listed);
+    if (found.error) return res.status(400).json(found.error);
+    product = withPromo(listed, found.promo);
   }
 
   // Without R2's settings every Cloud pickup route answers 503, so a plan
@@ -1418,6 +1469,8 @@ async function catalogCheckoutSession(req, res, stripeClient = getStripe, r2Env 
             checkout_items: serializeCheckoutItems(checkoutItems),
           };
 
+    if (product?.promo) metadata.promo_code = product.promo.code;
+
     const sessionMode =
       product?.mode === "subscription" && !proOnly
         ? "subscription"
@@ -1496,6 +1549,16 @@ async function catalogCheckoutSession(req, res, stripeClient = getStripe, r2Env 
       checkout: {
         items: checkoutItems,
       },
+      ...(product?.promo
+        ? {
+            promo: {
+              code: product.promo.code,
+              percentOff: product.promo.percentOff,
+              listPriceCents: product.promo.listPriceCents,
+              priceCents: product.unitAmountCents,
+            },
+          }
+        : {}),
     });
   } catch (err) {
     const statusCode = err?.statusCode || 500;
