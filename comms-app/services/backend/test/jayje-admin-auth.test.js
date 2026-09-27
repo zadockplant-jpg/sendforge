@@ -135,7 +135,7 @@ test('the right code issues a JayJe-only session, exactly once',async()=>{
   const {token}=await auth.verify({challengeId:id,code});
   const payload=verifyJayjeAdminToken(token);
   assert.equal(payload.sub,paul.id);assert.equal(payload.email,'paul@jayje.com');assert.equal(payload.admin,true);assert.equal(payload.role,'jayje_admin');
-  assert.equal(payload.token_use,'jayje_admin_access');assert.equal(payload.auth_version,3);assert.equal(payload.aud,'jayje-admin');assert.equal(payload.exp-payload.iat,8*60*60);
+  assert.equal(payload.token_use,'jayje_admin_access');assert.equal(payload.auth_version,3);assert.equal(payload.aud,'jayje-admin');assert.equal(payload.exp-payload.iat,24*60*60);
   assert.throws(()=>verifyAdminAccessToken(token));assert.throws(()=>verifyCustomerAccessToken(token));
   await assert.rejects(auth.verify({challengeId:id,code}),{status:401,publicCode:'invalid_or_expired_code'});
   const row=await db('admin_mfa_codes').where({id}).first();assert.ok(row.used_at);assert.equal(row.attempts,1);
@@ -144,8 +144,8 @@ test('JayJe admin tokens are their own audience: SendForge admin and customer to
   assert.throws(()=>verifyJayjeAdminToken(issueAdminAccessToken({id:paul.id,email:paul.email,authVersion:3})));
   assert.throws(()=>verifyJayjeAdminToken(issueCustomerAccessToken({id:paul.id,email:paul.email,authVersion:3})));
   const now=Math.floor(Date.now()/1000),token=issueJayjeAdminToken({id:paul.id,email:paul.email,authVersion:3},{nowSeconds:now});
-  assert.equal(verifyJayjeAdminToken(token,{nowSeconds:now+8*60*60-60}).sub,paul.id);
-  assert.throws(()=>verifyJayjeAdminToken(token,{nowSeconds:now+8*60*60+120}));
+  assert.equal(verifyJayjeAdminToken(token,{nowSeconds:now+24*60*60-60}).sub,paul.id);
+  assert.throws(()=>verifyJayjeAdminToken(token,{nowSeconds:now+24*60*60+120}));
   assert.throws(()=>verifyJayjeAdminToken(token.slice(0,-3)+'abc'));
   assert.throws(()=>issueJayjeAdminToken({id:paul.id,email:paul.email,authVersion:-1}));
   assert.throws(()=>issueJayjeAdminToken({id:'',email:paul.email}));

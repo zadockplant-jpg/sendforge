@@ -9,7 +9,10 @@ export const ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_CUSTOMER_SESSION_AGE_SECONDS = 30 * 24 * 60 * 60;
 export const ADMIN_TOKEN_AUDIENCE = "sendforge-admin";
 export const ADMIN_TOKEN_USE = "admin_access";
-export const ADMIN_TOKEN_TTL_SECONDS = 8 * 60 * 60;
+// One sign-in a day for the owner (email, password, emailed code). Also the
+// JayJe admin token's lifetime, which imports this. A password reset still
+// revokes an admin token at once through auth_version.
+export const ADMIN_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 export const AUTH_STATE_CACHE_TTL_MS = 30 * 1000;
 
 const CLOCK_TOLERANCE_SECONDS = 30;

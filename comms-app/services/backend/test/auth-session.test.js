@@ -159,7 +159,8 @@ test("password-reset auth_version changes and verification state revoke old toke
   );
 });
 
-test("admin access is limited to eight hours and tied to current auth_version", () => {
+test("admin access lasts 24 hours and is tied to current auth_version", () => {
+  assert.equal(ADMIN_TOKEN_TTL_SECONDS, 24 * 60 * 60, "one admin sign-in a day, as the owner asked");
   const now = 2_000_000_000;
   const token = issueAdminAccessToken(USER, { nowSeconds: now });
   const claims = verifyAdminAccessToken(token, { nowSeconds: now });

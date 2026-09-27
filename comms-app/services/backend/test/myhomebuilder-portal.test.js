@@ -27,7 +27,9 @@ const { up: recipientsTable } = await import("../src/db/migrations/20260925_myho
 const { up: projectEmails } = await import("../src/db/migrations/20260927_myhomebuilder_portal_project_emails.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
-const { hmacHex, isValidSlug, slugify } = await import("../src/modules/myhomebuilder-portal/security.js");
+const { ADMIN_SESSION_TTL_SECONDS, createAdminSession, hmacHex, isValidSlug, slugify } = await import(
+  "../src/modules/myhomebuilder-portal/security.js"
+);
 const { addressesText, parseEmailList } = await import("../src/modules/myhomebuilder-portal/email.js");
 const { parseLineItems, parseMoney, addDays, todayInMichigan } = await import("../src/modules/myhomebuilder-portal/billing.js");
 const { STRIPE_API_VERSION } = await import("../src/modules/myhomebuilder-portal/stripe.js");
@@ -425,6 +427,15 @@ test("admin code goes to mb@myhomebuilderllc.com from billing@ and unlocks the a
   assert.match(body, /Manage client portals/u);
   assert.match(body, /Portal storage: ready/u);
   assert.equal((await request("/clients/admin", { headers: { Cookie: clientCookie } })).status, 303);
+});
+
+test("an admin sign-in lasts 24 hours: the cookie and its signed expiry agree", async () => {
+  assert.equal(ADMIN_SESSION_TTL_SECONDS, 24 * 60 * 60, "one admin sign-in a day, as the owner asked");
+  assert.match(await createAdminSession("mhb-test-session-secret-that-is-long-and-unique"), /Max-Age=86400;/u);
+  const before = Math.floor(Date.now() / 1000);
+  const adminCookie = await loginAsAdmin();
+  const expiry = Number(adminCookie.split("=")[1].split(".")[0]);
+  assert.ok(expiry - before >= 86400 - 5 && expiry - before <= 86400 + 60, `signed expiry ${expiry - before}s ahead`);
 });
 
 test("throttles admin code requests per address and burns a challenge after too many wrong codes", async () => {

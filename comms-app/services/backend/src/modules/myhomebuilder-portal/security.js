@@ -3,7 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 export const CLIENT_COOKIE = "__Secure-mhb_client_session";
 export const ADMIN_COOKIE = "__Secure-mhb_admin_session";
 export const CLIENT_SESSION_TTL_SECONDS = 12 * 60 * 60;
-export const ADMIN_SESSION_TTL_SECONDS = 2 * 60 * 60;
+export const ADMIN_SESSION_TTL_SECONDS = 24 * 60 * 60;   // one admin sign-in a day
 export const ADMIN_CODE_TTL_SECONDS = 10 * 60;
 export const ADMIN_CODE_MAX_ATTEMPTS = 5;
 
