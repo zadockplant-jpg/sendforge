@@ -187,6 +187,12 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
     if (!product) {
       return res.status(404).json({ error: "unknown_product" });
     }
+    // An app that names its product takes only that product's codes: a
+    // ForgeDrop code typed into TuneForge must not use up a ForgeDrop place
+    // for a licence TuneForge refuses anyway. ForgeDrop's app names none.
+    if (productSlug && licensedProduct(productSlug)?.slug !== product.slug) {
+      return res.status(404).json({ error: "unknown_activation_code" });
+    }
     userId = codeRow.user_id;
   }
 

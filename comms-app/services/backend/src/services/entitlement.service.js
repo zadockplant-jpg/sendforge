@@ -8,6 +8,7 @@ export const TABFORGE_CLOUD_ENTITLEMENTS =
 const ACCOUNT_PRODUCT_ALIASES = Object.freeze({
   forgedrop: "forgedrop",
   "rose-colored-glasses": "rose-colored-glasses",
+  tuneforge: "tuneforge",
   tabforge: "tabforge",
   "tabforge-pro": "tabforge",
   "tabforge-subscription": "tabforge-subscription",
