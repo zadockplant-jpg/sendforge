@@ -37,6 +37,13 @@ process.env.JWT_SECRET ||= "forgedrop-pickup-billing-test-secret-at-least-32-byt
 process.env.LICENSE_SIGNING_KEY = crypto.randomBytes(32).toString("base64");
 process.env.LICENSE_SIGNING_KID = "fd-test";
 process.env.PUBLIC_SITE_URL = "https://sendforge.test";
+// Cloud pickup is on sale only while R2 is set up, as it is on Render once
+// the owner adds the bucket's key. The pickup router here is handed its own
+// stand-in R2, so nothing below ever reaches Cloudflare.
+process.env.R2_ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
+process.env.R2_ACCESS_KEY_ID = "test-access-key";
+process.env.R2_SECRET_ACCESS_KEY = "test-secret-access-key";
+process.env.R2_BUCKET = "forgedrop-pickup-test";
 
 const { db } = await import("../src/config/db.js");
 const { env } = await import("../src/config/env.js");
@@ -287,6 +294,8 @@ before(async () => {
   app.use(express.json());
   // The catalog checkout the store calls, handed the stand-in Stripe.
   app.post("/catalog", requireAuth, createCatalogCheckoutHandler({ getStripe: () => stripe }));
+  // The same, on a server whose R2 settings are missing.
+  app.post("/catalog-without-r2", requireAuth, createCatalogCheckoutHandler({ getStripe: () => stripe, r2Env: {} }));
   // The real router, with no Stripe key.
   app.use("/v1/billing", billingRouter);
   server = app.listen(0, "127.0.0.1");
@@ -559,6 +568,43 @@ test("only a ForgeDrop owner can buy a plan: anyone else is forgedrop_required, 
   const opened = await checkout(noah, { productSlug: "forgedrop-cloud-pickup-1tb" });
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
   assert.deepEqual(stripe.state.sessions.map(({ config }) => config.line_items[0].price_data.unit_amount), [2500]);
+});
+
+test("no plan is sold while Cloud pickup cannot run: without R2 it is pickup_unavailable, before anything else is asked", async () => {
+  useStripe();
+  const unavailable = {
+    status: 503,
+    body: { error: "pickup_unavailable", message: "Cloud pickup isn't available right now. Try again later." },
+  };
+  const owner = await signUp("olga", { owns: ["forgedrop"] });
+  const stranger = await signUp("stan");
+  for (const person of [owner, stranger]) {
+    for (const tier of CLOUD_PICKUP_TIERS) {
+      assert.deepEqual(
+        await checkout(person, { productSlug: tier.slug }, "/catalog-without-r2"),
+        unavailable,
+        `${person.email} ${tier.key}`
+      );
+    }
+  }
+  assert.deepEqual(stripe.state.calls, [], "no customer, no subscription lookup, no session");
+  assert.equal((await db("billing_checkout_attempts").where({ user_id: owner.id })).length, 0);
+  // One bad setting is as good as none.
+  const half = createCatalogCheckoutHandler({ getStripe: () => stripe, r2Env: { ...process.env, R2_BUCKET: "" } });
+  let answered;
+  await half(
+    { body: { productSlug: "forgedrop-cloud-pickup-100gb" }, user: { sub: owner.id } },
+    { status: (code) => ({ json: (body) => (answered = { status: code, body }) }) }
+  );
+  assert.deepEqual(answered, unavailable);
+  // The rest of the catalog does not depend on R2.
+  assert.deepEqual(await checkout(owner, { productSlug: "forgedrop-cloud-pickup-2tb" }, "/catalog-without-r2"), {
+    status: 404,
+    body: { error: "unknown_product" },
+  });
+  // With R2 set up, the same owner reaches Checkout.
+  const opened = await checkout(owner, { productSlug: "forgedrop-cloud-pickup-100gb" });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
 });
 
 /** The 409 the catalog gives an account whose plan runs on. */

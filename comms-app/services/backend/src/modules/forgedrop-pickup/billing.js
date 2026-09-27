@@ -11,7 +11,9 @@
  * webhook (routes/stripe.webhooks.routes.js). The parts here are the only
  * Cloud pickup ones:
  *
- *  - the catalog entries, for ForgeDrop owners only (403 forgedrop_required);
+ *  - the catalog entries, for ForgeDrop owners only (403 forgedrop_required),
+ *    and on sale only while R2 is set up (503 pickup_unavailable otherwise,
+ *    in billing.routes.js, as every pickup route answers);
  *  - the subscription's metadata, and the words above Checkout's button;
  *  - access follows the Stripe subscription's current status and what it pays
  *    for, never a Checkout event (events arrive out of order): the tier named

@@ -55,6 +55,7 @@ import {
   liveCloudPickupSubscriptions,
 } from "../modules/forgedrop-pickup/billing.js";
 import { cloudPickupTier } from "../modules/forgedrop-pickup/plans.js";
+import { r2ConfigProblems } from "../modules/forgedrop-pickup/r2.js";
 import { log } from "../utils/logger.js";
 
 export const billingRouter = Router();
@@ -1089,9 +1090,11 @@ billingRouter.post("/donations/checkout-session", async (req, res) => {
  *   -250gb, -500gb or -1tb: a monthly subscription for ForgeDrop owners
  *   (403 forgedrop_required otherwise), one plan per account: while a plan
  *   runs on, any tier is 409 already_subscribed; once the customer has
- *   cancelled it under Account, another tier can be bought at once
+ *   cancelled it under Account, another tier can be bought at once. Sold
+ *   only while Cloud pickup can run: without R2's settings (in `r2Env`),
+ *   503 pickup_unavailable before anything else is asked
  */
-async function catalogCheckoutSession(req, res, stripeClient = getStripe) {
+async function catalogCheckoutSession(req, res, stripeClient = getStripe, r2Env = process.env) {
   const parsed = CatalogCheckoutSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "invalid_input" });
@@ -1107,6 +1110,15 @@ async function catalogCheckoutSession(req, res, stripeClient = getStripe) {
 
   if (requestedProductSlug && !product) {
     return res.status(404).json({ error: "unknown_product" });
+  }
+
+  // Without R2's settings every Cloud pickup route answers 503, so a plan
+  // bought now would be a monthly bill for storage that cannot work.
+  if (product?.cloudPickup && r2ConfigProblems(r2Env).length) {
+    return res.status(503).json({
+      error: "pickup_unavailable",
+      message: "Cloud pickup isn't available right now. Try again later.",
+    });
   }
 
   const requestedPackSlugs = uniqStrings(parsed.data.packSlugs || []);
@@ -1497,11 +1509,12 @@ async function catalogCheckoutSession(req, res, stripeClient = getStripe) {
 }
 
 /**
- * The catalog checkout, with the Stripe client it talks to: the route below
- * uses the real one, and the tests hand it a stand-in.
+ * The catalog checkout, with the Stripe client it talks to and the
+ * environment R2's settings are read from: the route below uses the real
+ * ones, and the tests hand it stand-ins.
  */
-export function createCatalogCheckoutHandler({ getStripe: stripeClient = getStripe } = {}) {
-  return (req, res) => catalogCheckoutSession(req, res, stripeClient);
+export function createCatalogCheckoutHandler({ getStripe: stripeClient = getStripe, r2Env = process.env } = {}) {
+  return (req, res) => catalogCheckoutSession(req, res, stripeClient, r2Env);
 }
 
 billingRouter.post("/catalog/checkout-session", requireAuth, createCatalogCheckoutHandler());
