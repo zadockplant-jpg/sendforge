@@ -3,10 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  COMP_CODE_ENTITLEMENT_SOURCE,
   PERK_ENTITLEMENT_SLUGS,
   batchPayoutReference,
   commissionSummary,
   groupPerkAccounts,
+  isGiftedEntitlement,
   normalizeRecurringTierInput,
   perSaleCommission,
   perkEntitlementMetadata,
@@ -37,6 +39,28 @@ test("a perk account is Pro plus Private Sync, marked so it can be listed and re
   assert.equal(accounts[0].referralCode, "A1234");
   assert.equal(accounts[0].note, "creator");
   assert.equal(accounts[1].active, false);
+});
+
+// The owner (2026-09-27) found a TabForge Pro account with no Stripe
+// payment that Perk Accounts did not list: it came from a comp code, whose
+// entitlements are source "comp_code", and the list only took "admin_perk".
+test("comp code activations are perk accounts too, with the code they redeemed", async () => {
+  const compCodes = await readFile(new URL("../src/services/compCodes.service.js", import.meta.url), "utf8");
+  assert.match(compCodes, new RegExp(`export const COMP_CODE_SOURCE = "${COMP_CODE_ENTITLEMENT_SOURCE}";`));
+  const accounts = groupPerkAccounts([
+    { user_id: "u4", email: "jeff@example.com", product_slug: "tabforge", status: "active", source: "comp_code", granted_at: "2026-09-20T00:00:00Z", metadata: { comp_code: "SENDIT2026" } },
+    { user_id: "u4", email: "jeff@example.com", product_slug: "tabforge-subscription", status: "active", source: "comp_code", granted_at: "2026-09-20T00:00:00Z", metadata: { comp_code: "SENDIT2026" } },
+    { user_id: "u5", email: "both@example.com", product_slug: "tabforge", status: "active", source: "admin_perk", granted_at: "2026-09-02T00:00:00Z", metadata: { perk: true, note: "creator" } },
+    { user_id: "u5", email: "both@example.com", product_slug: "forgedrop", status: "active", source: "comp_code", granted_at: "2026-09-03T00:00:00Z", metadata: { comp_code: "INVITE-ABCD1234" } },
+    { user_id: "u6", email: "revoked@example.com", product_slug: "tabforge", status: "revoked", source: "comp_code", granted_at: "2026-08-20T00:00:00Z", metadata: { comp_code: "OLD1", revoked_by: "owner@x" } },
+    { user_id: "u7", email: "paid@example.com", product_slug: "tabforge", status: "active", source: "stripe", granted_at: "2026-09-10T00:00:00Z", metadata: {} },
+  ]);
+  assert.deepEqual(accounts.map((a) => a.email), ["jeff@example.com", "both@example.com", "revoked@example.com"], "a paying customer is still not listed");
+  const [jeff, both, revoked] = accounts;
+  assert.deepEqual([jeff.sources, jeff.compCode, jeff.active, jeff.products.length], [["comp_code"], "SENDIT2026", true, 2]);
+  assert.deepEqual([both.sources, both.compCode, both.note], [["perk", "comp_code"], "INVITE-ABCD1234", "creator"]);
+  assert.deepEqual([revoked.sources, revoked.compCode, revoked.active], [["comp_code"], "OLD1", false]);
+  assert.equal(isGiftedEntitlement({ source: "stripe", metadata: {} }), false);
 });
 
 test("batch payout references stay unique per reward and default to the manual form", () => {

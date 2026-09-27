@@ -24,12 +24,23 @@ export function isPerkEntitlement(row) {
   return metadata.perk === true || String(row?.source || "") === PERK_ENTITLEMENT_SOURCE;
 }
 
+// A comp code or personal invite redeemed at signup or on the account page
+// grants the same way (compCodes.service.js COMP_CODE_SOURCE). Those people
+// are perk accounts too: they own products without paying.
+export const COMP_CODE_ENTITLEMENT_SOURCE = "comp_code";
+
+export function isGiftedEntitlement(row) {
+  return isPerkEntitlement(row) || String(row?.source || "") === COMP_CODE_ENTITLEMENT_SOURCE;
+}
+
 // Group entitlement rows (joined with the owner's email) into one perk
-// account per user, so the dashboard lists people, not rows.
+// account per user, so the dashboard lists people, not rows. `sources` says
+// how they got it: "perk" (authorised in the dashboard) and/or "comp_code",
+// with the code they redeemed.
 export function groupPerkAccounts(rows = []) {
   const byUser = new Map();
   for (const row of rows) {
-    if (!isPerkEntitlement(row)) continue;
+    if (!isGiftedEntitlement(row)) continue;
     const key = row.user_id || row.email;
     if (!byUser.has(key)) {
       byUser.set(key, {
@@ -41,17 +52,22 @@ export function groupPerkAccounts(rows = []) {
         grantedBy: null,
         note: null,
         referralCode: row.referral_code || null,
+        sources: [],
+        compCode: null,
       });
     }
     const account = byUser.get(key);
     const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
     const active = String(row.status || "") === "active";
-    account.products.push({ slug: row.product_slug, status: row.status || null, grantedAt: row.granted_at || null });
+    const source = String(row.source || "") === COMP_CODE_ENTITLEMENT_SOURCE ? "comp_code" : "perk";
+    account.products.push({ slug: row.product_slug, status: row.status || null, grantedAt: row.granted_at || null, source });
     account.active = account.active || active;
+    if (!account.sources.includes(source)) account.sources.push(source);
     if (!account.grantedAt || (row.granted_at && new Date(row.granted_at) < new Date(account.grantedAt))) {
       account.grantedAt = row.granted_at || account.grantedAt;
     }
-    account.grantedBy ||= metadata.granted_by || row.source_ref || null;
+    account.grantedBy ||= metadata.granted_by || (source === "perk" ? row.source_ref : null) || null;
+    if (source === "comp_code") account.compCode ||= metadata.comp_code || null;
     account.note ||= metadata.note || null;
     account.referralCode ||= row.referral_code || null;
   }

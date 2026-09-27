@@ -20,11 +20,14 @@ import {
   rewardPayoutEligibility,
 } from "../services/referrals/referral.service.js";
 import {
+  COMP_CODE_ENTITLEMENT_SOURCE,
   PERK_ENTITLEMENT_SLUGS,
   PERK_ENTITLEMENT_SOURCE,
   batchPayoutReference,
   commissionSummary,
   groupPerkAccounts,
+  isGiftedEntitlement,
+  isPerkEntitlement,
   perSaleCommission,
   perkEntitlementMetadata,
   programMetadataFromInput,
@@ -773,8 +776,12 @@ adminRouter.get("/perks", async (_req, res) => {
   const rows = await db("product_entitlements as e")
     .leftJoin("users as u", "e.user_id", "u.id")
     .select("e.*", "u.email as email")
+    // Authorised here, or got it by redeeming a comp code or personal invite.
     .where((builder) => {
-      builder.where("e.source", PERK_ENTITLEMENT_SOURCE).orWhereRaw("e.metadata->>'perk' = 'true'");
+      builder
+        .where("e.source", PERK_ENTITLEMENT_SOURCE)
+        .orWhere("e.source", COMP_CODE_ENTITLEMENT_SOURCE)
+        .orWhereRaw("e.metadata->>'perk' = 'true'");
     })
     .orderBy("e.granted_at", "desc")
     .limit(2000);
@@ -856,11 +863,16 @@ adminRouter.post("/perks/revoke", writeLimiter, async (req, res) => {
   try {
     const user = await requireTargetUserByEmail(parsed.data.email);
     const metadata = { perk: true, revoked_by: req.admin.email, revoked_at: new Date().toISOString(), note: String(parsed.data.note || "").trim() || null };
+    const revocation = { revoked_by: metadata.revoked_by, revoked_at: metadata.revoked_at, revoked_note: metadata.note };
     const items = [];
     for (const slug of PERK_ENTITLEMENT_SLUGS) {
       const existing = await db("product_entitlements").where({ user_id: user.id, product_slug: slug }).first();
-      if (existing && (existing.source === PERK_ENTITLEMENT_SOURCE || existing.metadata?.perk === true)) {
-        items.push(await revokeProductEntitlement(user.id, slug, metadata));
+      if (existing && isGiftedEntitlement(existing)) {
+        // Keep how it was granted (a perk's note, a comp code's code) beside
+        // the revocation, rather than replacing it.
+        const before = existing.metadata && typeof existing.metadata === "object" ? existing.metadata : {};
+        const next = isPerkEntitlement(existing) ? { ...before, perk: true, ...revocation } : { ...before, ...revocation };
+        items.push(await revokeProductEntitlement(user.id, slug, next));
       }
     }
     await writeAdminAudit(req, { action: "perk.revoke", resourceType: "user", resourceId: user.id, afterValue: { email: user.email, products: items.map((item) => item?.product_slug).filter(Boolean), note: metadata.note } });
