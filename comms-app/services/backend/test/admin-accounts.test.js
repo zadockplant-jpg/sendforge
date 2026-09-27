@@ -32,6 +32,9 @@ let detach;
 
 before(async () => {
   detach = await attachPglite(db);
+  // A lookup reports Cloud pickup use from the allowance records too.
+  const { up: pickupsUp } = await import("../src/db/migrations/20260928_create_forgedrop_pickups.js");
+  await pickupsUp(db);
 });
 after(async () => detach?.());
 

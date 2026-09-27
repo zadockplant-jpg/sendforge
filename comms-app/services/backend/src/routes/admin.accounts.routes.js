@@ -11,6 +11,7 @@ import { createRateLimiter, rateLimitByUserOrIp } from "../middleware/rateLimit.
 import { writeAdminAudit } from "../services/adminAudit.service.js";
 import {
   inviteEmail,
+  listProductOwners,
   lookupAccount,
   setAccountReferral,
   setProductGift,
@@ -46,6 +47,12 @@ const ReferralSchema = z.object({
   flatRates: FlatRates.optional(),
 });
 
+const ListSchema = z.object({
+  q: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).max(1000000).optional(),
+});
+
 const InviteSchema = z.object({
   email: z.string().email(),
   grants: z.array(z.string().min(1).max(80)).max(10).default([]),
@@ -75,6 +82,17 @@ function fail(req, res, err, action) {
   });
   return res.status(500).json({ error: "server_error" });
 }
+
+// Everyone who owns a product, newest purchase first, with their usage in brief.
+adminAccountsRouter.get("/", async (req, res) => {
+  const parsed = ListSchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input" });
+  try {
+    return res.json(await listProductOwners(parsed.data));
+  } catch (err) {
+    return fail(req, res, err, "list");
+  }
+});
 
 adminAccountsRouter.get("/lookup", async (req, res) => {
   try {
