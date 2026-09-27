@@ -26,7 +26,7 @@ const { up: plainNumbers } = await import("../src/db/migrations/20260925_myhomeb
 const { up: recipientsTable } = await import("../src/db/migrations/20260925_myhomebuilder_portal_recipients.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
-const { hmacHex } = await import("../src/modules/myhomebuilder-portal/security.js");
+const { hmacHex, isValidSlug, slugify } = await import("../src/modules/myhomebuilder-portal/security.js");
 const { parseLineItems, parseMoney, addDays, todayInMichigan } = await import("../src/modules/myhomebuilder-portal/billing.js");
 const { STRIPE_API_VERSION } = await import("../src/modules/myhomebuilder-portal/stripe.js");
 const { PDFDocument } = await import("../src/modules/myhomebuilder-portal/vendor/pdf-lib.js");
@@ -425,7 +425,43 @@ test("admin creates a client portal whose hashed login opens its own portal", as
   assert.match(home, /Wolf Lake Views/u);
   assert.doesNotMatch(home, /Muskegon Addition Selections/u);
   assert.equal((await request("/clients/muskegon-addition/", { headers: { Cookie: cookie } })).status, 303);
-  assert.equal((await request("/clients/admin/clients", form({ name: "Again", slug: "wolf-lake-views", password: "another-login-2026" }, adminCookie))).headers.get("Location"), "/clients/admin?notice=client-exists");
+  const duplicate = await request("/clients/admin/clients", form({ name: "Again", slug: "wolf-lake-views", password: "another-login-2026" }, adminCookie));
+  assert.equal(duplicate.status, 400);
+  assert.match(await duplicate.text(), /A client portal with the id wolf-lake-views already exists/u);
+});
+
+test("adding a client portal fixes up the portal id and explains any problem, keeping what was typed", async () => {
+  const adminCookie = await loginAsAdmin();
+  const spaced = await request("/clients/admin/clients", form({ name: "Smith Residence", slug: "Smith Residence ", password: "smith-residence-2026" }, adminCookie));
+  assert.equal(spaced.headers.get("Location"), "/clients/admin?client=smith-residence&notice=client-added");
+
+  const blank = await request("/clients/admin/clients", form({ name: "Lakeshore Cottage & Dock", slug: "", password: "lakeshore-cottage-2026" }, adminCookie));
+  assert.equal(blank.headers.get("Location"), "/clients/admin?client=lakeshore-cottage-and-dock&notice=client-added");
+
+  const short = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: "short", email: "pine@example.com" }, adminCookie));
+  assert.equal(short.status, 400);
+  const shortBody = await short.text();
+  assert.match(shortBody, /The project login needs 10 to 120 characters/u);
+  assert.match(shortBody, /id="client-name" name="name" type="text" maxlength="120" required value="Pine Street"/u);
+  assert.match(shortBody, /value="pine@example\.com"/u);
+
+  const reused = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: process.env.MHB_CLIENT_PORTAL_PASSWORD }, adminCookie));
+  assert.equal(reused.status, 400);
+  assert.match(await reused.text(), /That project login already opens another client portal/u);
+  const reusedAgain = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: "smith-residence-2026" }, adminCookie));
+  assert.match(await reusedAgain.text(), /That project login already opens another client portal/u);
+
+  const dashboard = await (await request("/clients/admin", { headers: { Cookie: adminCookie } })).text();
+  assert.doesNotMatch(dashboard, /pattern="\[a-z0-9\]/u, "the portal id field has no pattern the browser would ignore");
+  assert.match(dashboard, /data-slug-source/u);
+  assert.match(dashboard, /Portal id: smith-residence/u);
+});
+
+test("portal ids drop accents and symbols and stay within 64 characters", () => {
+  assert.equal(slugify("Café Múskegon & Dock"), "cafe-muskegon-and-dock");
+  assert.equal(slugify("O'Brien Remodel #2"), "o-brien-remodel-2");
+  assert.equal(slugify(`${"a".repeat(63)} b`), "a".repeat(63));
+  assert.equal(isValidSlug(slugify("###")), false);
 });
 
 // ---------- Quotes, invoices and payments ----------

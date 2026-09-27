@@ -559,10 +559,10 @@ function templatePicker(templates, action) {
           </form>`;
 }
 
-export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true }) {
+export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "" }) {
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
-    const detail = [client.managedBySecret ? "Login managed by Cloudflare secret" : `Login: ${escapeHtml(client.slug)}`, client.email ? escapeHtml(client.email) : "No email on file"].join(" · ");
+    const detail = [client.managedBySecret ? "Login set in Render (MHB_CLIENT_PORTAL_PASSWORD)" : `Portal id: ${escapeHtml(client.slug)}`, client.email ? escapeHtml(client.email) : "No email on file"].join(" · ");
     return `<li><a class="admin-client-link${current ? " is-current" : ""}" href="/clients/admin?client=${encodeURIComponent(client.slug)}"${current ? ' aria-current="page"' : ""}>
         <strong>${escapeHtml(client.name)}</strong><small>${detail}</small></a></li>`;
   }).join("");
@@ -631,19 +631,22 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
         <aside class="admin-sidebar">
           <h2>Client portals</h2>
           <ul class="admin-client-list">${clientLinks}</ul>
-          <form class="portal-form admin-form" action="/clients/admin/clients" method="post">
+          <form class="portal-form admin-form" id="add-client" action="/clients/admin/clients" method="post">
             <h3>Add a client portal</h3>
+            ${clientError ? `<p class="portal-error" role="alert">${escapeHtml(clientError)}</p>` : ""}
             <label for="client-name">Client or project name
-              <input id="client-name" name="name" type="text" maxlength="120" required placeholder="Wolf Lake Views">
+              <input id="client-name" name="name" type="text" maxlength="120" required value="${escapeAttribute(newClient?.name || "")}" placeholder="Wolf Lake Views" data-slug-source>
             </label>
             <label for="client-slug">Portal id
-              <input id="client-slug" name="slug" type="text" maxlength="64" pattern="[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?" required placeholder="wolf-lake-views">
+              <input id="client-slug" name="slug" type="text" maxlength="64" value="${escapeAttribute(newClient?.slug || "")}" placeholder="wolf-lake-views" data-slug-target>
+              <small class="admin-field-hint">Filled in from the name. Letters, numbers and hyphens; spaces become hyphens.</small>
             </label>
             <label for="client-password">Project login
               <input id="client-password" name="password" type="text" minlength="10" maxlength="120" autocomplete="off" required>
+              <small class="admin-field-hint">At least 10 characters, and different from every other portal's login.</small>
             </label>
             <label for="new-client-email">Client email (optional)
-              <input id="new-client-email" name="email" type="email" maxlength="254" ${RECIPIENT_INPUT} placeholder="client@example.com">
+              <input id="new-client-email" name="email" type="email" maxlength="254" ${RECIPIENT_INPUT} value="${escapeAttribute(newClient?.email || "")}" placeholder="client@example.com">
             </label>
             <button class="button button-solid" type="submit">Create portal</button>
             <p class="portal-security-note">The login is hashed before it is stored. Share it with the client directly.</p>

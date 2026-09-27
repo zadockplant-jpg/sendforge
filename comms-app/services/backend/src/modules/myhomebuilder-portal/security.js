@@ -128,6 +128,20 @@ export function isValidSlug(value) {
   return typeof value === "string" && SLUG_PATTERN.test(value);
 }
 
+// Turns typed text into a portal id: "Smith Residence" becomes smith-residence. Accents are
+// dropped, & becomes "and", and any other run of characters becomes one hyphen.
+export function slugify(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replaceAll(/[\u0300-\u036f]/gu, "")
+    .toLowerCase()
+    .replaceAll("&", " and ")
+    .replaceAll(/[^a-z0-9]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "")
+    .slice(0, 64)
+    .replace(/-+$/u, "");
+}
+
 export async function createClientSession(secret, slug) {
   const expiry = Math.floor(Date.now() / 1000) + CLIENT_SESSION_TTL_SECONDS;
   const signature = await hmacSign(secret, `mhb-client-portal:v2:${slug}:${expiry}`);

@@ -19,6 +19,7 @@ import {
   readClientSession,
   responseHeaders,
   sha256Hex,
+  slugify,
   verifyPassword
 } from "./security.js";
 import {
@@ -1100,9 +1101,8 @@ export async function handlePortalRequest(context) {
     if (pathname === "/clients/admin" || pathname.startsWith("/clients/admin/")) {
       if (!admin) return redirectResponse("/clients");
 
-      if (isRead && pathname === "/clients/admin") {
+      const dashboard = async ({ requested, newClient = null, clientError = "", status = 200 }) => {
         const clients = await listClients(store);
-        const requested = url.searchParams.get("client");
         const selected = clients.find((entry) => entry.slug === requested) || null;
         const [billing, documents, templates, recipients] = await Promise.all([
           selected ? listBilling(store, selected.slug) : [],
@@ -1110,25 +1110,40 @@ export async function handlePortalRequest(context) {
           listTemplates(store),
           listRecipients(store)
         ]);
-        return scriptedHtmlResponse(adminDashboardPage({ clients, selected, billing, documents, templates, recipients, readiness, notice: noticeFromQuery(url), authenticated }));
-      }
+        return scriptedHtmlResponse(adminDashboardPage({
+          clients, selected, billing, documents, templates, recipients, readiness, notice: noticeFromQuery(url), authenticated, newClient, clientError
+        }), status);
+      };
+
+      if (isRead && pathname === "/clients/admin") return dashboard({ requested: url.searchParams.get("client") });
 
       if (!store) return redirectResponse("/clients/admin?notice=invalid");
 
       const templateMatch = pathname.match(/^\/clients\/admin\/templates(?:\/([^/]+))?(?:\/(delete))?$/u);
       if (templateMatch) return handleAdminTemplates(context, store, templateMatch[1] ? decodeSegment(templateMatch[1]) : "", templateMatch[2] || "");
 
+      // A problem is explained next to the form, which keeps what was typed (except the login).
       if (method === "POST" && pathname === "/clients/admin/clients") {
         const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-        const name = form?.get("name")?.trim();
-        const slug = form?.get("slug")?.trim().toLowerCase();
-        const clientPassword = form?.get("password") || "";
-        const email = String(form?.get("email") || "").trim();
-        if (!name || name.length > 120 || !isValidSlug(slug) || clientPassword.length < 10 || clientPassword.length > 120 || (email && !isValidEmail(email))) {
-          return redirectResponse("/clients/admin?notice=invalid");
-        }
-        if (slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug))) return redirectResponse("/clients/admin?notice=client-exists");
-        await putClient(store, { slug, name, email, active: true, passwordHash: await hashPassword(clientPassword), createdAt: new Date().toISOString() });
+        const entered = {
+          name: String(form?.get("name") || "").trim(),
+          slug: String(form?.get("slug") || "").trim(),
+          email: String(form?.get("email") || "").trim()
+        };
+        const clientPassword = String(form?.get("password") || "");
+        const slug = slugify(entered.slug || entered.name);
+        let clientError = "";
+        if (!form) clientError = "The form could not be read. Please try again.";
+        else if (!entered.name || entered.name.length > 120) clientError = "Enter the client or project name, up to 120 characters.";
+        else if (!isValidSlug(slug)) clientError = "Enter a portal id with letters or numbers, for example smith-residence.";
+        else if (clientPassword.length < 10 || clientPassword.length > 120) clientError = "The project login needs 10 to 120 characters.";
+        else if (entered.email && !isValidEmail(entered.email)) clientError = "Check the client email address.";
+        else if (slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug))) clientError = `A client portal with the id ${slug} already exists. Choose a different portal id.`;
+        // Each login must open exactly one portal.
+        else if (await resolveLogin(env, store, clientPassword)) clientError = "That project login already opens another client portal. Choose a different login.";
+        if (clientError) return dashboard({ requested: null, newClient: { ...entered, slug: entered.slug ? slug : "" }, clientError, status: 400 });
+
+        await putClient(store, { slug, name: entered.name, email: entered.email, active: true, passwordHash: await hashPassword(clientPassword), createdAt: new Date().toISOString() });
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=client-added`);
       }
 
