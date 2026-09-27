@@ -30,6 +30,7 @@ export const GRANTABLE_PRODUCTS = Object.freeze({
   "tabforge-subscription": "TabForge Private Sync",
   "rose-colored-glasses": "Rose Colored Glasses",
   forgedrop: "ForgeDrop",
+  tuneforge: "TuneForge",
 });
 
 /**
