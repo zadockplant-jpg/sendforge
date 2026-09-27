@@ -21,6 +21,9 @@
  *   POST /person/knock     desktop  knock on someone's address, an email
  *   POST /person/signal    desktop  a message to the session's other side
  *   POST /person/close     desktop  end a session
+ *   POST /person/end       desktop  a send's knock is over: sent or cancelled
+ *   POST /person/invite    page     what an emailed approval link is for
+ *   POST /person/approve   page     approve it
  *
  * Desktops of one account also swap connection candidates here to reach each
  * other across the internet (ForgeDrop 1.4); the files then go directly
@@ -32,14 +35,17 @@
  *
  * People (ForgeDrop 1.7) introduce them by the email of an account instead,
  * with this server vouching for who is who. people.js explains how; the files
- * still go directly, never through here.
+ * still go directly, never through here. From 1.8 a send to someone's account
+ * waits for their computers and emails them a link to approve it, whose page
+ * (the website's /r/) calls the two "page" routes.
  *
  * A desktop signs in with its offline licence (auth.js), a phone with the
- * customer's Bearer token. Either way the account must own ForgeDrop.
+ * customer's Bearer token. Either way the account must own ForgeDrop. The
+ * approval page signs in with nothing: the token its link carries is the key.
  */
 
 import express from "express";
-import { createRateLimiter } from "../../middleware/rateLimit.js";
+import { createRateLimiter, rateLimitByIp } from "../../middleware/rateLimit.js";
 import { licensedProduct } from "../../services/licensedProducts.js";
 import { createDesktopAuth, hasLicenceHeader } from "./auth.js";
 import { createCodeStore } from "./codes.js";
@@ -52,11 +58,13 @@ import {
   CODE_LIMITS,
   CODE_TYPES,
   DESKTOP_TO_DESKTOP_TYPES,
+  isApprovalToken,
   isClientId,
   isCodeSession,
   isPersonSession,
   isPlainObject,
   isSession,
+  KNOCK_OUTCOMES,
   KNOCK_PURPOSES,
   LINK_LIMITS,
   parseAddress,
@@ -64,6 +72,7 @@ import {
   parseEmail,
   parseMinutes,
   parseNameplate,
+  parseSummary,
   parseWait,
   PERSON_LIMITS,
   PERSON_TYPES,
@@ -83,8 +92,10 @@ const REFUSALS = Object.freeze({
   code_unknown: 404,
   code_gone: 404,
   person_gone: 404,
+  invite_gone: 404,
   too_many_codes: 409,
   too_many_messages: 409,
+  invite_over: 409,
 });
 
 // An account id no account has. A knock on an address nobody has asks the
@@ -110,6 +121,11 @@ export function createForgeDropLinkRouter({
   store: givenStore = null,
   codes: givenCodes = null,
   people: givenPeople = null,
+  // A waiting send's email (1.8), sendForgeDropTransferEmail in production;
+  // without one, no email goes.
+  sendTransferEmail = null,
+  // The approval page an email links to, with the token after the "#".
+  approvalLink = (token) => `https://sendforge.app/r/#${token}`,
   rate = {},
   rateLimitPrefix = "forgedrop-link",
   log = () => {},
@@ -134,12 +150,14 @@ export function createForgeDropLinkRouter({
       onError: (error) =>
         log("error", "forgedrop_link_code_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
-  // A knock and what follows it travel in the same mailboxes too.
+  // A knock and what follows it travel in the same mailboxes too. A send's
+  // knock waits only while the desktop that knocked is polling.
   const people =
     givenPeople ||
     createPeopleStore({
       now,
       deliver: (userId, address, message) => store.deliver(userId, address, message),
+      present: (userId, address) => store.isPresent(userId, address),
       onError: (error) =>
         log("error", "forgedrop_link_person_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
@@ -235,6 +253,9 @@ export function createForgeDropLinkRouter({
   // A desktop's own address is read from the database, so asking for it is
   // limited like the desktop list, with an allowance of its own.
   const personMeLimiter = limiter("person-me", limits.desktopsPerMinute, (req) => req.link.userId);
+  // The approval page signs in with nothing, so it is limited by the address
+  // it calls from, its two routes together.
+  const inviteLimiter = limiter("person-invite", limits.invitePerMinute, rateLimitByIp);
   const refuse = (res, error) => res.status(REFUSALS[error] || 400).json({ error });
 
   /** An account's email as an address: trimmed, in lower case. */
@@ -263,24 +284,87 @@ export function createForgeDropLinkRouter({
   }
 
   /**
-   * The desktops a knock on `address` lands on: those of the account whose
-   * verified email it is, if that account owns ForgeDrop, that hold a slot,
-   * have proved their key and are polling saying they take people; never the
-   * desktop knocking. No such account, not an owner and nobody online all
-   * come back as nobody, after the same three questions to the database.
+   * Who a knock on `address` is for: the account whose verified email it is,
+   * if that account owns ForgeDrop, as { userId, email }, and the desktops of
+   * it the knock lands on now: those that hold a slot, have proved their key
+   * and are polling saying they take people, never the desktop knocking. No
+   * such account and not an owner come back as nobody, and nobody online as
+   * no desktops, all after the same three questions to the database.
    */
   async function recipientsOf(address, sender) {
     const account = await accounts.findVerified(address);
     const userId = account ? canonicalUuid(String(account.id)) || String(account.id) : NOBODY;
     const [owned, desktops] = await Promise.all([owns(userId), devices.listProven(userId)]);
-    if (!account || !owned) return [];
-    return desktops
-      .map(({ deviceId }) => ({
-        userId,
-        address: `desktop:${canonicalUuid(String(deviceId)) || String(deviceId)}`,
-      }))
-      .filter((party) => !(party.userId === sender.userId && party.address === sender.address))
-      .filter((party) => takesPeople(store.presence(party.userId, party.address)));
+    if (!account || !owned) return { account: null, desktops: [] };
+    return {
+      account: { userId, email: account.email },
+      desktops: desktops
+        .map(({ deviceId }) => ({
+          userId,
+          address: `desktop:${canonicalUuid(String(deviceId)) || String(deviceId)}`,
+        }))
+        .filter((party) => !(party.userId === sender.userId && party.address === sender.address))
+        .filter((party) => takesPeople(store.presence(party.userId, party.address))),
+    };
+  }
+
+  /**
+   * Before a desktop's poll reads its mailbox: the sends waiting for its
+   * account (1.8) that it has not had since it came online, if it takes
+   * people and, as a knock's recipients must, holds a slot and a proven key.
+   * With nothing waiting for its account, this is one lookup in memory; the
+   * database is asked only when something is due. A failed check never
+   * fails the poll: what was due stays due for the next one.
+   */
+  async function knockWaiting(link, info) {
+    const { userId, deviceId, address } = link;
+    if (!people.waitsFor(userId)) return;
+    const cameOnline = !store.isPresent(userId, address);
+    store.touch(userId, address, info);
+    if (cameOnline) people.cameOnline(userId, address);
+    if (!takesPeople(store.presence(userId, address))) return;
+
+    const due = people.claimWaiting(link);
+    if (!due.length) return;
+    let proven;
+    try {
+      proven = await devices.findProven(userId, deviceId);
+    } catch (error) {
+      people.releaseWaiting(link, due);
+      log("error", "forgedrop_link_waiting_check_failed", { message: String(error?.message || error).slice(0, 200) });
+      return;
+    }
+    if (proven) people.deliverWaiting(link, due);
+    else people.releaseWaiting(link, due);
+  }
+
+  /**
+   * Email the account a send waits for (1.8). Called once the knock has been
+   * answered, so a knock takes as long whether or not an email goes. At most
+   * one per sender and recipient every 2 minutes and 10 an hour per
+   * recipient; over that the knock still knocks, only without an email. A
+   * failure is logged, and the link, which approves, never is.
+   */
+  function emailWaiting({ sender, account, card, summary, knock, token }) {
+    if (!sendTransferEmail || !people.mayEmail(sender.userId, account.userId)) return;
+    Promise.resolve()
+      .then(() =>
+        sendTransferEmail({
+          to: account.email,
+          senderEmail: card.email,
+          senderComputer: card.name,
+          files: summary.files,
+          bytes: summary.bytes,
+          approveUrl: approvalLink(token),
+          knockId: knock,
+        })
+      )
+      .catch((error) =>
+        log("error", "forgedrop_link_transfer_email_failed", {
+          code: error?.code ?? null,
+          message: String(error?.message || error).slice(0, 200),
+        })
+      );
   }
 
   function longPoll(res, userId, address, waitSeconds, info) {
@@ -321,17 +405,24 @@ export function createForgeDropLinkRouter({
 
   // ------------------------------------------------------------- desktop
 
-  router.post("/desktop/poll", desktopAuth, desktopPollLimiter, (req, res) => {
-    const body = req.body || {};
-    const waitSeconds = parseWait(body.wait);
-    if (waitSeconds === null) return res.status(400).json({ error: "bad_wait" });
-    return longPoll(res, req.link.userId, req.link.address, waitSeconds, {
-      name: cleanText(body.name, 64),
-      fingerprint: cleanText(body.fingerprint, 32),
-      appVersion: cleanText(body.appVersion, 32),
-      caps: parseCaps(body.caps),
-    });
-  });
+  router.post(
+    "/desktop/poll",
+    desktopAuth,
+    desktopPollLimiter,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      const waitSeconds = parseWait(body.wait);
+      if (waitSeconds === null) return res.status(400).json({ error: "bad_wait" });
+      const info = {
+        name: cleanText(body.name, 64),
+        fingerprint: cleanText(body.fingerprint, 32),
+        appVersion: cleanText(body.appVersion, 32),
+        caps: parseCaps(body.caps),
+      };
+      await knockWaiting(req.link, info);
+      return longPoll(res, req.link.userId, req.link.address, waitSeconds, info);
+    })
+  );
 
   router.post("/desktop/offline", desktopAuth, (req, res) => {
     store.drop(req.link.userId, req.link.address);
@@ -594,7 +685,9 @@ export function createForgeDropLinkRouter({
 
   // The answer is the same whether or not the address has anyone: a knock
   // id, so nobody can use a knock to learn who has an account. Only what is
-  // wrong with the knock itself, or with the one knocking, is refused.
+  // wrong with the knock itself, or with the one knocking, is refused. A send
+  // to someone's account also waits for their computers and emails them
+  // (1.8), neither of which the answer shows.
   router.post(
     "/person/knock",
     desktopAuth,
@@ -604,19 +697,30 @@ export function createForgeDropLinkRouter({
       const to = parseEmail(body.to);
       if (!to) return res.status(400).json({ error: "bad_email" });
       if (!KNOCK_PURPOSES.has(body.purpose)) return res.status(400).json({ error: "bad_purpose" });
+      const summary = parseSummary(body);
+      if (!summary) return res.status(400).json({ error: "bad_summary" });
 
       let sender;
-      let recipients = [];
+      let found = { account: null, desktops: [] };
       try {
         sender = await vouchFor(req.link);
-        if (sender.ok) recipients = await recipientsOf(to, req.link);
+        if (sender.ok) found = await recipientsOf(to, req.link);
       } catch (error) {
         return unavailable(res, "forgedrop_link_knock_failed", error);
       }
       if (!sender.ok) return res.status(409).json({ error: sender.error });
 
-      const knock = people.knock(req.link, { purpose: body.purpose, card: sender.card, recipients });
-      return res.status(202).json({ knock });
+      const waits = body.purpose === "send" && found.account !== null;
+      const { knock, token } = people.knock(req.link, {
+        purpose: body.purpose,
+        card: sender.card,
+        recipients: found.desktops,
+        waitFor: waits ? { userId: found.account.userId, ...summary } : null,
+      });
+      // The email starts only after the answer has gone.
+      const answered = res.status(202).json({ knock });
+      if (token) emailWaiting({ sender: req.link, account: found.account, card: sender.card, summary, knock, token });
+      return answered;
     })
   );
 
@@ -670,6 +774,42 @@ export function createForgeDropLinkRouter({
     const closed = people.closeSession(req.link, body.session);
     if (!closed.ok) return refuse(res, closed.error);
     return res.status(204).end();
+  });
+
+  // A send's knock is over (1.8): it stops waiting, and its page says how it
+  // ended. The same answer for a knock that never had anyone, or was never
+  // this desktop's: which knocks are whose is not said.
+  router.post("/person/end", desktopAuth, (req, res) => {
+    const body = req.body || {};
+    if (!isPersonSession(body.knock)) return res.status(400).json({ error: "bad_knock" });
+    if (!KNOCK_OUTCOMES.has(body.outcome)) return res.status(400).json({ error: "bad_outcome" });
+    people.end(req.link, body.knock, body.outcome);
+    return res.status(204).end();
+  });
+
+  // ---------------------------------------------------- the approval page
+  //
+  // The website's /r/ page, opened from the email a waiting send sent: no
+  // licence and no account, the token after the link's "#" is the key. It
+  // looks first; only a press of its Approve button approves, because mail
+  // scanners open links. A malformed token is as gone as an unknown one.
+  // CORS is app.js's, ahead of this router, so the site can call these.
+
+  const tokenOf = (req) => {
+    const token = (req.body || {}).token;
+    return isApprovalToken(token) ? token : null;
+  };
+
+  router.post("/person/invite", inviteLimiter, (req, res) => {
+    const found = people.invite(tokenOf(req));
+    if (!found.ok) return refuse(res, found.error);
+    return res.json(found.invite);
+  });
+
+  router.post("/person/approve", inviteLimiter, (req, res) => {
+    const approved = people.approve(tokenOf(req));
+    if (!approved.ok) return refuse(res, approved.error);
+    return res.json(approved.invite);
   });
 
   router.use((_req, res) => res.status(404).json({ error: "not_found" }));

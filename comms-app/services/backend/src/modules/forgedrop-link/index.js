@@ -14,8 +14,10 @@ import express from "express";
 import { db } from "../../config/db.js";
 import { env } from "../../config/env.js";
 import { requireAuth } from "../../middleware/auth.js";
+import { sendForgeDropTransferEmail } from "../../services/email.service.js";
 import { hasProductEntitlement } from "../../services/entitlement.service.js";
 import { log } from "../../utils/logger.js";
+import { siteUrl } from "../../utils/sitePaths.js";
 
 export function unavailableRouter() {
   const router = express.Router();
@@ -52,6 +54,10 @@ export const forgedropLinkRouter = await loadForgeDropLink(async () => {
     hasProductEntitlement,
     // Read per request, so the key is never parsed at import time.
     signingKey: () => env.licenseSigningKey,
+    // A waiting send's email (ForgeDrop 1.8), and the website's page its
+    // link opens, the token after the "#" so no server ever logs it.
+    sendTransferEmail: sendForgeDropTransferEmail,
+    approvalLink: (token) => `${siteUrl("/r/")}#${token}`,
     log,
   });
 });

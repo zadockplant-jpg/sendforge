@@ -79,18 +79,38 @@ export const PERSON_LIMITS = Object.freeze({
   sessionMessages: 64,
   // The longest an email address can be.
   emailChars: 254,
+  // A send's knock waits a day for the recipient's computers (1.8), while
+  // the desktop that knocked keeps polling.
+  knockMs: 24 * 60 * 60_000,
+  // The most knocks one desktop has kept at once, waiting or over; a new one
+  // makes room by ending the oldest.
+  knocksPerDesktop: 64,
+  // Waiting knocks put in one poll's mailbox at most; the rest go in the next.
+  knocksPerPoll: 8,
+  // A waiting knock's email: at most one per sender and recipient account
+  // every 2 minutes, and 10 an hour per recipient account.
+  emailEveryMs: 2 * 60_000,
+  emailsPerHour: 10,
+  // The most files a knock can say it sends.
+  maxFiles: 1_000_000,
   rate: Object.freeze({
     // Per account, whichever of its desktops knocks: a knock lands on someone
     // else's computers, so knocking costs.
     knockPerMinute: 10,
     // Per account, the same allowance as /signal, counted apart from it.
     personSignalPerMinute: LINK_LIMITS.rate.signalPerMinute,
+    // Per client address, the approval page's two routes together: they
+    // take no licence, only the token an email carried.
+    invitePerMinute: 30,
   }),
 });
 
 // Why a desktop knocks: to send files, or only to say hello, which puts it in
 // the other's list and opens no session.
 export const KNOCK_PURPOSES = new Set(["send", "hello"]);
+
+// How a send's knock ended (1.8), which its approval page says from then on.
+export const KNOCK_OUTCOMES = new Set(["sent", "cancelled"]);
 
 // What the two computers of a person session say to each other. "here" goes
 // from the desktop knocked on to the one that knocked, filled in by this
@@ -118,9 +138,31 @@ export function parseEmail(value) {
   return email.length <= PERSON_LIMITS.emailChars && EMAIL.test(email) ? email : null;
 }
 
-/** A person session id, made as a code's is: 22 base64url characters. */
+/** A person session id, or a knock id, made as a code's is: 22 base64url characters. */
 export function isPersonSession(value) {
   return typeof value === "string" && CODE_SESSION.test(value);
+}
+
+const APPROVAL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+
+/** An approval token as people.js makes them: 32 random bytes, 43 base64url characters. */
+export function isApprovalToken(value) {
+  return typeof value === "string" && APPROVAL_TOKEN.test(value);
+}
+
+/**
+ * What a send's knock says it sends (1.8): { files, bytes }, each a whole
+ * number or null when not given; null for anything else. A count is never
+ * negative, and a knock says a million files at most.
+ */
+export function parseSummary(body) {
+  const read = (value, max) => {
+    if (value === undefined || value === null) return null;
+    return Number.isSafeInteger(value) && value >= 0 && value <= max ? value : undefined;
+  };
+  const files = read(body?.files, PERSON_LIMITS.maxFiles);
+  const bytes = read(body?.bytes, Number.MAX_SAFE_INTEGER);
+  return files === undefined || bytes === undefined ? null : { files, bytes };
 }
 
 /** A nameplate, "7" or 7, as a number from 1; else null. "007" is 7. */

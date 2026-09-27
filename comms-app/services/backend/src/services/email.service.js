@@ -116,6 +116,9 @@ async function sendEmailViaSendGrid({
   disableSubscriptionTracking = true,
   unsubscribeUrl = null,
   unsubscribeGroupId = null,
+  // False for a message whose text carries a link that acts by itself (an
+  // approval link): without a provider it is not written to the log either.
+  logPreview = true,
 }) {
   const senderEmail = fromEmail || accountFromEmail();
   const senderName = fromName || accountFromName();
@@ -141,7 +144,7 @@ async function sendEmailViaSendGrid({
       requestId,
       subject,
       to: sanitizeEmail(to),
-      previewText: String(text || "").slice(0, 500),
+      ...(logPreview ? { previewText: String(text || "").slice(0, 500) } : {}),
     });
     return { ok: true, mode: "log", status: "not_configured", messageId: null };
   }
@@ -611,6 +614,105 @@ You're getting this because a computer on your SendForge account uses ForgeDrop.
     messageKind: "forgedrop-pickup-waiting",
     messageRef: pickupId || requestId,
     disableSubscriptionTracking: true,
+  });
+}
+
+/**
+ * A size as ForgeDrop's own window writes it (forgedrop/ui/text.py,
+ * human_bytes), counting in 1024s: "512 B", "6.4 MB". The email and the app
+ * then say the same.
+ */
+function forgeDropSize(bytes) {
+  let size = bytes;
+  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
+    if (Math.abs(size) < 1024 || unit === "TB") {
+      const digits = unit === "B" ? 0 : 1;
+      return `${size.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })} ${unit}`;
+    }
+    size /= 1024;
+  }
+  return "";
+}
+
+/** "3 files, 6.4 MB", or as much of it as is known; "" for nothing. */
+function forgeDropFiles(files, bytes) {
+  const parts = [];
+  if (Number.isSafeInteger(files) && files >= 0) {
+    parts.push(`${files.toLocaleString("en-US")} ${files === 1 ? "file" : "files"}`);
+  }
+  if (Number.isSafeInteger(bytes) && bytes >= 0) parts.push(forgeDropSize(bytes));
+  return parts.join(", ");
+}
+
+/**
+ * ForgeDrop people (ForgeDrop/docs/people.md, "Waiting, and the email"):
+ * someone is sending files to this account's email. The subject, the heading
+ * and the button, "Click here to approve", are the owner's words; the link
+ * opens the approval page, which asks before it approves anything. The link
+ * is never written to the log, not even without a provider.
+ */
+export async function sendForgeDropTransferEmail({
+  to,
+  senderEmail,
+  senderComputer = null,
+  files = null,
+  bytes = null,
+  approveUrl,
+  knockId = null,
+  requestId = null,
+}) {
+  const subject = "A ForgeDrop file transfer was initiated";
+  // An address has no spaces or control characters; none reach the email.
+  const email = String(senderEmail || "").replace(/[\s\u0000-\u001f\u007f]/g, "");
+  const computer = forgeDropComputerName(senderComputer);
+  const from = computer ? `${email} (${computer})` : email;
+  const what = forgeDropFiles(files, bytes);
+  const how =
+    "The files go straight between the two computers. Once you approve, they arrive while ForgeDrop is open on your computer; you can also accept them in ForgeDrop itself. Nothing arrives without your approval.";
+  const why = "You're getting this because someone used ForgeDrop to send files to this email address.";
+
+  const text = `A ForgeDrop file transfer was initiated
+
+From: ${from}${what ? `\n${what}` : ""}
+
+Click here to approve:
+${approveUrl}
+
+${how}
+
+${why} Need help? Contact ${supportEmail()}.`;
+
+  const link = escapeHtml(approveUrl);
+  const html = `
+    <div style="margin:0;padding:24px;background:#f5f7fb;color:#172033;font-family:Arial,sans-serif;line-height:1.55;">
+      <div style="max-width:580px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
+        <h1 style="margin:0 0 16px;font-size:26px;line-height:1.2;color:#172033;">A ForgeDrop file transfer was initiated</h1>
+        <p style="margin:0 0 6px;"><strong>From:</strong> ${escapeHtml(from)}</p>${
+          what ? `\n        <p style="margin:0 0 6px;">${escapeHtml(what)}</p>` : ""
+        }
+        <p style="margin:18px 0 22px;">
+          <a href="${link}" style="display:inline-block;padding:12px 18px;border-radius:10px;background:#1e6fe8;color:#ffffff;text-decoration:none;font-weight:700;">Click here to approve</a>
+        </p>
+        <p style="margin:0 0 18px;color:#52627a;">${escapeHtml(how)}</p>
+        <p style="margin:0;color:#66758c;font-size:12px;word-break:break-all;">Or paste this link into your browser:<br>${link}</p>
+        <hr style="margin:22px 0;border:0;border-top:1px solid #e3e8f0;">
+        <p style="margin:0;color:#7b8799;font-size:12px;">${escapeHtml(why)} Need help? Contact ${escapeHtml(supportEmail())}.</p>
+      </div>
+    </div>
+  `;
+
+  return sendEmailViaSendGrid({
+    to,
+    subject,
+    text,
+    html,
+    requestId,
+    fromEmail: accountFromEmail(),
+    fromName: "ForgeDrop",
+    messageKind: "forgedrop-transfer",
+    messageRef: knockId || requestId,
+    disableSubscriptionTracking: true,
+    logPreview: false,
   });
 }
 
