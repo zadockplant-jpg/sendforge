@@ -686,8 +686,11 @@ export function createForgeDropLinkRouter({
   // The answer is the same whether or not the address has anyone: a knock
   // id, so nobody can use a knock to learn who has an account. Only what is
   // wrong with the knock itself, or with the one knocking, is refused. A send
-  // to someone's account also waits for their computers and emails them
-  // (1.8), neither of which the answer shows.
+  // to someone's account that says how many files and bytes it sends (1.8)
+  // also waits for their computers and emails them, neither of which the
+  // answer shows. One that does not (ForgeDrop 1.7, which gives up after 15 s
+  // and never ends a knock) knocks only on the desktops there now, as 1.7
+  // did: an email about it would promise a transfer that is not coming.
   router.post(
     "/person/knock",
     desktopAuth,
@@ -710,7 +713,8 @@ export function createForgeDropLinkRouter({
       }
       if (!sender.ok) return res.status(409).json({ error: sender.error });
 
-      const waits = body.purpose === "send" && found.account !== null;
+      const waits =
+        body.purpose === "send" && found.account !== null && summary.files !== null && summary.bytes !== null;
       const { knock, token } = people.knock(req.link, {
         purpose: body.purpose,
         card: sender.card,

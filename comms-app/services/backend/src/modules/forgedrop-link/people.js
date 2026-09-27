@@ -21,10 +21,12 @@
  * at all: it only tells the desktops knocked on who said hello, and nothing
  * can be said back on it.
  *
- * From 1.8 a send to someone's account also waits. For up to a day, while the
- * desktop that knocked keeps polling, the knock goes again to each of the
- * recipient's desktops that comes online taking people (the router checks its
- * slot and key first), each time with a session of its own. It holds an
+ * From 1.8 a send to someone's account that says how many files and bytes it
+ * sends also waits (the router decides; a 1.7 send says neither, and only
+ * knocks). For up to a day, while the desktop that knocked keeps polling, the
+ * knock goes again to each of the recipient's desktops that comes online
+ * taking people (the router checks its slot and key first), each time with a
+ * session of its own. It holds an
  * approval token, which the recipient's email carries as a link: the page it
  * opens asks, and approving tells the recipient's desktops, which then take
  * the files the knock said without a prompt. The desktop that knocked ends it,

@@ -297,11 +297,12 @@ function relay({ rate = UNLIMITED, sendTransferEmail = null, withCors = false } 
 
     /**
      * `recipient` polls taking people and `sender` knocks on its owner's
-     * address to send: the knock id, and the session `recipient` was given.
+     * address to send, as 1.8 does, saying what it sends: the knock id, and
+     * the session `recipient` was given.
      */
     async start(sender, recipient) {
       await poll(recipient, { caps: ["people"] });
-      const knocked = await knock(sender, { to: recipient.owner.address, purpose: "send" });
+      const knocked = await knock(sender, { to: recipient.owner.address, purpose: "send", files: 1, bytes: 1 });
       assert.equal(knocked.status, 202, JSON.stringify(knocked.body));
       const [message, ...more] = await mail(recipient);
       assert.equal(message?.type, "knock", JSON.stringify(message));
@@ -387,6 +388,8 @@ test("a knock lands on each of the address's desktops that take people, vouching
   const knocked = await r.knock(studio, {
     to: "  Bob@Example.COM ",
     purpose: "send",
+    files: 3,
+    bytes: 6_710_886,
     // What an app says about itself is never what the other side is told.
     email: "mallory@example.com",
     name: "Not Alice",
@@ -399,7 +402,7 @@ test("a knock lands on each of the address's desktops that take people, vouching
   assert.deepEqual(Object.keys(knocked.body), ["knock"]);
   assert.ok(isPersonSession(knocked.body.knock), `a 22-character base64url knock id, not ${knocked.body.knock}`);
 
-  const card = sendKnock(studio, { name: "Studio PC (live)" });
+  const card = sendKnock(studio, { name: "Studio PC (live)", files: 3, bytes: 6_710_886 });
   assert.match(card.identity, /^[0-9a-f]{64}$/);
 
   const woken = await waiting;
@@ -491,7 +494,7 @@ test("a knock answers the same whether the address has nobody, or nobody who can
   const asked = [];
   for (const to of nobody) {
     const counting = countQueries();
-    const res = await r.knock(studio, { to, purpose: "send" });
+    const res = await r.knock(studio, { to, purpose: "send", files: 1, bytes: 1 });
     asked.push(counting.stop().length);
     assert.equal(res.status, 202, `${to}: ${JSON.stringify(res.body)}`);
     assert.deepEqual(Object.keys(res.body), ["knock"], to);
@@ -512,7 +515,7 @@ test("a knock answers the same whether the address has nobody, or nobody who can
   // database, so how long a knock takes says nothing either.
   await r.poll(bobs, { caps: ["people"] });
   const counting = countQueries();
-  assert.equal((await r.knock(studio, { to: "bob@example.com", purpose: "send" })).status, 202);
+  assert.equal((await r.knock(studio, { to: "bob@example.com", purpose: "send", files: 1, bytes: 1 })).status, 202);
   asked.push(counting.stop().length);
   assert.equal((await r.mail(bobs)).length, 1);
   assert.equal(new Set(asked).size, 1, `questions per knock: ${asked}`);
@@ -569,10 +572,10 @@ test("the desktop knocking is never knocked on; its account's other desktops are
   await r.poll(laptop, { caps: ["people"] });
   await r.poll(attic, { caps: ["people"] }); // has never proved its key
 
-  const knocked = await r.knock(studio, { to: "alice@example.com", purpose: "send" });
+  const knocked = await r.knock(studio, { to: "alice@example.com", purpose: "send", files: 1, bytes: 1 });
   assert.equal(knocked.status, 202);
   const mail = await r.mail(laptop);
-  assert.deepEqual(mail, [said(mail[0]?.session, "knock", sendKnock(studio))]);
+  assert.deepEqual(mail, [said(mail[0]?.session, "knock", sendKnock(studio, { files: 1, bytes: 1 }))]);
   assert.deepEqual(await r.mail(studio), []);
   assert.deepEqual(await r.mail(attic), []);
   assert.deepEqual(r.people.stats(), { sessions: 1, knocks: 1, waiting: 1 });
@@ -585,7 +588,7 @@ test("the desktop knocking is never knocked on; its account's other desktops are
   // With no other desktop of its own taking people, nobody is knocked on
   // now; the send waits, and the laptop has both when it comes back.
   assert.equal((await r.call("/desktop/offline", { licence: laptop.token })).status, 204);
-  assert.equal((await r.knock(studio, { to: "alice@example.com", purpose: "send" })).status, 202);
+  assert.equal((await r.knock(studio, { to: "alice@example.com", purpose: "send", files: 2, bytes: 2 })).status, 202);
   assert.deepEqual(r.people.stats(), { sessions: 1, knocks: 2, waiting: 2 });
   const back = await r.mail(laptop, { caps: ["people"] });
   assert.deepEqual(back.map((m) => [m.type, m.data.email]), [
@@ -841,7 +844,7 @@ test("a desktop knocked on that can no longer be vouched for cannot say here, an
   const tablet = await activate("ginasTablet", gina, "Gina's tablet");
   for (const device of [desk, laptop, tablet]) await r.poll(device, { caps: ["people"] });
 
-  assert.equal((await r.knock(studio, { to: "gina@example.com", purpose: "send" })).status, 202);
+  assert.equal((await r.knock(studio, { to: "gina@example.com", purpose: "send", files: 1, bytes: 1 })).status, 202);
   const sessionOf = async (device) => {
     const [knock, ...more] = await r.mail(device);
     assert.deepEqual(more, []);
@@ -881,6 +884,46 @@ test("a desktop knocked on that can no longer be vouched for cannot say here, an
 });
 
 // ------------------------------------------------ waiting, the email, the page (1.8)
+
+test("a send without both counts, as ForgeDrop 1.7 knocks, only knocks the desktops there now: it neither waits nor emails", async () => {
+  const r = relay();
+  const { studio, bobs, bobsLaptop } = devices;
+  await r.poll(studio, { caps: ["people"] });
+  await r.poll(bobs, { caps: ["people"] });
+
+  // 1.7 says neither; half a summary is no better.
+  const sends = [{}, { files: 3 }, { bytes: 3 }, { files: null, bytes: 6 }];
+  const knocks = [];
+  for (const counts of sends) {
+    const knocked = await r.knock(studio, { to: "bob@example.com", purpose: "send", ...counts });
+    assert.equal(knocked.status, 202, JSON.stringify(counts));
+    assert.deepEqual(Object.keys(knocked.body), ["knock"], "the answer is the same as a 1.8 send's");
+    knocks.push(knocked.body.knock);
+    // Bob's desktop there now is knocked on exactly as 1.7 knocks: who, and
+    // nothing about files or approving.
+    const mail = await r.mail(bobs);
+    assert.deepEqual(mail, [said(mail[0]?.session, "knock", { purpose: "send", ...cardOf(studio) })], JSON.stringify(counts));
+  }
+  assert.deepEqual(r.emails, [], "no email, so no link and no token");
+  assert.deepEqual(r.people.stats(), { sessions: 4, knocks: 0, waiting: 0 }, "nothing waits");
+
+  // A desktop that comes online later is not knocked on, nor one that comes back.
+  assert.deepEqual(await r.mail(bobsLaptop, { caps: ["people"] }), []);
+  assert.equal((await r.call("/desktop/offline", { licence: bobs.token })).status, 204);
+  assert.deepEqual(await r.mail(bobs, { caps: ["people"] }), []);
+  // Nothing to end, which says so as for any knock.
+  assert.equal((await r.end(studio, { knock: knocks[0], outcome: "cancelled" })).status, 204);
+
+  // The same knock saying both counts is a 1.8 send: it waits and emails,
+  // and both of Bob's desktops, online now, are knocked on saying what it sends.
+  assert.equal((await r.knock(studio, { to: "bob@example.com", purpose: "send", files: 0, bytes: 0 })).status, 202);
+  assert.deepEqual(r.people.stats(), { sessions: 6, knocks: 1, waiting: 1 });
+  assert.equal(r.emails.length, 1);
+  for (const device of [bobs, bobsLaptop]) {
+    const mail = await r.mail(device);
+    assert.deepEqual(mail, [said(mail[0]?.session, "knock", sendKnock(studio, { files: 0, bytes: 0 }))], device.name);
+  }
+});
 
 test("a send waits: a desktop that comes online later is knocked on, and again after it goes and comes back", async () => {
   const r = relay();
@@ -1084,11 +1127,10 @@ test("each waiting send emails the recipient's address once: who from, what, and
     bytes: 6_710_886,
   });
 
-  // To the address the account has, as it was stored; and a knock that did
-  // not say what it sends says nothing about it.
-  await r.knock(studio, { to: "legacy.user@example.com", purpose: "send" });
+  // To the address the account has, as it was stored.
+  await r.knock(studio, { to: "legacy.user@example.com", purpose: "send", files: 1, bytes: 0 });
   assert.equal(r.emails[1].to, "Legacy.User@Example.com");
-  assert.deepEqual([r.emails[1].files, r.emails[1].bytes], [null, null]);
+  assert.deepEqual([r.emails[1].files, r.emails[1].bytes], [1, 0]);
   assert.notEqual(tokenOf(r.emails[1]), token, "a token each");
   assert.equal(legacys.owner.address, "legacy.user@example.com");
 
