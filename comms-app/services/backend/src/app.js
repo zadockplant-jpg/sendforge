@@ -30,6 +30,7 @@ import { jayjePortalRouter } from "./modules/jayje-portal/index.js";
 import { rtsRouter } from "./modules/romancing-the-stone/index.js";
 import { forgedropLinkRouter } from "./modules/forgedrop-link/index.js";
 import { forgedropPickupRouter } from "./modules/forgedrop-pickup/index.js";
+import { forgedropReleaseRouter } from "./modules/forgedrop-release/index.js";
 import { myhomebuilderPortalRouter } from "./modules/myhomebuilder-portal/index.js";
 
 export const app = express();
@@ -94,6 +95,9 @@ app.use("/v1/contact", contactRouter);
 app.use("/v1/tabforge/configs", tabforgeConfigsRouter);
 app.use("/v1/tabforge/cloud", tabforgeCloudRouter);
 app.use("/v1/licensing", licensingRouter);
+// Ahead of the downloads router, which would take "forgedrop-release" for a
+// download's name: the installer for a licensed ForgeDrop's updater.
+app.use("/v1/downloads/forgedrop-release", forgedropReleaseRouter);
 app.use("/v1/downloads", downloadsRouter);
 app.use("/v1/inmate-records/store", inmateRecordsStoreRouter);
 app.use("/v1/admin", adminRouter);
