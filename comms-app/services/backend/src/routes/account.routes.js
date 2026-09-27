@@ -337,7 +337,7 @@ accountRouter.get("/me", requireAuth, async (req, res) => {
           .first(),
       ]);
     // referralEligible keeps meaning "earns on TabForge". Owning any product
-    // with a referral programme, such as Rose Colored Glasses or ForgeDrop,
+    // with a referral programme, such as Rose Colored Glasses or DropForge,
     // is enough for a code too; productReferrals says what that code earns
     // on each of those products: its milestones, or a flat amount per sale.
     const referralEligible = await hasReferralProgramEligibility(user.id);

@@ -1,4 +1,4 @@
-// ForgeDrop people: the relay that introduces two desktops by the email of a
+// DropForge people: the relay that introduces two desktops by the email of a
 // SendForge account, for sending to someone by their address
 // (ForgeDrop/docs/people.md, "Backend: the person relay"), and from 1.8 the
 // knock that waits for them, the email it sends and the page that approves it
@@ -133,7 +133,7 @@ before(async () => {
   // requireAuth reads auth_version; the shared helper's users table predates it.
   await db.schema.alterTable("users", (t) => t.integer("auth_version").defaultTo(0));
 
-  // Alice and Bob own ForgeDrop, have verified emails, and their desktops have
+  // Alice and Bob own DropForge, have verified emails, and their desktops have
   // proved their keys (all but Alice's attic PC). Everyone else lacks one thing.
   const alice = await signUp("alice");
   const bob = await signUp("bob");
@@ -312,7 +312,7 @@ function relay({ rate = UNLIMITED, sendTransferEmail = null, withCors = false } 
   };
 }
 
-/** Let `ms` pass on the clock, with `polling` polling every 30 s as a running ForgeDrop does. */
+/** Let `ms` pass on the clock, with `polling` polling every 30 s as a running DropForge does. */
 async function elapse(r, ms, ...polling) {
   for (let left = ms; left > 0; left -= 30_000) {
     advance(Math.min(30_000, left));
@@ -470,7 +470,7 @@ test("were two accounts ever to hold one address in different cases, the one sto
 test("a knock answers the same whether the address has nobody, or nobody who can be knocked on", async () => {
   const r = relay();
   const { studio, bobs, bobsLaptop, danas, erins, frans } = devices;
-  // Casey owned ForgeDrop when her desktop signed in (its licence is taken on
+  // Casey owned DropForge when her desktop signed in (its licence is taken on
   // trust for a minute), and has since stopped owning it.
   const casey = await signUp("casey");
   const caseys = await activate("caseys", casey, "Casey PC");
@@ -504,7 +504,7 @@ test("a knock answers the same whether the address has nobody, or nobody who can
     assert.deepEqual(await r.mail(device), [], device.name);
   }
   // Only a verified owner's address has a send wait for it, and an email:
-  // none for no account, an unverified one, or one that does not own ForgeDrop.
+  // none for no account, an unverified one, or one that does not own DropForge.
   assert.deepEqual(r.people.stats(), { sessions: 0, knocks: 3, waiting: 3 });
   assert.deepEqual(
     r.emails.map((email) => email.to),
@@ -885,7 +885,7 @@ test("a desktop knocked on that can no longer be vouched for cannot say here, an
 
 // ------------------------------------------------ waiting, the email, the page (1.8)
 
-test("a send without both counts, as ForgeDrop 1.7 knocks, only knocks the desktops there now: it neither waits nor emails", async () => {
+test("a send without both counts, as DropForge 1.7 knocks, only knocks the desktops there now: it neither waits nor emails", async () => {
   const r = relay();
   const { studio, bobs, bobsLaptop } = devices;
   await r.poll(studio, { caps: ["people"] });
@@ -934,7 +934,7 @@ test("a send waits: a desktop that comes online later is knocked on, and again a
   const { knock } = knocked.body;
   assert.deepEqual(r.people.stats(), { sessions: 0, knocks: 1, waiting: 1 });
 
-  // Bob opens ForgeDrop ten minutes later, the sender's polling all the while.
+  // Bob opens DropForge ten minutes later, the sender's polling all the while.
   await elapse(r, 10 * 60_000, studio);
   const card = sendKnock(studio, { files: 3, bytes: 6_710_886 });
   const first = await r.mail(bobs, { caps: ["people"] });
@@ -1388,8 +1388,8 @@ test("the email says the owner's words, who from, what, and the link, and never 
   assert.equal(sent[0].url, "https://api.sendgrid.com/v3/mail/send");
   const { body } = sent[0];
   // The owner's words, exactly.
-  assert.equal(body.subject, "A ForgeDrop file transfer was initiated");
-  assert.deepEqual(body.from, { email: "referrals@sendforge.app", name: "ForgeDrop" });
+  assert.equal(body.subject, "A DropForge file transfer was initiated");
+  assert.deepEqual(body.from, { email: "referrals@sendforge.app", name: "DropForge" });
   assert.deepEqual(body.personalizations[0].to, [{ email: "bob@example.com" }]);
   assert.equal(body.personalizations[0].custom_args.sf_message_kind, "forgedrop-transfer");
   assert.equal(body.personalizations[0].custom_args.sf_message_ref, "K".repeat(22), "the knock, never the token");
@@ -1397,7 +1397,7 @@ test("the email says the owner's words, who from, what, and the link, and never 
   const [text, html] = body.content.map((part) => part.value);
   assert.equal(
     text,
-    `A ForgeDrop file transfer was initiated
+    `A DropForge file transfer was initiated
 
 From: michael@example.com (LETSGOSLOWER)
 3 files, 6.4 MB
@@ -1405,16 +1405,17 @@ From: michael@example.com (LETSGOSLOWER)
 Click here to approve:
 ${approveUrl}
 
-The files go straight between the two computers. Once you approve, they arrive while ForgeDrop is open on your computer; you can also accept them in ForgeDrop itself. Nothing arrives without your approval.
+The files go straight between the two computers. Once you approve, they arrive while DropForge is open on your computer; you can also accept them in DropForge itself. Nothing arrives without your approval.
 
-You're getting this because someone used ForgeDrop to send files to this email address. Need help? Contact support@sendforge.app.`
+You're getting this because someone used DropForge to send files to this email address. Need help? Contact support@sendforge.app.`
   );
-  assert.match(html, /<h1 [^>]*>A ForgeDrop file transfer was initiated<\/h1>/);
+  assert.match(html, /<h1 [^>]*>A DropForge file transfer was initiated<\/h1>/);
   assert.ok(html.includes(`<a href="${approveUrl}" `), "the button links to the page");
   assert.match(html, />Click here to approve<\/a>/);
   assert.match(html, /<strong>From:<\/strong> michael@example\.com \(LETSGOSLOWER\)<\/p>/);
   assert.match(html, />3 files, 6\.4 MB<\/p>/);
   assert.ok(html.includes("Nothing arrives without your approval."));
+  assert.doesNotMatch(text + html, /forgedrop/i, "the product is DropForge now");
 
   // A name is shown as text, on one line; what is not known is not said.
   const [hostile, htmlHostile] = sent[1].body.content.map((part) => part.value);
@@ -1423,7 +1424,7 @@ You're getting this because someone used ForgeDrop to send files to this email a
   const unknown = sent[2].body.content[0].value;
   assert.match(unknown, /\nFrom: michael@example\.com\n\nClick here to approve:\n/);
 
-  // Sizes as ForgeDrop's window writes them, counting in 1024s.
+  // Sizes as DropForge's window writes them, counting in 1024s.
   const lines = sent.slice(3).map((message) => message.body.content[0].value.split("\n")[3]);
   assert.deepEqual(lines, ["2 files, 1,023 B", "2 files, 1.0 KB", "2 files, 5.0 TB", "1,234 files, 2,048.0 TB", "0 files, 0 B"]);
 

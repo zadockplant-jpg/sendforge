@@ -1,5 +1,5 @@
-// The ForgeDrop installer for licensed desktops (src/modules/forgedrop-release):
-// installed copies keep updating once ForgeDrop's public release files close
+// The DropForge installer for licensed desktops (src/modules/forgedrop-release):
+// installed copies keep updating once DropForge's public release files close
 // to anyone who has not bought it (2026-09-27). Runs the real router, the real
 // licence sign-in and device slots on PGlite; GitHub is a stand-in fetch.
 
@@ -100,7 +100,7 @@ async function get(version, token) {
   return { status: res.status, headers: res.headers, body: Buffer.from(await res.arrayBuffer()) };
 }
 
-test("a licensed ForgeDrop gets the release it asks for, byte for byte", async () => {
+test("a licensed DropForge gets the release it asks for, byte for byte", async () => {
   asked.length = 0;
   const res = await get("1.6.3", people.owner.token);
   assert.equal(res.status, 200);
@@ -112,7 +112,7 @@ test("a licensed ForgeDrop gets the release it asks for, byte for byte", async (
   ]);
 });
 
-test("only a licensed ForgeDrop: no licence, a freed slot, or no ForgeDrop is refused", async () => {
+test("only a licensed DropForge: no licence, a freed slot, or no DropForge is refused", async () => {
   asked.length = 0;
   assert.equal((await get("1.6.3")).status, 401);
   assert.equal((await get("1.6.3", "FD1.junk.junk")).status, 401);

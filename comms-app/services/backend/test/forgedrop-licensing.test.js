@@ -101,9 +101,10 @@ test("a normalised code formats back into the printed form", () => {
   assert.equal(formatActivationCode(normalizeActivationCode(code)), code);
 });
 
-test("ForgeDrop is registered as a licensed product with a 5-device limit", () => {
+test("DropForge is registered as a licensed product with a 5-device limit", () => {
   const product = licensedProduct("ForgeDrop");
   assert.ok(product, "lookup is case-insensitive");
+  assert.equal(product.displayName, "DropForge", "the owner's name for it, exactly");
   assert.equal(product.deviceLimit, 5);
   assert.equal(product.entitlementSlug, "forgedrop");
   assert.equal(licensedProduct("tabforge"), null, "only licensed apps belong here");

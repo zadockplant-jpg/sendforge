@@ -556,7 +556,7 @@ function forgeDropComputerName(value) {
 }
 
 /**
- * ForgeDrop Cloud pickup: files were left for one of this account's
+ * DropForge Cloud pickup: files were left for one of this account's
  * computers. Names the sending computer and the date they are deleted,
  * never a file: the server has no file names, the list travels sealed.
  * The wording is a first draft for the owner to approve.
@@ -568,8 +568,8 @@ export async function sendForgeDropPickupWaitingEmail({
   pickupId = null,
   requestId = null,
 }) {
-  const subject = "Files are waiting for you in ForgeDrop";
-  const sender = forgeDropComputerName(fromName) || "another ForgeDrop computer";
+  const subject = "Files are waiting for you in DropForge";
+  const sender = forgeDropComputerName(fromName) || "another DropForge computer";
   // "October 3, 2026 at 2:05 PM UTC". ICU puts a narrow no-break space
   // before PM; plain-text mail gets an ordinary one.
   const deletedOn = `${new Intl.DateTimeFormat("en-US", {
@@ -580,25 +580,25 @@ export async function sendForgeDropPickupWaitingEmail({
     .format(new Date(expiresAt))
     .replace(/[\u202f\u00a0]/g, " ")} UTC`;
 
-  const text = `Files are waiting for you in ForgeDrop.
+  const text = `Files are waiting for you in DropForge.
 
 From: ${sender}
 Deleted: as soon as they're picked up, or on ${deletedOn} if they aren't.
 
-Open ForgeDrop on your computer to receive them. They were encrypted on the sending computer, so only your computer can open them.
+Open DropForge on your computer to receive them. They were encrypted on the sending computer, so only your computer can open them.
 
-You're getting this because a computer on your SendForge account uses ForgeDrop. Need help? Contact ${supportEmail()}.`;
+You're getting this because a computer on your SendForge account uses DropForge. Need help? Contact ${supportEmail()}.`;
 
   const html = `
     <div style="margin:0;padding:24px;background:#f5f7fb;color:#172033;font-family:Arial,sans-serif;line-height:1.55;">
       <div style="max-width:580px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
-        <p style="margin:0 0 8px;color:#52627a;font-size:13px;font-weight:700;">FORGEDROP CLOUD PICKUP</p>
-        <h1 style="margin:0 0 16px;font-size:26px;line-height:1.2;color:#172033;">Files are waiting for you in ForgeDrop</h1>
+        <p style="margin:0 0 8px;color:#52627a;font-size:13px;font-weight:700;">DROPFORGE CLOUD PICKUP</p>
+        <h1 style="margin:0 0 16px;font-size:26px;line-height:1.2;color:#172033;">Files are waiting for you in DropForge</h1>
         <p style="margin:0 0 6px;"><strong>From:</strong> ${escapeHtml(sender)}</p>
         <p style="margin:0 0 18px;"><strong>Deleted:</strong> as soon as they're picked up, or on ${escapeHtml(deletedOn)} if they aren't.</p>
-        <p style="margin:0 0 18px;color:#52627a;">Open ForgeDrop on your computer to receive them. They were encrypted on the sending computer, so only your computer can open them.</p>
+        <p style="margin:0 0 18px;color:#52627a;">Open DropForge on your computer to receive them. They were encrypted on the sending computer, so only your computer can open them.</p>
         <hr style="margin:22px 0;border:0;border-top:1px solid #e3e8f0;">
-        <p style="margin:0;color:#7b8799;font-size:12px;">You're getting this because a computer on your SendForge account uses ForgeDrop. Need help? Contact ${escapeHtml(supportEmail())}.</p>
+        <p style="margin:0;color:#7b8799;font-size:12px;">You're getting this because a computer on your SendForge account uses DropForge. Need help? Contact ${escapeHtml(supportEmail())}.</p>
       </div>
     </div>
   `;
@@ -610,7 +610,7 @@ You're getting this because a computer on your SendForge account uses ForgeDrop.
     html,
     requestId,
     fromEmail: accountFromEmail(),
-    fromName: "ForgeDrop",
+    fromName: "DropForge",
     messageKind: "forgedrop-pickup-waiting",
     messageRef: pickupId || requestId,
     disableSubscriptionTracking: true,
@@ -618,7 +618,7 @@ You're getting this because a computer on your SendForge account uses ForgeDrop.
 }
 
 /**
- * A size as ForgeDrop's own window writes it (forgedrop/ui/text.py,
+ * A size as DropForge's own window writes it (forgedrop/ui/text.py,
  * human_bytes), counting in 1024s: "512 B", "6.4 MB". The email and the app
  * then say the same.
  */
@@ -645,7 +645,7 @@ function forgeDropFiles(files, bytes) {
 }
 
 /**
- * ForgeDrop people (ForgeDrop/docs/people.md, "Waiting, and the email"):
+ * DropForge people (ForgeDrop/docs/people.md, "Waiting, and the email"):
  * someone is sending files to this account's email. The subject, the heading
  * and the button, "Click here to approve", are the owner's words; the link
  * opens the approval page, which asks before it approves anything. The link
@@ -661,17 +661,17 @@ export async function sendForgeDropTransferEmail({
   knockId = null,
   requestId = null,
 }) {
-  const subject = "A ForgeDrop file transfer was initiated";
+  const subject = "A DropForge file transfer was initiated";
   // An address has no spaces or control characters; none reach the email.
   const email = String(senderEmail || "").replace(/[\s\u0000-\u001f\u007f]/g, "");
   const computer = forgeDropComputerName(senderComputer);
   const from = computer ? `${email} (${computer})` : email;
   const what = forgeDropFiles(files, bytes);
   const how =
-    "The files go straight between the two computers. Once you approve, they arrive while ForgeDrop is open on your computer; you can also accept them in ForgeDrop itself. Nothing arrives without your approval.";
-  const why = "You're getting this because someone used ForgeDrop to send files to this email address.";
+    "The files go straight between the two computers. Once you approve, they arrive while DropForge is open on your computer; you can also accept them in DropForge itself. Nothing arrives without your approval.";
+  const why = "You're getting this because someone used DropForge to send files to this email address.";
 
-  const text = `A ForgeDrop file transfer was initiated
+  const text = `A DropForge file transfer was initiated
 
 From: ${from}${what ? `\n${what}` : ""}
 
@@ -686,7 +686,7 @@ ${why} Need help? Contact ${supportEmail()}.`;
   const html = `
     <div style="margin:0;padding:24px;background:#f5f7fb;color:#172033;font-family:Arial,sans-serif;line-height:1.55;">
       <div style="max-width:580px;margin:0 auto;padding:28px;border:1px solid #dce3ee;border-radius:16px;background:#ffffff;">
-        <h1 style="margin:0 0 16px;font-size:26px;line-height:1.2;color:#172033;">A ForgeDrop file transfer was initiated</h1>
+        <h1 style="margin:0 0 16px;font-size:26px;line-height:1.2;color:#172033;">A DropForge file transfer was initiated</h1>
         <p style="margin:0 0 6px;"><strong>From:</strong> ${escapeHtml(from)}</p>${
           what ? `\n        <p style="margin:0 0 6px;">${escapeHtml(what)}</p>` : ""
         }
@@ -708,7 +708,7 @@ ${why} Need help? Contact ${supportEmail()}.`;
     html,
     requestId,
     fromEmail: accountFromEmail(),
-    fromName: "ForgeDrop",
+    fromName: "DropForge",
     messageKind: "forgedrop-transfer",
     messageRef: knockId || requestId,
     disableSubscriptionTracking: true,
@@ -717,7 +717,7 @@ ${why} Need help? Contact ${supportEmail()}.`;
 }
 
 /**
- * ForgeDrop people (ForgeDrop/docs/people.md, "Requesting files"): someone
+ * DropForge people (ForgeDrop/docs/people.md, "Requesting files"): someone
  * is asking this account's email for files. Their message is theirs, shown
  * as plain text and never as HTML. The wording is a first draft for the
  * owner to approve. The link opens the request's page; like an approval
@@ -739,8 +739,8 @@ export async function sendForgeDropFileRequestEmail({
   const subject = `${email} is asking you for files`;
   const said = String(message ?? "").trim();
   const how =
-    "On a phone, the link opens a page ready to choose files; on a computer, it opens ForgeDrop. The files go straight to their computer.";
-  const why = "You're getting this because someone used ForgeDrop to ask for files at this email address.";
+    "On a phone, the link opens a page ready to choose files; on a computer, it opens DropForge. The files go straight to their computer.";
+  const why = "You're getting this because someone used DropForge to ask for files at this email address.";
 
   const text = `${subject}
 
@@ -782,7 +782,7 @@ ${why} Need help? Contact ${supportEmail()}.`;
     html,
     requestId,
     fromEmail: accountFromEmail(),
-    fromName: "ForgeDrop",
+    fromName: "DropForge",
     messageKind: "forgedrop-file-request",
     messageRef: fileRequestId || requestId,
     disableSubscriptionTracking: true,

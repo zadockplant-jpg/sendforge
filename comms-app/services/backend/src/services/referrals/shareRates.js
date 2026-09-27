@@ -1,5 +1,5 @@
 // The share an affiliate earns on every paid invoice of a subscription they
-// referred (TabForge Private Sync, ForgeDrop Cloud pickup), as the owner sets
+// referred (TabForge Private Sync, DropForge Cloud pickup), as the owner sets
 // it from the admin dashboard.
 //
 // Rates are basis points: 500 is 5%. Each programme has a rate and an on/off

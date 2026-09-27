@@ -1,7 +1,7 @@
 // An activation code works only in the app for its product. TuneForge sends
-// productSlug with a code; before this the route ignored it, so a ForgeDrop
-// code typed into TuneForge took a ForgeDrop place for a licence TuneForge
-// then refused. ForgeDrop's own app sends no productSlug and is unchanged.
+// productSlug with a code; before this the route ignored it, so a DropForge
+// code typed into TuneForge took a DropForge place for a licence TuneForge
+// then refused. DropForge's own app sends no productSlug and is unchanged.
 // A file of its own: /activate allows ten calls a minute per address.
 
 import assert from "node:assert/strict";
@@ -63,14 +63,14 @@ async function places(userId, productSlug) {
   return Number(row.n);
 }
 
-test("a ForgeDrop code typed into TuneForge is not a code TuneForge knows", async () => {
+test("a DropForge code typed into TuneForge is not a code TuneForge knows", async () => {
   const person = await owner("forgedrop");
   const wrong = await activate({ activationCode: person.code, productSlug: "tuneforge", deviceName: "Music PC" });
   assert.equal(wrong.status, 404);
   assert.equal(wrong.json.error, "unknown_activation_code");
   const unknown = await activate({ activationCode: person.code, productSlug: "not-a-product", deviceName: "Music PC" });
   assert.equal(unknown.status, 404);
-  assert.equal(await places(person.id, "forgedrop"), 0, "no ForgeDrop place was taken");
+  assert.equal(await places(person.id, "forgedrop"), 0, "no DropForge place was taken");
 });
 
 test("a code still activates its own product, named or not", async () => {

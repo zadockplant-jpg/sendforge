@@ -1,9 +1,9 @@
 /**
- * ForgeDrop Cloud pickup (ForgeDrop/docs/pickup.md), mounted by app.js at
+ * DropForge Cloud pickup (ForgeDrop/docs/pickup.md), mounted by app.js at
  * /v1/forgedrop/pickup: files a sender's computer sealed and left in
  * Cloudflare R2 for a computer that was away, or for someone without
- * ForgeDrop, deleted as soon as they are picked up or after 8 days. The one
- * paid part of ForgeDrop.
+ * DropForge, deleted as soon as they are picked up or after 8 days. The one
+ * paid part of DropForge.
  *
  *   POST /               sender     leave files: an id and upload links
  *   POST /:id/uploads    sender     carry on an upload that stopped: fresh
@@ -17,7 +17,7 @@
  *
  * Every route is for a desktop signed in with its offline licence, as on the
  * link (../forgedrop-link/auth.js). Leaving files also takes a plan
- * (plans.js); receiving takes only ForgeDrop. The bytes go straight between
+ * (plans.js); receiving takes only DropForge. The bytes go straight between
  * the desktop and R2 on presigned links: this server never holds one, and
  * could not read one if it did.
  *

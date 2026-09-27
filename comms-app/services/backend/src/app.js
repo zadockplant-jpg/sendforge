@@ -58,13 +58,13 @@ app.use(
 // mounts after CORS and before the shared 25 MB parser. Off until RTS_ENABLED=true.
 app.use("/v1/rts", rtsRouter);
 
-// ForgeDrop phone link: in-memory WebRTC signaling between a phone's browser
+// DropForge phone link: in-memory WebRTC signaling between a phone's browser
 // and a desktop. It owns its JSON parser (64 KiB) and error responses, so it
 // mounts here for the same reason as RTS. If the module cannot load, its
 // routes answer 503 and the rest of the API still starts (see its index.js).
 app.use("/v1/forgedrop/link", forgedropLinkRouter);
 
-// ForgeDrop Cloud pickup: presigned R2 links for files a desktop sealed and
+// DropForge Cloud pickup: presigned R2 links for files a desktop sealed and
 // left for another computer. It owns its JSON parser (4 MiB) and error
 // responses, like the link. Without R2's settings, or if the module cannot
 // load, its routes answer 503 and the rest of the API still starts.
@@ -96,7 +96,7 @@ app.use("/v1/tabforge/configs", tabforgeConfigsRouter);
 app.use("/v1/tabforge/cloud", tabforgeCloudRouter);
 app.use("/v1/licensing", licensingRouter);
 // Ahead of the downloads router, which would take "forgedrop-release" for a
-// download's name: the installer for a licensed ForgeDrop's updater.
+// download's name: the installer for a licensed DropForge's updater.
 app.use("/v1/downloads/forgedrop-release", forgedropReleaseRouter);
 app.use("/v1/downloads", downloadsRouter);
 app.use("/v1/inmate-records/store", inmateRecordsStoreRouter);

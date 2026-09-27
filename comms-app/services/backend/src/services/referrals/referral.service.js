@@ -45,7 +45,7 @@ export const PRODUCT_REFERRAL_PROGRAMS = Object.freeze({
     recurringTier: recurringTier(2500),
   }),
   forgedrop: Object.freeze({
-    label: "ForgeDrop",
+    label: "DropForge",
     tiers: milestoneTiers([2500, 5000, 6000, 17500]),
     recurringTier: recurringTier(17500),
   }),
@@ -96,11 +96,11 @@ export function syncShareCents(netPaidCents) {
   return shareCentsAt(netPaidCents, DEFAULT_SHARE_RATE_BPS);
 }
 
-// ForgeDrop Cloud pickup pays the same way: 5% of every paid invoice (the
+// DropForge Cloud pickup pays the same way: 5% of every paid invoice (the
 // default; the owner sets the rate), the first one and each month after it,
 // to the account directly above the subscriber and no further. The gate is
-// the ForgeDrop affiliate level (isForgeDropAffiliateCode), not TabForge Pro.
-// The share has its own product slug, so a ForgeDrop refund's milestone
+// the DropForge affiliate level (isForgeDropAffiliateCode), not TabForge Pro.
+// The share has its own product slug, so a DropForge refund's milestone
 // recount never touches it.
 export const CLOUD_PICKUP_SHARE_RATE = 0.05;
 export const CLOUD_PICKUP_SHARE_PRODUCT_SLUG = "forgedrop-cloud-pickup";
@@ -284,10 +284,10 @@ export function perSaleCentsForCode(referralCode, productSlug) {
 }
 
 /**
- * The ForgeDrop affiliate level: an active code on affiliate terms (the owner
+ * The DropForge affiliate level: an active code on affiliate terms (the owner
  * made it an affiliate, or a comp code gave it a per-sale TabForge rate) whose
- * ForgeDrop rate the owner has not set to zero, which means "earns nothing on
- * ForgeDrop". It is what Cloud pickup's share is gated on.
+ * DropForge rate the owner has not set to zero, which means "earns nothing on
+ * DropForge". It is what Cloud pickup's share is gated on.
  */
 export function isForgeDropAffiliateCode(referralCode) {
   if (!referralCode || (referralCode.status && referralCode.status !== "active")) return false;
@@ -304,7 +304,7 @@ export async function hasForgeDropAffiliateLevel(userId, trx = db) {
 /**
  * Whether this account earns referral rewards on a product at all. TabForge,
  * and the Private Sync share that rides on it, need TabForge Pro. The Cloud
- * pickup share needs the ForgeDrop affiliate level. Every other product with
+ * pickup share needs the DropForge affiliate level. Every other product with
  * a programme needs the referrer to hold a referral code: to own one of our
  * products, or to be an affiliate.
  */
@@ -1340,7 +1340,7 @@ export async function recordReferralPurchase({ referredUserId, productSlug, purc
   const ref = normalizeReferralValue(purchaseRef);
   if (!referredUserId || !slug || !ref) return { recorded: false, reason: "missing_input" };
   // Only a product with a referral programme earns referral credit: TabForge
-  // Pro, Rose Colored Glasses and ForgeDrop. Add-ons, pages, collections and
+  // Pro, Rose Colored Glasses and DropForge. Add-ons, pages, collections and
   // skin bundles remain normal purchases but never advance payout tiers.
   if (!isMilestoneReferralProduct(slug)) return { recorded: false, reason: "not_qualifying_product" };
   const initialNetPaidCents = Number(metadata?.initial_net_paid_cents || 0);
@@ -1520,9 +1520,9 @@ export async function recordSyncSubscriptionShare({
  * changed) to the account directly above the subscriber, modelled on
  * recordSyncSubscriptionShare. One level, read once and never walked; one
  * reward_queue row per invoice, keyed on the invoice id, so a replayed
- * webhook cannot pay twice. The gate is the ForgeDrop affiliate level,
+ * webhook cannot pay twice. The gate is the DropForge affiliate level,
  * checked on every invoice, so an affiliate the owner stops paying on
- * ForgeDrop stops earning from renewals too.
+ * DropForge stops earning from renewals too.
  */
 export async function recordCloudPickupShare({
   subscriberUserId,

@@ -1,10 +1,10 @@
 /**
- * GET /v1/downloads/forgedrop-release/:version: the ForgeDrop installer for
+ * GET /v1/downloads/forgedrop-release/:version: the DropForge installer for
  * a licensed desktop.
  *
- * The owner is closing ForgeDrop's downloads to anyone who has not bought it
+ * The owner is closing DropForge's downloads to anyone who has not bought it
  * (2026-09-27), and the public release files on GitHub go private after
- * that. Installed copies still have to update, so ForgeDrop 1.6.3's updater
+ * that. Installed copies still have to update, so DropForge 1.6.3's updater
  * asks here first, sending its offline licence (X-ForgeDrop-License, the same
  * sign-in the phone link and Cloud pickup use), and falls back to the url in
  * the signed update notice. The notice keeps naming the public file while
@@ -98,7 +98,7 @@ export function createForgeDropReleaseRouter({
       }
       res.status(200);
       res.set("Content-Type", "application/octet-stream");
-      res.set("Content-Disposition", 'attachment; filename="Install ForgeDrop.exe"');
+      res.set("Content-Disposition", 'attachment; filename="Install DropForge.exe"');
       const length = upstream.headers.get("content-length");
       if (length && /^[0-9]+$/.test(length)) res.set("Content-Length", length);
       const body = Readable.fromWeb(upstream.body);

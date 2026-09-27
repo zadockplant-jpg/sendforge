@@ -11,7 +11,7 @@
  * deploy drops it all and both sides simply poll again.
  *
  * An address is a desktop, a phone, or a guest: a phone's browser on a
- * request's page (ForgeDrop 1.9), filed under the account that asked. A guest
+ * request's page (DropForge 1.9), filed under the account that asked. A guest
  * is present as long as a phone is, and counted apart from the account's own
  * phones, so neither can push the other out.
  *

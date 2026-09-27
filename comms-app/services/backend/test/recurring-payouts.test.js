@@ -67,6 +67,8 @@ test("the migration seeds every programme at 5% and on, and shares pay exactly w
   assert.deepEqual(
     (await db("subscription_share_programs").orderBy("program_slug")).map((row) => [row.program_slug, row.label, row.rate_bps, row.enabled]),
     [
+      // The row keeps the label the migration wrote; the dashboard shows the
+      // programme's label from the code, "DropForge Cloud pickup" (below).
       [PICKUP, "ForgeDrop Cloud pickup", 500, true],
       [SYNC, "TabForge Private Sync", 500, true],
     ]
@@ -209,7 +211,7 @@ test("the settings the dashboard reads and writes, and what they refuse", async 
   assert.equal(read.body.ready, true);
   assert.deepEqual(
     read.body.programs.map((program) => [program.slug, program.label, program.rateBps, program.enabled]),
-    [[SYNC, "TabForge Private Sync", 500, true], [PICKUP, "ForgeDrop Cloud pickup", 500, true]]
+    [[SYNC, "TabForge Private Sync", 500, true], [PICKUP, "DropForge Cloud pickup", 500, true]]
   );
   assert.deepEqual(read.body.payout.minimumPayoutCents, 0);
   assert.deepEqual(read.body.payout.payoutDay, 15);
@@ -294,7 +296,7 @@ test("the overview: each affiliate's live subscriptions, and the share they will
   await subscribed(ann, "tabforge_private_sync", "canceled", { items: { data: monthly(500) } });
   await subscribed(ann, "forgedrop_cloud_pickup", "active", { metadata: { tier: "250gb" }, items: { data: monthly(1000) } });
   await subscribed(ann, "forgedrop_cloud_pickup", "active", { metadata: { tier: "1tb" }, cancel_at_period_end: true });
-  // Bob: owns Pro but is no ForgeDrop affiliate, so Cloud pickup pays him nothing.
+  // Bob: owns Pro but is no DropForge affiliate, so Cloud pickup pays him nothing.
   await subscribed(bob, "tabforge_private_sync", "active", { items: { data: monthly(500) } });
   await subscribed(bob, "forgedrop_cloud_pickup", "active", { metadata: { tier: "500gb" } });
   await subscribed(bob, "rts_subscription", "active", { items: { data: monthly(900) } });
@@ -351,7 +353,7 @@ test("a Private Sync or Cloud pickup share can be approved, each behind its own 
     assert.equal(approved.body.item.status, "approved");
   }
 
-  // The owner sets Cy to earn nothing on ForgeDrop: below the affiliate level,
+  // The owner sets Cy to earn nothing on DropForge: below the affiliate level,
   // so a Cloud pickup share cannot be paid, and the refusal says so.
   const later = await waited(await referral.recordCloudPickupShare({ subscriberUserId: sue.id, invoiceRef: "in_sue_pickup_2", netPaidCents: 1000 }));
   await referral.setReferralTerms(cy.code, { flatRates: { forgedrop: 0 } });

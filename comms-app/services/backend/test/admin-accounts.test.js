@@ -152,7 +152,7 @@ test("referral terms: an affiliate who owns nothing, a vanity code, and a custom
   assert.equal(view.referral.flatRates[RCG].custom, true);
   assert.equal(await canHoldReferralCode(aff), true);
 
-  // An affiliate is on ForgeDrop's affiliate level without anything being set.
+  // An affiliate is on DropForge's affiliate level without anything being set.
   assert.equal(view.referral.flatRates.forgedrop.custom, false);
   assert.equal(view.referral.flatRates.forgedrop.affiliateCents, 1000);
   assert.equal(view.referral.flatRates.forgedrop.effectiveCents, 1000);
@@ -164,7 +164,7 @@ test("referral terms: an affiliate who owns nothing, a vanity code, and a custom
   assert.equal(paid.recorded, true);
   assert.deepEqual(paid.rewards.map((reward) => reward.reward_amount_cents), [300]);
 
-  // The same buyer's ForgeDrop pays the affiliate level: $10 on the sale.
+  // The same buyer's DropForge pays the affiliate level: $10 on the sale.
   const drop = await recordReferralPurchase({ referredUserId: buyer, productSlug: "forgedrop", purchaseRef: "pi_buyer2:forgedrop", metadata: { payment_intent: "pi_buyer2", initial_net_paid_cents: 2000 } });
   assert.deepEqual(drop.rewards.map((reward) => reward.reward_amount_cents), [1000]);
 
@@ -176,7 +176,7 @@ test("referral terms: an affiliate who owns nothing, a vanity code, and a custom
   assert.equal(view.referral.tabforgePerSaleCents, null);
   assert.equal(view.referral.referredAccounts, 1);
 
-  // A rate of zero on ForgeDrop is the owner saying: nothing on ForgeDrop.
+  // A rate of zero on DropForge is the owner saying: nothing on DropForge.
   view = await setAccountReferral({ email: "affiliate@example.com", flatRates: { forgedrop: 0 } });
   assert.equal(view.referral.flatRates.forgedrop.effectiveCents, 0);
 
@@ -186,7 +186,7 @@ test("referral terms: an affiliate who owns nothing, a vanity code, and a custom
   await assert.rejects(setAccountReferral({ email: "other@example.com", code: "SUNNY" }), /referral_code_taken/);
 });
 
-test("a Customer Finder comp code carries ForgeDrop's $10 affiliate level to the creator", async () => {
+test("a Customer Finder comp code carries DropForge's $10 affiliate level to the creator", async () => {
   // What Customer Finder pushes for each creator it finds.
   await upsertCompCode({ code: "COMP-CREATOR1", note: "Comp code for Creator", maxRedemptions: 1, perSaleRewardCents: 500, forgedropPerSaleRewardCents: 1000, createdBy: ADMIN });
   const listed = (await listCompCodes()).find((item) => item.code === "COMP-CREATOR1");
@@ -200,14 +200,14 @@ test("a Customer Finder comp code carries ForgeDrop's $10 affiliate level to the
 
   const code = await db("referral_codes").where({ user_id: creator, status: "active" }).first();
   assert.equal(code.metadata.commission.rewardAmountCents, 500, "$5 on every TabForge Pro sale");
-  assert.equal(code.metadata.flat_rates.forgedrop, 1000, "$10 on every ForgeDrop sale");
+  assert.equal(code.metadata.flat_rates.forgedrop, 1000, "$10 on every DropForge sale");
 
-  // Their audience buys ForgeDrop through the creator's own link.
+  // Their audience buys DropForge through the creator's own link.
   const fan = await signUp("fan@example.com", { referred_by_user_id: creator, referral_code_id: code.id });
   const bought = await recordReferralPurchase({ referredUserId: fan, productSlug: "forgedrop", purchaseRef: "pi_fan:forgedrop", metadata: { payment_intent: "pi_fan", initial_net_paid_cents: 2000 } });
   assert.deepEqual(bought.rewards.map((reward) => reward.reward_amount_cents), [1000]);
 
-  // Taking the ForgeDrop rate off the code leaves it off new codes too.
+  // Taking the DropForge rate off the code leaves it off new codes too.
   await upsertCompCode({ code: "COMP-CREATOR1", forgedropPerSaleRewardCents: null });
   assert.equal((await listCompCodes()).find((item) => item.code === "COMP-CREATOR1").forgedropPerSaleRewardCents, null);
 });

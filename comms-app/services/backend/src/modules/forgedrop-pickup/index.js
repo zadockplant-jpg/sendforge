@@ -1,5 +1,5 @@
 /**
- * ForgeDrop Cloud pickup, mounted by app.js at /v1/forgedrop/pickup.
+ * DropForge Cloud pickup, mounted by app.js at /v1/forgedrop/pickup.
  *
  * As with the link (../forgedrop-link/index.js): app.js imports this file
  * statically, and anything that throws while a static import loads stops the

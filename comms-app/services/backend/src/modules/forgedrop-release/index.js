@@ -1,5 +1,5 @@
 /**
- * The ForgeDrop installer for licensed desktops, mounted by app.js at
+ * The DropForge installer for licensed desktops, mounted by app.js at
  * /v1/downloads/forgedrop-release, ahead of the downloads router (router.js
  * says why it exists).
  *

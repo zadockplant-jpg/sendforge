@@ -1,7 +1,7 @@
 /**
  * Activation slots: how many machines a licence may run on, and which.
  *
- * The rule each product sells - "up to 5 devices" for ForgeDrop, "one device
+ * The rule each product sells - "up to 5 devices" for DropForge, "one device
  * per purchase" for Rose Colored Glasses - is a device limit. Enforcing it
  * correctly is the whole job here, and the one subtle part is the counting.
  */

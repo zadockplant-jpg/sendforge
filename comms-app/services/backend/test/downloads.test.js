@@ -122,12 +122,12 @@ test("an owner gets a ticket from the site; anyone else is told to buy", async (
   assert.ok(Date.parse(body.expiresAt) - Date.now() > 29 * 60 * 1000, "lasts half an hour");
   const res = await fetch(`${base}/v1/downloads/forgedrop?ticket=${encodeURIComponent(body.ticket)}`);
   assert.equal(res.status, 200);
-  assert.match(res.headers.get("content-disposition"), /filename="Install ForgeDrop\.exe"/);
+  assert.match(res.headers.get("content-disposition"), /filename="Install DropForge\.exe"/);
   assert.deepEqual(Buffer.from(await res.arrayBuffer()), FILE);
 });
 
-test("ForgeDrop's release notice is relayed for its updater, to anyone", async () => {
-  // ForgeDrop asks /v1/downloads/forgedrop-update before falling back to GitHub.
+test("DropForge's release notice is relayed for its updater, to anyone", async () => {
+  // DropForge asks /v1/downloads/forgedrop-update before falling back to GitHub.
   const res = await fetch(`${base}/v1/downloads/forgedrop-update`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-disposition"), /filename="forgedrop-update\.json"/);

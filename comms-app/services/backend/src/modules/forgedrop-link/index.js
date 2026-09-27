@@ -1,5 +1,5 @@
 /**
- * ForgeDrop phone link, mounted by app.js at /v1/forgedrop/link.
+ * DropForge phone link, mounted by app.js at /v1/forgedrop/link.
  *
  * app.js imports this file statically, and anything that throws while a
  * static import loads stops the whole API from starting, not just this
@@ -54,7 +54,7 @@ export const forgedropLinkRouter = await loadForgeDropLink(async () => {
     hasProductEntitlement,
     // Read per request, so the key is never parsed at import time.
     signingKey: () => env.licenseSigningKey,
-    // A waiting send's email (ForgeDrop 1.8), and the website's page its
+    // A waiting send's email (DropForge 1.8), and the website's page its
     // link opens, the token after the "#" so no server ever logs it.
     sendTransferEmail: sendForgeDropTransferEmail,
     approvalLink: (token) => `${siteUrl("/r/")}#${token}`,

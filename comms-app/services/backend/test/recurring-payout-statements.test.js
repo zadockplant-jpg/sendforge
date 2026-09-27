@@ -49,7 +49,7 @@ after(async () => {
 });
 
 // An affiliate who passes both programmes' gates: TabForge Pro, and a code on
-// affiliate terms (the ForgeDrop affiliate level).
+// affiliate terms (the DropForge affiliate level).
 const affiliate = (name, extra = {}) => person(name, { owns: ["tabforge"], affiliate: true, cashApp: `$${name}`, ...extra });
 
 /**
@@ -109,7 +109,7 @@ test("each affiliate's shares make one statement a month, by when the invoice wa
   assert.deepEqual([prev.email, prev.cashAppTag, prev.cashAppTagClaimed, prev.owedCents, prev.payableCents, prev.notReadyCount], [ada.email, "$ada", true, 200, 200, 0]);
   assert.deepEqual(prev.byProgram.map((entry) => [entry.label, entry.invoiceCount, entry.totalCents]), [
     ["TabForge Private Sync", 2, 75],
-    ["ForgeDrop Cloud pickup", 1, 125],
+    ["DropForge Cloud pickup", 1, 125],
   ]);
   assert.deepEqual(
     prev.rows.map((row) => [row.invoiceRef, row.subscriberEmail, row.amountCents, row.rateBps, row.invoiceMonth, row.ready, row.problem]),

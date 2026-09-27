@@ -1,6 +1,6 @@
 /**
  * /v1/admin/recurring-payouts - the owner's monthly affiliate payouts for the
- * subscription shares (TabForge Private Sync, ForgeDrop Cloud pickup):
+ * subscription shares (TabForge Private Sync, DropForge Cloud pickup):
  * programme rates and switches, per-affiliate rates, the minimum payout and
  * payout day, monthly statements to approve, pay and reject, and what the
  * live subscriptions will pay each month.

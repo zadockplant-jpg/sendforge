@@ -1,4 +1,4 @@
-// ForgeDrop devices prove they hold the identity key they report
+// DropForge devices prove they hold the identity key they report
 // (identityProof.service.js). Before this, device_activations took the app's
 // word for its fingerprint, so anyone activating their own copy could claim
 // somebody else's key. The frozen vector at the top is also in ForgeDrop's
@@ -46,7 +46,7 @@ const VECTOR = {
   proof: "50a8409bf642e3be50f7bd01ebe9393a5912d2d5b0a5670e592fbda7642a9223",
 };
 
-test("the frozen vector: server key, challenge and proof match ForgeDrop's", () => {
+test("the frozen vector: server key, challenge and proof match DropForge's", () => {
   assert.equal(serverKeys(VECTOR.seed).publicHex, VECTOR.serverPublic);
   const made = makeChallenge(VECTOR.seed, {
     now: (VECTOR.expires - 600) * 1000,
@@ -318,7 +318,7 @@ test("an already-activated device proves its key with its licence", async () => 
   assert.equal(saved.identity_fingerprint, device.fingerprint);
 });
 
-test("proving a key needs a valid licence for an active ForgeDrop device", async () => {
+test("proving a key needs a valid licence for an active DropForge device", async () => {
   const person = await owner();
   const activated = await activateDevice({
     userId: person.id,

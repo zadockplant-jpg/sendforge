@@ -1,15 +1,15 @@
 /**
- * ForgeDrop phone link: the signaling relay (ForgeDrop/docs/phone-link.md).
+ * DropForge phone link: the signaling relay (ForgeDrop/docs/phone-link.md).
  *
- * A phone's browser and a ForgeDrop desktop use this only to swap WebRTC
+ * A phone's browser and a DropForge desktop use this only to swap WebRTC
  * offers and answers; the data channel then runs directly across the local
  * network and never touches this server. What passes through here is SDP,
  * held in memory for at most a minute.
  *
  *   POST /desktop/poll     desktop  long-poll for messages, and be online
  *   POST /desktop/offline  desktop  stop being online, now
- *   GET  /desktop/peers    desktop  the account's other ForgeDrop machines
- *   GET  /desktops         phone    the account's ForgeDrop machines
+ *   GET  /desktop/peers    desktop  the account's other DropForge machines
+ *   GET  /desktops         phone    the account's DropForge machines
  *   POST /phone/poll       phone    long-poll for messages, and be present
  *   POST /signal           either   send an offer, answer or bye; between
  *                                   two desktops, a dial, its answer or bye
@@ -30,14 +30,14 @@
  *   POST /request/signal   page     an offer or bye to the desktop that asked
  *
  * Desktops of one account also swap connection candidates here to reach each
- * other across the internet (ForgeDrop 1.4); the files then go directly
+ * other across the internet (DropForge 1.4); the files then go directly
  * between them, never through this server.
  *
- * Codes (ForgeDrop 1.5) introduce two desktops that need not share an
+ * Codes (DropForge 1.5) introduce two desktops that need not share an
  * account, for sending to someone who is not one of your own computers.
  * codes.js explains how; the files still go directly, never through here.
  *
- * People (ForgeDrop 1.7) introduce them by the email of an account instead,
+ * People (DropForge 1.7) introduce them by the email of an account instead,
  * with this server vouching for who is who. people.js explains how; the files
  * still go directly, never through here. From 1.8 a send to someone's account
  * waits for their computers and emails them a link to approve it, whose page
@@ -48,7 +48,7 @@
  * the asking account. The desktop answers it through /signal.
  *
  * A desktop signs in with its offline licence (auth.js), a phone with the
- * customer's Bearer token. Either way the account must own ForgeDrop. The
+ * customer's Bearer token. Either way the account must own DropForge. The
  * pages an email opens sign in with nothing: the token their link carries is
  * the key.
  */
@@ -325,7 +325,7 @@ export function createForgeDropLinkRouter({
 
   /**
    * Who a knock on `address` is for: the account whose verified email it is,
-   * if that account owns ForgeDrop, as { userId, email }, and the desktops of
+   * if that account owns DropForge, as { userId, email }, and the desktops of
    * it the knock lands on now: those that hold a slot, have proved their key
    * and are polling saying they take people, never the desktop knocking. No
    * such account and not an owner come back as nobody, and nobody online as
@@ -669,7 +669,7 @@ export function createForgeDropLinkRouter({
 
   // --------------------------------------------------------------- codes
   //
-  // Desktops only: only activated ForgeDrop computers can open or claim a
+  // Desktops only: only activated DropForge computers can open or claim a
   // code, so guessing at scale costs licences. The two sides of a code may
   // belong to different accounts; codes.js keeps each one's mail in its own.
 
@@ -731,7 +731,7 @@ export function createForgeDropLinkRouter({
   // -------------------------------------------------------------- people
   //
   // Desktops only, like codes. A person's address is the email of the
-  // account their ForgeDrop is activated with; the two sides may belong to
+  // account their DropForge is activated with; the two sides may belong to
   // different accounts, and people.js keeps each one's mail in its own. What
   // this server vouches for (ForgeDrop/docs/people.md, "What is trusted") is
   // read from the database as it is said, never taken from an app.
@@ -759,7 +759,7 @@ export function createForgeDropLinkRouter({
   // wrong with the knock itself, or with the one knocking, is refused. A send
   // to someone's account that says how many files and bytes it sends (1.8)
   // also waits for their computers and emails them, neither of which the
-  // answer shows. One that does not (ForgeDrop 1.7, which gives up after 15 s
+  // answer shows. One that does not (DropForge 1.7, which gives up after 15 s
   // and never ends a knock) knocks only on the desktops there now, as 1.7
   // did: an email about it would promise a transfer that is not coming.
   router.post(

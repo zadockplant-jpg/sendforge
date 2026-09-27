@@ -1,5 +1,5 @@
 /**
- * Checking that a ForgeDrop device holds the identity key it claims.
+ * Checking that a DropForge device holds the identity key it claims.
  *
  * `device_activations.identity_fingerprint` used to be whatever the app sent,
  * so anyone activating their own copy could claim somebody else's device key.
@@ -99,7 +99,7 @@ export function makeChallenge(seedText, { now = Date.now(), nonce = crypto.rando
   return { version: PROOF_VERSION, serverKey: publicHex, challenge: challenge.toString("base64url"), expiresInSeconds: CHALLENGE_SECONDS };
 }
 
-/** ForgeDrop's fingerprint of a raw 32-byte X25519 public key. */
+/** DropForge's fingerprint of a raw 32-byte X25519 public key. */
 export function forgedropFingerprint(publicRaw) {
   const digest = crypto
     .createHash("sha256")

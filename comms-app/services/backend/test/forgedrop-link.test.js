@@ -1,4 +1,4 @@
-// ForgeDrop phone link: the signaling relay a phone's browser and a desktop
+// DropForge phone link: the signaling relay a phone's browser and a desktop
 // use to swap WebRTC offers and answers (ForgeDrop/docs/phone-link.md).
 //
 // The HTTP tests run the real router, the real customer sign-in, real licence
@@ -253,7 +253,7 @@ test("a desktop signs in with its licence, and nothing else will do", async () =
       { signingKey, kid: "fd-test" }
     );
   await refused(mint({}, crypto.randomBytes(32).toString("base64")), 401, "licence_invalid");
-  // Same key signs every licensed product; a Rose Colored Glasses licence is not a ForgeDrop one.
+  // Same key signs every licensed product; a Rose Colored Glasses licence is not a DropForge one.
   await refused(mint({ product: "rose-colored-glasses" }), 401, "licence_invalid");
   await refused(mint({ did: "not-a-uuid" }), 401, "licence_invalid");
   await refused(mint({ exp: Math.floor(clock / 1000) - 60 }), 401, "licence_invalid");
@@ -334,7 +334,7 @@ test("without a usable signing key the desktop side answers 503 link_unavailable
 
 // -------------------------------------------------------------- phone auth
 
-test("a phone signs in with the customer token and must own ForgeDrop", async () => {
+test("a phone signs in with the customer token and must own DropForge", async () => {
   const phone = newClientId();
   const target = devices.studio.address;
 
@@ -354,7 +354,7 @@ test("a phone signs in with the customer token and must own ForgeDrop", async ()
     assert.deepEqual([res.status, res.body], [403, { error: "entitlement_required" }]);
   }
 
-  // A phone's ownership is read per request: buying ForgeDrop works at once.
+  // A phone's ownership is read per request: buying DropForge works at once.
   const fran = people.fran;
   assert.equal((await phonePoll(fran, phone)).status, 403);
   await grantProductEntitlement({ userId: fran.id, productSlug: "forgedrop", source: "test" });
@@ -364,7 +364,7 @@ test("a phone signs in with the customer token and must own ForgeDrop", async ()
 
 // ------------------------------------------------------------ the desktops
 
-test("the desktop list covers every active ForgeDrop machine, online ones first", async () => {
+test("the desktop list covers every active DropForge machine, online ones first", async () => {
   const alice = people.alice;
   const { studio, laptop, basement, old, bobs } = devices;
 

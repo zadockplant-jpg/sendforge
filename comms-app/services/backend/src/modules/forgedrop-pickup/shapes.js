@@ -74,7 +74,7 @@ export function partLength(size, plan, index) {
 
 const FINGERPRINT = /^[0-9a-f]{4}(?:-[0-9a-f]{4}){3}$/;
 
-/** A ForgeDrop fingerprint, "8bca-e027-17b3-b84f", in that spelling; else null. */
+/** A DropForge fingerprint, "8bca-e027-17b3-b84f", in that spelling; else null. */
 export function parseFingerprint(value) {
   if (typeof value !== "string") return null;
   const text = value.trim().toLowerCase();

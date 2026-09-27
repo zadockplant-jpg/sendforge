@@ -29,7 +29,7 @@ export const GRANTABLE_PRODUCTS = Object.freeze({
   tabforge: "TabForge Pro",
   "tabforge-subscription": "TabForge Private Sync",
   "rose-colored-glasses": "Rose Colored Glasses",
-  forgedrop: "ForgeDrop",
+  forgedrop: "DropForge",
   tuneforge: "TuneForge",
 });
 
@@ -98,7 +98,7 @@ export function compCodeCommission(row) {
 }
 
 // The per-sale rates a comp code hands out on products other than TabForge,
-// such as ForgeDrop's affiliate level, keyed by product.
+// such as DropForge's affiliate level, keyed by product.
 export function compCodePerSaleRates(row) {
   const rates = row?.metadata?.flat_rates;
   if (!rates || typeof rates !== "object") return {};
@@ -455,7 +455,7 @@ export async function upsertCompCode({ code, note, maxRedemptions, status, creat
     const cents = Number(perSaleRewardCents);
     metadata.commission = Number.isInteger(cents) && cents > 0 ? { mode: "per_sale", rewardAmountCents: cents } : null;
   }
-  // ForgeDrop's affiliate level on this code: a flat amount per ForgeDrop
+  // DropForge's affiliate level on this code: a flat amount per DropForge
   // sale, applied to the account that redeems it. Null takes it off.
   if (forgedropPerSaleRewardCents !== undefined) {
     const cents = Number(forgedropPerSaleRewardCents);

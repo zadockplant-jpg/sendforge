@@ -3,8 +3,8 @@
  * (ForgeDrop/docs/people.md, "Backend: the person relay" and "Waiting, and
  * the email (1.8)").
  *
- * From ForgeDrop 1.7 a person's address is the email of the SendForge account
- * their ForgeDrop is activated with. A desktop knocks on an address; each of
+ * From DropForge 1.7 a person's address is the email of the SendForge account
+ * their DropForge is activated with. A desktop knocks on an address; each of
  * that account's desktops taking people (router.js finds them) is told who is
  * knocking and gets a session of its own with the knocker. Unlike a code,
  * nothing here proves who is who: sendforge.app vouches for it. The router

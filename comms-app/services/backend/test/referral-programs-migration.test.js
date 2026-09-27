@@ -1,4 +1,4 @@
-// The Rose Colored Glasses and ForgeDrop programmes the migration writes, and
+// The Rose Colored Glasses and DropForge programmes the migration writes, and
 // what the reward engine reads back from them.
 
 import assert from "node:assert/strict";

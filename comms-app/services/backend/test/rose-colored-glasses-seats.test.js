@@ -1,5 +1,5 @@
 // Rose Colored Glasses: one device per purchase, $5 then $4, and $1 per
-// referral to the referrer, paid at the milestones. ForgeDrop's referral
+// referral to the referrer, paid at the milestones. DropForge's referral
 // milestones and affiliate level ride the same checkout path, so they are
 // proved here too.
 //
@@ -223,7 +223,7 @@ function forgeDropCheckout(userId, amountCents = 2000) {
       product_slug: "forgedrop",
       fulfillment_type: "multi_entitlement_cart",
       checkout_items: JSON.stringify([
-        { kind: "product", slug: "forgedrop", entitlementSlug: "forgedrop", displayName: "ForgeDrop", amountCents },
+        { kind: "product", slug: "forgedrop", entitlementSlug: "forgedrop", displayName: "DropForge", amountCents },
       ]),
     },
   };
@@ -385,7 +385,7 @@ test("a customer already paid the old flat $1 is never paid twice", async () => 
   assert.equal(total, 800);
 });
 
-test("ForgeDrop pays $25, $50, $60 and $175 at 5, 15, 25 and 50, and a refund takes a milestone back", async () => {
+test("DropForge pays $25, $50, $60 and $175 at 5, 15, 25 and 50, and a refund takes a milestone back", async () => {
   const fay = await user("faye@example.com", { cash_app_tag: "$faye" });
   await handleCheckoutSessionCompleted(forgeDropCheckout(fay), {});
 
@@ -403,7 +403,7 @@ test("ForgeDrop pays $25, $50, $60 and $175 at 5, 15, 25 and 50, and a refund ta
   assert.equal(await rewardPayoutEligibility(fay, "forgedrop"), true);
 });
 
-test("a ForgeDrop affiliate is paid $10 on every ForgeDrop sale", async () => {
+test("a DropForge affiliate is paid $10 on every DropForge sale", async () => {
   const ace = await user("ace@example.com", { cash_app_tag: "$ace" });
   // An affiliate owns nothing: the owner made them one.
   await db("referral_codes").insert({ id: randomUUID(), user_id: ace, email: "ace@example.com", code: "ACE10", status: "active", metadata: { affiliate: true } });

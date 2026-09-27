@@ -11,7 +11,7 @@
  * webhook (routes/stripe.webhooks.routes.js). The parts here are the only
  * Cloud pickup ones:
  *
- *  - the catalog entries, for ForgeDrop owners only (403 forgedrop_required),
+ *  - the catalog entries, for DropForge owners only (403 forgedrop_required),
  *    and on sale only while R2 is set up (503 pickup_unavailable otherwise,
  *    in billing.routes.js, as every pickup route answers);
  *  - the subscription's metadata, and the words above Checkout's button;
@@ -64,7 +64,7 @@ export const CLOUD_PICKUP_LIVE_STATUSES = Object.freeze([
   "paused",
 ]);
 
-// The ForgeDrop link's ownership check names ForgeDrop the same way.
+// The DropForge link's ownership check names DropForge the same way.
 const FORGEDROP = licensedProduct("forgedrop");
 const TIER_SLUGS = CLOUD_PICKUP_TIERS.map((tier) => tier.slug);
 const norm = (value) => String(value || "").trim().toLowerCase();
@@ -76,7 +76,7 @@ function dollars(cents) {
 
 /**
  * The four tiers as catalog products: a monthly subscription at the tier's
- * price, granting the tier's entitlement, for accounts that own ForgeDrop.
+ * price, granting the tier's entitlement, for accounts that own DropForge.
  */
 export const CLOUD_PICKUP_CATALOG = Object.freeze(
   Object.fromEntries(
@@ -84,14 +84,14 @@ export const CLOUD_PICKUP_CATALOG = Object.freeze(
       tier.slug,
       Object.freeze({
         slug: tier.slug,
-        displayName: `ForgeDrop Cloud pickup — ${tier.label}`,
+        displayName: `DropForge Cloud pickup — ${tier.label}`,
         mode: "subscription",
         unitAmountCents: tier.monthlyCents,
         entitlementSlug: tier.slug,
-        // Only the ForgeDrop desktop app can use a plan.
+        // Only the DropForge desktop app can use a plan.
         requiresEntitlement: FORGEDROP.entitlementSlug || FORGEDROP.slug,
         requiredEntitlementError: "forgedrop_required",
-        requiredEntitlementMessage: "Cloud pickup is for ForgeDrop owners.",
+        requiredEntitlementMessage: "Cloud pickup is for DropForge owners.",
         accountOnly: true,
         cloudPickup: true,
         defaultSuccessPath: CLOUD_PICKUP_SUCCESS_PATH,

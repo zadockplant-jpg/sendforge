@@ -1,7 +1,7 @@
 // Recurring affiliate payouts: the owner's side of the subscription shares.
 //
 // An affiliate earns a share of every paid invoice of the subscriptions they
-// referred: TabForge Private Sync and ForgeDrop Cloud pickup. Each invoice is
+// referred: TabForge Private Sync and DropForge Cloud pickup. Each invoice is
 // one reward_queue row (referral.service.js recordSyncSubscriptionShare and
 // recordCloudPickupShare). This module groups those rows into one statement
 // per affiliate per calendar month (UTC, by when the invoice was paid), which
@@ -74,9 +74,9 @@ export const SUBSCRIPTION_SHARE_PROGRAMS = Object.freeze([
   }),
   Object.freeze({
     slug: CLOUD_PICKUP_SHARE_PRODUCT_SLUG,
-    label: "ForgeDrop Cloud pickup",
+    label: "DropForge Cloud pickup",
     kind: "cloud_pickup_share",
-    gate: "The referrer must be at the ForgeDrop affiliate level.",
+    gate: "The referrer must be at the DropForge affiliate level.",
     gateError: "referrer_not_forgedrop_affiliate",
   }),
 ]);

@@ -16,7 +16,7 @@ export const LINK_LIMITS = Object.freeze({
   // background tabs and change networks under them.
   desktopOnlineMs: 40_000,
   phonePresentMs: 60_000,
-  // A guest is a phone's browser too, on a request's page (ForgeDrop 1.9).
+  // A guest is a phone's browser too, on a request's page (DropForge 1.9).
   guestPresentMs: 60_000,
   licenceCacheMs: 60_000,
   // A page makes a new clientId on every load, so one account's phone
@@ -39,13 +39,13 @@ export const SENDABLE_TYPES = Object.freeze({
   desktop: new Set(["answer", "bye"]),
 });
 
-// Between two desktops of one account (ForgeDrop 1.4, sending over the
+// Between two desktops of one account (DropForge 1.4, sending over the
 // internet): one dials with its connection candidates, the other answers
-// with its own, and either may say bye. The data is ForgeDrop's to read;
+// with its own, and either may say bye. The data is DropForge's to read;
 // here it is only relayed, like SDP.
 export const DESKTOP_TO_DESKTOP_TYPES = new Set(["dial", "dial-answer", "bye"]);
 
-// Codes (ForgeDrop 1.5, ForgeDrop/docs/codes.md): sending to someone who is
+// Codes (DropForge 1.5, ForgeDrop/docs/codes.md): sending to someone who is
 // not one of your own computers. codes.js holds the nameplates and sessions.
 export const CODE_LIMITS = Object.freeze({
   // A code is open for an hour unless its sender asks otherwise; a day at most.
@@ -75,7 +75,7 @@ export const CODE_LIMITS = Object.freeze({
 // key of the identities the PAKE vouched for.
 export const CODE_TYPES = new Set(["pake", "proof", "dial", "dial-answer", "bye"]);
 
-// People (ForgeDrop 1.7, ForgeDrop/docs/people.md): sending to someone by the
+// People (DropForge 1.7, ForgeDrop/docs/people.md): sending to someone by the
 // email of their SendForge account. people.js holds the sessions a knock opens.
 export const PERSON_LIMITS = Object.freeze({
   // A knock's sessions last an hour and carry 64 messages, as a code's do.
@@ -149,7 +149,7 @@ const EMAIL =
   /^(?!\.)(?!.*\.\.)[a-z0-9!#$%&'*+/=?^_`{|}~.-]+(?<!\.)@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
 
 /**
- * A person's address as ForgeDrop writes it, the account's email trimmed and
+ * A person's address as DropForge writes it, the account's email trimmed and
  * in lower case; null for anything that is not an email.
  */
 export function parseEmail(value) {

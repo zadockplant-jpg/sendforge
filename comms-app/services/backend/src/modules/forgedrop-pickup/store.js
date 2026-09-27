@@ -57,7 +57,7 @@ export function createPickupStore(db, { productSlug = "forgedrop" } = {}) {
     },
 
     /**
-     * The active ForgeDrop desktop that proved it holds the key behind this
+     * The active DropForge desktop that proved it holds the key behind this
      * fingerprint. A key activated on two accounts is the same computer;
      * the latest proof names the account.
      */

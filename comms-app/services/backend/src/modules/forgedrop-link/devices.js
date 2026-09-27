@@ -1,5 +1,5 @@
 /**
- * The account's activated ForgeDrop machines, read from device_activations,
+ * The account's activated DropForge machines, read from device_activations,
  * the same rows the account page's device list shows and frees; and, for the
  * person relay, the accounts they belong to.
  */

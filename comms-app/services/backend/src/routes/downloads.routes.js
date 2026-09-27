@@ -13,7 +13,7 @@
  * Paid installers are for buyers only (the owner, 2026-09-27): the site asks
  * POST /:slug/ticket as a signed-in owner and gets a signed ticket that
  * opens GET /:slug?ticket=... for half an hour. Without one, a browser is
- * sent to the product page, where Download opens the purchase. ForgeDrop's
+ * sent to the product page, where Download opens the purchase. DropForge's
  * release notice and the free tools stay open to anyone.
  *
  * Once sendforge-downloads is private, GITHUB_DOWNLOADS_TOKEN (read access to
@@ -39,7 +39,7 @@ export const DOWNLOADS = Object.freeze({
     entitlement: "rose-colored-glasses",
   }),
   forgedrop: Object.freeze({
-    filename: "Install ForgeDrop.exe",
+    filename: "Install DropForge.exe",
     source:
       process.env.DOWNLOAD_SOURCE_FORGEDROP ||
       "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/forgedrop/Install.ForgeDrop.exe",
@@ -52,7 +52,7 @@ export const DOWNLOADS = Object.freeze({
       "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/tuneforge/Install.TuneForge.exe",
     entitlement: "tuneforge",
   }),
-  // ForgeDrop's release notice (forgedrop/core/update.py in the ForgeDrop
+  // DropForge's release notice (forgedrop/core/update.py in the ForgeDrop
   // repo): the app asks here first and GitHub second. The notice is signed
   // with a key this server never holds, so relaying it gives the server no
   // say over what installed copies accept.

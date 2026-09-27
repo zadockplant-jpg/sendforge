@@ -3,7 +3,7 @@
  * holds, sent as `X-ForgeDrop-License: FD1.<payload>.<sig>`.
  *
  * The signature proves the token is ours; it cannot say whether the machine
- * still holds a slot or the account still owns ForgeDrop, so those are read
+ * still holds a slot or the account still owns DropForge, so those are read
  * from the database. A desktop long-polls around the clock while the link is
  * on, so the answer is kept per token for 60 s. Freeing a slot on the account
  * page therefore cuts that desktop's link within a minute.

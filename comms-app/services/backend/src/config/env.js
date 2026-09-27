@@ -47,7 +47,7 @@ export const env = {
   // revocation.
   //
   // One key signs every licensed product; the product is inside the signed
-  // payload, so a ForgeDrop licence can never open Rose Colored Glasses. The
+  // payload, so a DropForge licence can never open Rose Colored Glasses. The
   // FORGEDROP_ names are the original ones and still work.
   licenseSigningKey:
     process.env.LICENSE_SIGNING_KEY ||

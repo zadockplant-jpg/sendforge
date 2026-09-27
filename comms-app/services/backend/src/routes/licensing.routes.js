@@ -188,8 +188,8 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
       return res.status(404).json({ error: "unknown_product" });
     }
     // An app that names its product takes only that product's codes: a
-    // ForgeDrop code typed into TuneForge must not use up a ForgeDrop place
-    // for a licence TuneForge refuses anyway. ForgeDrop's app names none.
+    // DropForge code typed into TuneForge must not use up a DropForge place
+    // for a licence TuneForge refuses anyway. DropForge's app names none.
     if (productSlug && licensedProduct(productSlug)?.slug !== product.slug) {
       return res.status(404).json({ error: "unknown_activation_code" });
     }
@@ -256,7 +256,7 @@ licensingRouter.post("/activate", activateLimiter, async (req, res) => {
 });
 
 /**
- * A challenge for a ForgeDrop device to prove its identity key against, at
+ * A challenge for a DropForge device to prove its identity key against, at
  * activation or later (identityProof.service.js). Needs no account: the
  * challenge proves nothing by itself, and it expires in ten minutes.
  */
@@ -270,7 +270,7 @@ licensingRouter.get("/identity-challenge", identityLimiter, (req, res) => {
 });
 
 /**
- * An already-activated ForgeDrop device proves its key, signing in with the
+ * An already-activated DropForge device proves its key, signing in with the
  * offline licence it holds (the same header the phone link uses).
  */
 licensingRouter.post("/identity", identityLimiter, async (req, res) => {

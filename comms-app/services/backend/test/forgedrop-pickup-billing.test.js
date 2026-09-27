@@ -1,6 +1,6 @@
-// ForgeDrop Cloud pickup billing: the four monthly plans sold through the
+// DropForge Cloud pickup billing: the four monthly plans sold through the
 // shared catalog checkout, the subscription webhook that grants, moves and
-// removes a plan, and the 5% share of every paid invoice for the ForgeDrop
+// removes a plan, and the 5% share of every paid invoice for the DropForge
 // affiliate who brought the customer.
 //
 // Runs the real catalog checkout, the real Stripe event handling, the real
@@ -90,7 +90,7 @@ function catalogLine(tier) {
     unit_amount: tier.monthlyCents,
     recurring: { interval: "month" },
     product_data: {
-      name: `ForgeDrop Cloud pickup — ${tier.label}`,
+      name: `DropForge Cloud pickup — ${tier.label}`,
       metadata: { kind: "subscription", slug: tier.slug, entitlement_slug: tier.slug },
     },
   };
@@ -455,7 +455,7 @@ test("each tier is a catalog subscription at its monthly price, with the catalog
     const item = {
       kind: "subscription",
       slug: tier.slug,
-      displayName: `ForgeDrop Cloud pickup — ${tier.label}`,
+      displayName: `DropForge Cloud pickup — ${tier.label}`,
       entitlementSlug: tier.slug,
       unitAmountCents: tier.monthlyCents,
       quantity: 1,
@@ -514,25 +514,25 @@ test("each tier is a catalog subscription at its monthly price, with the catalog
   assert.deepEqual(
     stripe.state.sessions.map(({ config }) => [config.line_items[0].price_data.unit_amount, config.line_items[0].price_data.product_data.name]),
     [
-      [500, "ForgeDrop Cloud pickup — 100 GB"],
-      [1000, "ForgeDrop Cloud pickup — 250 GB"],
-      [1500, "ForgeDrop Cloud pickup — 500 GB"],
-      [2500, "ForgeDrop Cloud pickup — 1 TB"],
+      [500, "DropForge Cloud pickup — 100 GB"],
+      [1000, "DropForge Cloud pickup — 250 GB"],
+      [1500, "DropForge Cloud pickup — 500 GB"],
+      [2500, "DropForge Cloud pickup — 1 TB"],
     ]
   );
   assert.deepEqual(stripe.state.calls.filter(([name]) => name === "prices.retrieve"), [], "no Stripe Price is ever looked up");
 });
 
-test("only a ForgeDrop owner can buy a plan: anyone else is forgedrop_required, before Stripe is asked anything", async () => {
+test("only a DropForge owner can buy a plan: anyone else is forgedrop_required, before Stripe is asked anything", async () => {
   useStripe();
   const refused = {
     status: 403,
-    body: { error: "forgedrop_required", message: "Cloud pickup is for ForgeDrop owners." },
+    body: { error: "forgedrop_required", message: "Cloud pickup is for DropForge owners." },
   };
   const noah = await signUp("noah");
-  // Another product's licence is not ForgeDrop.
+  // Another product's licence is not DropForge.
   const rosa = await signUp("rosa", { owns: ["rose-colored-glasses"] });
-  // A ForgeDrop purchase that was taken back no longer counts.
+  // A DropForge purchase that was taken back no longer counts.
   const rex = await signUp("rex", { owns: ["forgedrop"] });
   await revokeProductEntitlement(rex.id, "forgedrop");
 
@@ -563,7 +563,7 @@ test("only a ForgeDrop owner can buy a plan: anyone else is forgedrop_required, 
   });
   assert.equal((await checkout(null, { productSlug: "forgedrop-cloud-pickup-100gb" })).status, 401);
 
-  // Once the account owns ForgeDrop, the same request opens Checkout.
+  // Once the account owns DropForge, the same request opens Checkout.
   await grantProductEntitlement({ userId: noah.id, productSlug: "forgedrop", source: "test" });
   const opened = await checkout(noah, { productSlug: "forgedrop-cloud-pickup-1tb" });
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
@@ -890,7 +890,7 @@ test("while a cancelled plan runs out beside the new one, the allowance is the l
 
 // ----------------------------------------------------------- affiliate share
 
-test("every paid Cloud pickup invoice pays the ForgeDrop affiliate 5%, once per invoice however often Stripe sends it", async () => {
+test("every paid Cloud pickup invoice pays the DropForge affiliate 5%, once per invoice however often Stripe sends it", async () => {
   useStripe();
   // Gus referred Ada; Ada, an affiliate who owns nothing, referred Sam.
   const gus = await signUp("gus", { cashApp: "$gus" });
@@ -969,17 +969,17 @@ test("every paid Cloud pickup invoice pays the ForgeDrop affiliate 5%, once per 
   );
 });
 
-test("no share for a referrer below the ForgeDrop affiliate level", async () => {
+test("no share for a referrer below the DropForge affiliate level", async () => {
   useStripe();
   const referrer = async (name, { owns = [], metadata, status = "active" }) => {
     const person = await signUp(name, { owns, cashApp: `$${name}` });
     return { person, code: await referralCode(person, metadata, status) };
   };
-  // Owns ForgeDrop, so holds an ordinary referral code, but is no affiliate.
+  // Owns DropForge, so holds an ordinary referral code, but is no affiliate.
   const owner = await referrer("owner", { owns: ["forgedrop"], metadata: { source: "auto_user_signup" } });
   // Owns TabForge Pro: the Private Sync gate, not this one.
   const pro = await referrer("pro", { owns: ["tabforge"], metadata: { source: "auto_user_signup" } });
-  // An affiliate the owner set to earn nothing on ForgeDrop.
+  // An affiliate the owner set to earn nothing on DropForge.
   const zeroed = await referrer("zeroed", { metadata: { affiliate: true, flat_rates: { forgedrop: 0 } } });
   // An affiliate whose code the owner switched off.
   const retired = await referrer("retired", { metadata: { affiliate: true }, status: "inactive" });
@@ -997,7 +997,7 @@ test("no share for a referrer below the ForgeDrop affiliate level", async () => 
   }
 
   // A comp code's per-sale TabForge rate makes its holder an affiliate, and so
-  // at the ForgeDrop affiliate level too, as it is for ForgeDrop sales.
+  // at the DropForge affiliate level too, as it is for DropForge sales.
   assert.equal(isForgeDropAffiliateCode({ status: "active", metadata: { commission: { mode: "per_sale", rewardAmountCents: 300 } } }), true);
   assert.equal(isForgeDropAffiliateCode({ status: "active", metadata: { affiliate: true, flat_rates: { forgedrop: 700 } } }), true);
   assert.equal(isForgeDropAffiliateCode({ status: "active", metadata: {} }), false);
@@ -1104,7 +1104,7 @@ test("Private Sync, Romancing the Stone and one-off purchases go on as before", 
   await handleStripeEvent(event("customer.subscription.created", rts), stripe);
   assert.deepEqual((await listProductEntitlements(rae.id)).map((row) => row.product_slug), ["romancing-the-stone-subscription"]);
 
-  // A one-off ForgeDrop purchase is still a licence and a referral, never a plan.
+  // A one-off DropForge purchase is still a licence and a referral, never a plan.
   const buyer = await signUp("fd-buyer", { referredBy: pro, code: proCode });
   await handleStripeEvent(
     event("checkout.session.completed", {
@@ -1117,7 +1117,7 @@ test("Private Sync, Romancing the Stone and one-off purchases go on as before", 
         user_id: buyer.id,
         product_slug: "forgedrop",
         fulfillment_type: "multi_entitlement_cart",
-        checkout_items: JSON.stringify([{ kind: "product", slug: "forgedrop", entitlementSlug: "forgedrop", displayName: "ForgeDrop" }]),
+        checkout_items: JSON.stringify([{ kind: "product", slug: "forgedrop", entitlementSlug: "forgedrop", displayName: "DropForge" }]),
       },
     }),
     {}
@@ -1126,7 +1126,7 @@ test("Private Sync, Romancing the Stone and one-off purchases go on as before", 
   assert.deepEqual(
     (await db("reward_queue").where({ user_id: pro.id }).orderBy("product_slug")).map((row) => [row.product_slug, row.reward_amount_cents]),
     [["forgedrop", 1000], ["tabforge-subscription", 25]],
-    "the affiliate's $10 ForgeDrop sale, as before"
+    "the affiliate's $10 DropForge sale, as before"
   );
 
   // A Checkout event never grants a plan on its own; only the subscription does.
@@ -1183,12 +1183,12 @@ test("TuneForge sells once for $20, and a second purchase is refused", async () 
   const again = await checkout(owner, { productSlug: "tuneforge" });
   assert.equal(again.status, 409);
   assert.equal(again.body.error, "already_owned");
-  // The flyer's code is ForgeDrop's alone.
+  // The flyer's code is DropForge's alone.
   assert.equal((await checkout(buyer, { productSlug: "tuneforge", promoCode: "ART25" })).body.error,
     "promo_not_for_product");
 });
 
-test("ART25 takes 25% off ForgeDrop at the catalog's own price, and nothing else", async () => {
+test("ART25 takes 25% off DropForge at the catalog's own price, and nothing else", async () => {
   // The art-competition flyer's code (2026-09-27): no Stripe coupon, the
   // inline price is lowered, and a code that is not good is refused plainly.
   useStripe();

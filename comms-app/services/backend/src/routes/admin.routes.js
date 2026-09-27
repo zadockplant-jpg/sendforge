@@ -591,7 +591,7 @@ async function applyRewardStatusChange(req, rewardId, data, outer = null) {
           ))
         ) {
           // Each share's gate is its own programme's: TabForge Pro for a
-          // Private Sync share, the ForgeDrop affiliate level for Cloud pickup.
+          // Private Sync share, the DropForge affiliate level for Cloud pickup.
           throw rewardStatusError(
             409,
             isCloudPickupShareReward(existing)

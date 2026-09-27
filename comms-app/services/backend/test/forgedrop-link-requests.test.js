@@ -1,4 +1,4 @@
-// ForgeDrop requests for files: a desktop asks someone for files by the email
+// DropForge requests for files: a desktop asks someone for files by the email
 // of their SendForge account, the request is emailed to them as a link, and
 // the page it opens on their phone reaches the asking desktop the way the
 // phone link does, as a guest of the asking account
@@ -124,7 +124,7 @@ before(async () => {
   await db.schema.alterTable("users", (t) => t.integer("auth_version").defaultTo(0));
 
   // Alice asks; Bob is asked. Erin's email is not verified, Carol does not
-  // own ForgeDrop, and Legacy's email was stored before emails were lower case.
+  // own DropForge, and Legacy's email was stored before emails were lower case.
   const alice = await signUp("alice");
   const bob = await signUp("bob");
   const erin = await signUp("erin", { verified: false });
@@ -829,7 +829,7 @@ test("the request email says who is asking and their message as plain text, and 
 
   const { body } = sent[0];
   assert.equal(body.subject, "michael@example.com is asking you for files");
-  assert.deepEqual(body.from, { email: "referrals@sendforge.app", name: "ForgeDrop" });
+  assert.deepEqual(body.from, { email: "referrals@sendforge.app", name: "DropForge" });
   assert.deepEqual(body.personalizations[0].to, [{ email: "bob@example.com" }]);
   assert.equal(body.personalizations[0].custom_args.sf_message_kind, "forgedrop-file-request");
   assert.equal(body.personalizations[0].custom_args.sf_message_ref, "R".repeat(22), "the request, never the token");
@@ -848,15 +848,16 @@ The big ones, please.
 Send files:
 ${requestUrl}
 
-On a phone, the link opens a page ready to choose files; on a computer, it opens ForgeDrop. The files go straight to their computer.
+On a phone, the link opens a page ready to choose files; on a computer, it opens DropForge. The files go straight to their computer.
 
-You're getting this because someone used ForgeDrop to ask for files at this email address. Need help? Contact support@sendforge.app.`
+You're getting this because someone used DropForge to ask for files at this email address. Need help? Contact support@sendforge.app.`
   );
   assert.match(html, /<h1 [^>]*>michael@example\.com is asking you for files<\/h1>/);
   assert.match(html, /<strong>From:<\/strong> michael@example\.com \(LETSGOSLOWER\)<\/p>/);
   assert.match(html, />Could you send the photos from Saturday\?<br>The big ones, please\.<\/div>/);
   assert.ok(html.includes(`<a href="${requestUrl}" `), "the button links to the page");
   assert.match(html, />Send files<\/a>/);
+  assert.doesNotMatch(text + html, /forgedrop/i, "the product is DropForge now");
 
   // Their message is text, never HTML: nothing in it becomes a tag or a link.
   const [hostileText, hostileHtml] = sent[1].body.content.map((part) => part.value);

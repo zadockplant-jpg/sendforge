@@ -1,4 +1,4 @@
-// ForgeDrop codes: the relay that introduces two desktops through a short
+// DropForge codes: the relay that introduces two desktops through a short
 // code, for sending to someone who is not one of your own computers
 // (ForgeDrop/docs/codes.md, "Backend: the code relay").
 //

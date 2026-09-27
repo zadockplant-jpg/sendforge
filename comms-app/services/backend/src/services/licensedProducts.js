@@ -11,7 +11,7 @@
  *
  * Two ways a product counts its devices:
  *
- *  - A fixed `deviceLimit`: one purchase covers that many machines (ForgeDrop,
+ *  - A fixed `deviceLimit`: one purchase covers that many machines (DropForge,
  *    five).
  *  - `seatBased`: every purchase is one device, and the limit is the number of
  *    paid seats on the account (see productSeats.service.js). `deviceLimit` is
@@ -25,7 +25,7 @@
 export const LICENSED_PRODUCTS = Object.freeze([
   Object.freeze({
     slug: "forgedrop",
-    displayName: "ForgeDrop",
+    displayName: "DropForge",
     entitlementSlug: "forgedrop",
     deviceLimit: 5,
     seatBased: false,
@@ -39,7 +39,7 @@ export const LICENSED_PRODUCTS = Object.freeze([
     seatBased: true,
     codePrefix: "RC",
   }),
-  // One-time $20 like ForgeDrop, five devices (the owner, 2026-09-27). The
+  // One-time $20 like DropForge, five devices (the owner, 2026-09-27). The
   // app activates by signing in to the SendForge account, or with a code.
   Object.freeze({
     slug: "tuneforge",
@@ -57,7 +57,7 @@ export function licensedProduct(slug) {
   return BY_SLUG.get(String(slug || "").trim().toLowerCase()) || null;
 }
 
-// ForgeDrop codes predate per-product prefixes, so it is the fallback.
+// DropForge codes predate per-product prefixes, so it is the fallback.
 export function codePrefixFor(slug) {
   return licensedProduct(slug)?.codePrefix || "FD";
 }

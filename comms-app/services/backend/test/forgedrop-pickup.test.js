@@ -1,4 +1,4 @@
-// ForgeDrop Cloud pickup: files a desktop sealed and left in R2 for another
+// DropForge Cloud pickup: files a desktop sealed and left in R2 for another
 // computer, deleted once picked up or after 8 days (ForgeDrop/docs/pickup.md).
 //
 // The HTTP tests run the real router, real licences minted by the activation
@@ -452,7 +452,7 @@ test("/status tells the website whether Cloud pickup is offered, with no sign-in
 
 // ------------------------------------------------------------------- sign-in
 
-test("every route is for a desktop signed in with its ForgeDrop licence", async () => {
+test("every route is for a desktop signed in with its DropForge licence", async () => {
   const id = randomUUID();
   for (const [method, path] of ROUTES(id)) {
     const body = method === "POST" ? {} : undefined;
@@ -1079,7 +1079,7 @@ test("a link's pickup is for any licensed desktop that knows its id", async () =
   const links = await as(carolPc).get(id);
   assert.equal(links.status, 200);
   assert.deepEqual(await getFrom(links.body.objects[0]), files[0]);
-  // Without ForgeDrop, turned away before the id is even looked at.
+  // Without DropForge, turned away before the id is even looked at.
   const erin = await as(erinPc).get(id);
   assert.deepEqual([erin.status, erin.body], [403, { error: "entitlement_required" }]);
 
@@ -1140,7 +1140,7 @@ test("the recipient is emailed only at a verified address, and a failed email do
         entry.meta.reason === "email_not_verified"
     )
   );
-  // Frank's ForgeDrop lists it all the same.
+  // Frank's DropForge lists it all the same.
   assert.deepEqual(
     (await as(frankPc).waiting()).body.pickups.map((pickup) => pickup.id),
     [unverified.id]
@@ -1197,20 +1197,22 @@ test("the email names the sending computer and when the files go, and nothing el
 
   assert.equal(sent[0].url, "https://api.sendgrid.com/v3/mail/send");
   const { body } = sent[0];
-  assert.equal(body.subject, "Files are waiting for you in ForgeDrop");
-  assert.deepEqual(body.from, { email: "referrals@sendforge.app", name: "ForgeDrop" });
+  assert.equal(body.subject, "Files are waiting for you in DropForge");
+  assert.deepEqual(body.from, { email: "referrals@sendforge.app", name: "DropForge" });
   assert.deepEqual(body.personalizations[0].to, [{ email: "bob@example.com" }]);
   assert.equal(body.personalizations[0].custom_args.sf_message_kind, "forgedrop-pickup-waiting");
   assert.equal(body.personalizations[0].custom_args.sf_message_ref, "pickup-1");
   const [text, html] = body.content.map((part) => part.value);
-  assert.match(text, /^Files are waiting for you in ForgeDrop\.\n\nFrom: Studio <b>PC<\/b> Bcc: someone\n/);
+  assert.match(text, /^Files are waiting for you in DropForge\.\n\nFrom: Studio <b>PC<\/b> Bcc: someone\n/);
   assert.match(text, /on October 3, 2026 at 2:05 PM UTC if they aren't\./);
   assert.match(html, /<strong>From:<\/strong> Studio &lt;b&gt;PC&lt;\/b&gt; Bcc: someone<\/p>/);
   assert.match(html, /October 3, 2026 at 2:05 PM UTC/);
+  assert.match(html, />DROPFORGE CLOUD PICKUP<\/p>/);
+  assert.doesNotMatch(text + html, /forgedrop/i, "the product is DropForge now");
   assert.doesNotMatch(text + html, /https?:\/\//, "no links to follow");
 
   const unnamed = sent[1].body.content[0].value;
-  assert.match(unnamed, /From: another ForgeDrop computer\n/);
+  assert.match(unnamed, /From: another DropForge computer\n/);
 });
 
 // ------------------------------------------------------------------- sweep

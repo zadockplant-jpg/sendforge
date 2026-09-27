@@ -415,7 +415,7 @@ export function createPickupService({ db, r2, store, tierOf, sendWaitingEmail, n
         pickupId: row.id,
       });
     } catch (error) {
-      // The files are there either way, and the recipient's ForgeDrop lists them.
+      // The files are there either way, and the recipient's DropForge lists them.
       log("error", "forgedrop_pickup_email_failed", { pickupId: row.id, message: describe(error) });
     }
   }

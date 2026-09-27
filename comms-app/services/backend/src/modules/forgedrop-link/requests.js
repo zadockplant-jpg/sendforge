@@ -3,7 +3,7 @@
  * (1.9)").
  *
  * A desktop asks someone for files by the email of their SendForge account.
- * When the address is a verified account that owns ForgeDrop, the request is
+ * When the address is a verified account that owns DropForge, the request is
  * kept here for a day, for any number of sends, and emailed to them with a
  * link that carries its token after the "#". On a phone the link opens a page
  * that talks to the asking desktop the way the phone link does, as a guest
@@ -93,7 +93,7 @@ export function createRequestStore({
     /**
      * `asker` asks for files: a request id, the same way whether or not
      * anyone has the address. With `keep` (the address is a verified
-     * account that owns ForgeDrop) it is kept for a day, with a token for
+     * account that owns DropForge) it is kept for a day, with a token for
      * its email's link. One desktop keeps so many; the oldest makes room,
      * and its link stops working.
      */

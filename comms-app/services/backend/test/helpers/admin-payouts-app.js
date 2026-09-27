@@ -18,7 +18,7 @@ export const DAY = 24 * 60 * 60 * 1000;
 /**
  * Makes accounts: `owns` products, a Cash App tag (claimed unless told not
  * to be), the account that referred them, and `affiliate` for a code on
- * affiliate terms, which is the ForgeDrop affiliate level.
+ * affiliate terms, which is the DropForge affiliate level.
  */
 export function makePeople({ db, grantProductEntitlement, ensureAffiliateReferralCode, cashAppTagKey }) {
   let count = 0;
