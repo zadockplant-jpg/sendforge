@@ -80,7 +80,7 @@ test('an invite is stored before it is mailed and carries the referrer link', as
   assert.equal(referral.status, 'invited');
   assert.equal(referral.notification_status, 'accepted');
   assert.equal(sent.length, 1);
-  assert.match(sent[0].link, /^https:\/\/jayje\.com\/\?ref=[A-Z0-9]{8}$/);
+  assert.match(sent[0].link, /^https:\/\/jayje\.com\/services\/\?ref=[A-Z0-9]{8}$/);
   const body = inviteBody(sent[0], { fromEmail: 'referrals@sendforge.app' });
   assert.match(body.subject, /5% off handyman services/);
   assert.equal(body.personalizations[0].to[0].email, 'friend@example.com');

@@ -17,11 +17,13 @@ import { documentPdf } from './pdf.js';
 import { createPortalState } from './state.js';
 import { createReferrals } from './referrals.js';
 import { createInviteMailer } from './referral-mail.js';
+import { createTemplates } from './templates.js';
 
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
 const siteUrl=process.env.JAYJE_SITE_URL||'https://jayje.com';
 const referrals=createReferrals({db,siteUrl,mail:createInviteMailer()});
 const service=createPortalService(db,referrals);
+const templates=createTemplates({db,audit:service.audit});
 const stateStore=createPortalState(db);
 const google=createGoogleAuth({db,stateStore});
 const adminAuth=createJayjeAdminAuth({db,sendCode:sendJayjeAdminCodeEmail});
@@ -110,6 +112,11 @@ const asClient=async req=>{
 jayjePortalRouter.get('/referrals',wrap(async(req,res)=>res.json(await referrals.summary((await asClient(req)).id))));
 jayjePortalRouter.post('/referrals/invite',wrap(async(req,res)=>res.status(201).json(await referrals.invite(await asClient(req),req.body))));
 jayjePortalRouter.post('/referrals/claim',wrap(async(req,res)=>res.json(await referrals.claim(await asClient(req),req.body))));
+// Saved quote and invoice templates belong to the business, not to one client.
+jayjePortalRouter.get('/templates',admin,wrap(async(_req,res)=>res.json(await templates.list())));
+jayjePortalRouter.post('/templates',admin,wrap(async(req,res)=>res.status(201).json(await templates.create(req.actor,req.body))));
+jayjePortalRouter.post('/templates/:id',admin,wrap(async(req,res)=>res.json(await templates.update(req.actor,req.params.id,req.body))));
+jayjePortalRouter.post('/templates/:id/delete',admin,wrap(async(req,res)=>res.json(await templates.remove(req.actor,req.params.id))));
 jayjePortalRouter.post('/documents',admin,wrap(async(req,res)=>res.status(201).json(await service.createDocument(req.actor,req.body))));
 jayjePortalRouter.get('/documents/:id',wrap(async(req,res)=>res.json(await service.document(req.actor,req.params.id))));
 jayjePortalRouter.post('/documents/:id/action',wrap(async(req,res)=>res.json(await service.action(req.actor,req.params.id,req.body?.action))));
