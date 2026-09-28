@@ -46,8 +46,14 @@ before(async () => {
     },
     hasEntitlement: async (userId, product) => userId === OWNER && ["forgedrop", "rose-colored-glasses"].includes(product),
     siteUrl: "https://sendforge.app",
+    // The install tokens' own tests use a database (install-tokens.test.js).
+    installTokenFor: async ({ userId, slug }) => (userId === OWNER && slug === "forgedrop" ? "K7Q2M9XD" : null),
+    redeemToken: async (token) => (token === "K7Q2M9XD"
+      ? { productSlug: "forgedrop", activationCode: "FD-ABCD-EFGH-JKLM" }
+      : { error: token ? "unknown_install_token" : "invalid_input" }),
   });
   const app = express();
+  app.use(express.json());
   app.use("/v1/downloads", router);
   server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -122,8 +128,27 @@ test("an owner gets a ticket from the site; anyone else is told to buy", async (
   assert.ok(Date.parse(body.expiresAt) - Date.now() > 29 * 60 * 1000, "lasts half an hour");
   const res = await fetch(`${base}/v1/downloads/forgedrop?ticket=${encodeURIComponent(body.ticket)}`);
   assert.equal(res.status, 200);
-  assert.match(res.headers.get("content-disposition"), /filename="Install DropForge\.exe"/);
+  // The buyer's own copy: its name carries the token that fills in the code.
+  assert.match(res.headers.get("content-disposition"), /filename="Install DropForge \(K7Q2M9XD\)\.exe"/);
   assert.deepEqual(Buffer.from(await res.arrayBuffer()), FILE);
+});
+
+test("the DropForge app trades the token in its installer's name for the activation code", async () => {
+  const trade = (body) => fetch(`${base}/v1/downloads/install-token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const res = await trade({ token: "K7Q2M9XD" });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await res.json(), { ok: true, productSlug: "forgedrop", activationCode: "FD-ABCD-EFGH-JKLM" });
+  assert.equal((await trade({ token: "AAAAAAAA" })).status, 404);
+  assert.deepEqual(await (await trade({})).json(), { error: "invalid_input" });
+  // Rose Colored Glasses signs in instead, so its file keeps its plain name.
+  const rcg = await fetch(`${base}/v1/downloads/rose-colored-glasses?ticket=${encodeURIComponent(ticketFor("rose-colored-glasses"))}`);
+  assert.match(rcg.headers.get("content-disposition"), /filename="Install Rose Colored Glasses\.exe"/);
+  await rcg.arrayBuffer();
 });
 
 test("DropForge's release notice is relayed for its updater, to anyone", async () => {

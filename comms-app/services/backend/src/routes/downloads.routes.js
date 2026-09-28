@@ -16,6 +16,10 @@
  * sent to the product page, where Download opens the purchase. DropForge's
  * release notice and the free tools stay open to anyone.
  *
+ * A DropForge buyer's copy is named "Install DropForge (TOKEN).exe". At first
+ * run the app trades TOKEN, once, at POST /install-token for the activation
+ * code it would otherwise ask for (installTokens.service.js).
+ *
  * Once sendforge-downloads is private, GITHUB_DOWNLOADS_TOKEN (read access to
  * that repository's contents) lets fetchReleaseAsset reach the files through
  * GitHub's releases API. Without it the public links are used, as before.
@@ -27,7 +31,9 @@ import { Router } from "express";
 import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { createRateLimiter } from "../middleware/rateLimit.js";
+import { getOrCreateActivationCode } from "../services/deviceActivation.service.js";
 import { hasProductEntitlement } from "../services/entitlement.service.js";
+import { installTokenForTicket, redeemInstallToken } from "../services/installTokens.service.js";
 import { log, getRequestId } from "../utils/logger.js";
 
 export const DOWNLOADS = Object.freeze({
@@ -40,6 +46,9 @@ export const DOWNLOADS = Object.freeze({
   }),
   forgedrop: Object.freeze({
     filename: "Install DropForge.exe",
+    // A buyer's copy carries a one-time install token that fills in their
+    // activation code (installTokens.service.js).
+    personalFilename: (token) => `Install DropForge (${token}).exe`,
     source:
       process.env.DOWNLOAD_SOURCE_FORGEDROP ||
       "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/forgedrop/Install.ForgeDrop.exe",
@@ -201,6 +210,8 @@ export function createDownloadsRouter({
   hasEntitlement = hasProductEntitlement,
   fetchAsset = fetchReleaseAsset,
   siteUrl = env.publicSiteUrl,
+  installTokenFor = installTokenForTicket,
+  redeemToken = (token) => redeemInstallToken(token, { hasEntitlement, activationCodeFor: getOrCreateActivationCode }),
 } = {}) {
   const router = Router();
 
@@ -215,6 +226,34 @@ export function createDownloadsRouter({
     windowMs: 60 * 1000,
     max: 30,
     message: "too_many_downloads",
+  });
+  const installTokenLimiter = createRateLimiter({
+    name: "install-tokens",
+    windowMs: 10 * 60 * 1000,
+    max: 20,
+    message: "too_many_attempts",
+  });
+
+  // The DropForge app, on first run, trades the token in its installer's
+  // name for the activation code it would otherwise ask for.
+  router.post("/install-token", installTokenLimiter, async (req, res) => {
+    let result;
+    try {
+      result = await redeemToken(req.body?.token);
+    } catch (error) {
+      log("error", "install_token_redeem_failed", {
+        requestId: getRequestId(req),
+        message: String(error?.message || error),
+      });
+      return res.status(503).json({ error: "install_tokens_unavailable" });
+    }
+    if (result.error === "invalid_input") return res.status(400).json({ error: "invalid_input" });
+    if (result.error === "unknown_install_token") return res.status(404).json({ error: "unknown_install_token" });
+    if (result.error === "entitlement_required") {
+      return res.status(403).json({ error: "entitlement_required", productSlug: result.productSlug });
+    }
+    res.set("Cache-Control", "no-store");
+    return res.json({ ok: true, productSlug: result.productSlug, activationCode: result.activationCode });
   });
 
   // A signed-in owner's pass to the installer they bought.
@@ -243,12 +282,29 @@ export function createDownloadsRouter({
     const entry = DOWNLOADS[slug];
     if (!entry) return res.status(404).json({ error: "unknown_download" });
 
-    if (entry.entitlement && !readDownloadTicket(req.query.ticket, slug)) {
+    const holder = entry.entitlement ? readDownloadTicket(req.query.ticket, slug) : null;
+    if (entry.entitlement && !holder) {
       // Bought on the site first: a browser lands where Download opens the purchase.
       if (req.accepts(["json", "html"]) === "html") {
         return res.redirect(302, `${siteUrl}/products/${slug}/index.html#download`);
       }
       return res.status(403).json({ error: "purchase_required" });
+    }
+
+    // The buyer's own copy, named with its install token. Without one the
+    // installer asks for the code, so a failure here costs only that.
+    let filename = entry.filename;
+    if (entry.personalFilename && holder) {
+      try {
+        const token = await installTokenFor({ userId: holder.userId, slug, ticket: String(req.query.ticket) });
+        if (token) filename = entry.personalFilename(token);
+      } catch (error) {
+        log("error", "install_token_issue_failed", {
+          requestId: getRequestId(req),
+          slug,
+          message: String(error?.message || error),
+        });
+      }
     }
 
     let upstream;
@@ -274,7 +330,7 @@ export function createDownloadsRouter({
 
     res.status(upstream.status);
     res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("Content-Disposition", contentDisposition(entry.filename));
+    res.setHeader("Content-Disposition", contentDisposition(filename));
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     for (const name of PASSED_THROUGH) {
