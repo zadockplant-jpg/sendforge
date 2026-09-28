@@ -18,9 +18,15 @@
  * referral code, the keyed hash of that address when it is not a paid one
  * (freeTransfers.js), and the clientId that claimed it.
  *
- * One free received transfer per person: while a page holds one room for a
- * person who is not a paid account, no other room for that person (from any
- * sender) can be claimed. The rooms are indexed by that keyed hash for it.
+ * One free received transfer per person. Of the rooms for a person who is
+ * not a paid account, one at a time holds them: the room claimed last. It
+ * holds them only while its sender's page is there (present, as store.js
+ * keeps it); meanwhile no other room for that person (from any sender) can
+ * be claimed. A room whose sender went away, its connection failed or its
+ * sender left without ending it, stops holding them at once, and never
+ * blocks their next link. If it comes back while another room holds them,
+ * its page can only take them back as a new claim would, once that room no
+ * longer holds them.
  *
  * A room's id is the capability to join it, as a request's token is: it is
  * never logged.
@@ -39,6 +45,9 @@ const partyOf = ({ userId, address }) => ({ userId, address });
 
 export function createShareStore({
   now = Date.now,
+  // Whether a sending page is there now (store.js's isPresent). A room holds
+  // its person only while it is; the router passes the real one.
+  present = () => true,
   shareMs = SHARE_LIMITS.shareMs,
   sharesPerAccount = SHARE_LIMITS.sharesPerAccount,
   sweepEveryMs = LINK_LIMITS.sweepEveryMs,
@@ -52,8 +61,8 @@ export function createShareStore({
   const shares = new Map();
   /** account -> ids of its open rooms, oldest first */
   const kept = new Map();
-  /** a person who is not a paid account (their keyed hash) -> ids of the open rooms for them */
-  const recipients = new Map();
+  /** a person who is not a paid account (their keyed hash) -> the room claimed for them last */
+  const holders = new Map();
 
   /** 16 random bytes, 22 base64url characters, never one in use. */
   function newId() {
@@ -66,9 +75,7 @@ export function createShareStore({
 
   function forget(share) {
     shares.delete(share.id);
-    const same = recipients.get(share.recipient);
-    same?.delete(share.id);
-    if (same && !same.size) recipients.delete(share.recipient);
+    if (share.recipient !== null && holders.get(share.recipient) === share.id) holders.delete(share.recipient);
     const ids = kept.get(share.owner.userId);
     if (!ids) return;
     const index = ids.indexOf(share.id);
@@ -86,18 +93,26 @@ export function createShareStore({
   }
 
   /**
-   * Whether a page holds another open room for the person `share` is for,
-   * when that person is not a paid account. A paid account's rooms never are.
+   * Whether another room holds the person `share` is for, when that person
+   * is not a paid account: the room claimed for them last, while it lasts and
+   * its sender's page is there. A paid account's rooms never are.
    */
   function contested(share, at) {
     if (share.recipient === null) return false;
-    for (const id of [...(recipients.get(share.recipient) ?? [])]) {
-      if (id === share.id) continue;
-      const other = live(id, at);
-      if (other && other.guest !== null) return true;
-    }
-    return false;
+    const id = holders.get(share.recipient);
+    if (id === undefined || id === share.id) return false;
+    const holder = live(id, at);
+    return Boolean(holder) && present(holder.owner.userId, holder.owner.address);
   }
+
+  /**
+   * Whether `clientId` claiming the room, or offering on it, takes its person:
+   * the room's first claim, or, with an offer, its own page coming back to a
+   * room that no longer holds them. Never for a paid account's room.
+   */
+  const takes = (share, clientId, offer) =>
+    share.recipient !== null &&
+    (share.guest === null || (offer && share.guest === clientId && holders.get(share.recipient) !== share.id));
 
   function sweep() {
     const at = now();
@@ -141,10 +156,6 @@ export function createShareStore({
       shares.set(share.id, share);
       if (!kept.has(userId)) kept.set(userId, []);
       kept.get(userId).push(share.id);
-      if (share.recipient !== null) {
-        if (!recipients.has(share.recipient)) recipients.set(share.recipient, new Set());
-        recipients.get(share.recipient).add(share.id);
-      }
       return { share: share.id };
     },
 
@@ -154,9 +165,16 @@ export function createShareStore({
     },
 
     /**
-     * Whether the room is for a person who is not a paid account and a page
-     * holds another open room for them now: a claim of it would be refused.
+     * Whether an offer from `clientId` on the room would take its person (a
+     * first claim, or its page coming back to a room that lost them), and
+     * so must be checked first.
      */
+    taking(id, clientId) {
+      const share = live(id, now());
+      return Boolean(share) && takes(share, clientId, true);
+    },
+
+    /** Whether another room holds the person this room is for: taking them would be refused. */
     contested(id) {
       const at = now();
       const share = live(id, at);
@@ -166,20 +184,23 @@ export function createShareStore({
     /**
      * Claim a room for a page's clientId: the first to claim it has it, and
      * claiming it again is the same as once. Any other clientId is refused
-     * with share_taken, and a room that is over is share_gone. A room for a
-     * person who is not a paid account cannot be claimed while a page holds
-     * another room for them (free_transfer_used). That is checked here, with
-     * the claim, so two pages can never hold two such rooms at once.
+     * with share_taken, and a room that is over is share_gone. A claim, or an
+     * offer (`offer`, the default) from the page coming back to a room that
+     * lost its person, takes the person, unless another room holds them
+     * (free_transfer_used). That is checked here, with the claim, so two
+     * rooms can never hold one person at once.
      */
-    claim(id, clientId) {
+    claim(id, clientId, { offer = true } = {}) {
       const at = now();
       const share = live(id, at);
       if (!share) return { ok: false, error: "share_gone" };
-      if (share.guest === null) {
+      if (share.guest !== null && share.guest !== clientId) return { ok: false, error: "share_taken" };
+      if (takes(share, clientId, offer)) {
         if (contested(share, at)) return { ok: false, error: "free_transfer_used" };
-        share.guest = clientId;
+        holders.set(share.recipient, share.id);
       }
-      return share.guest === clientId ? { ok: true } : { ok: false, error: "share_taken" };
+      share.guest = clientId;
+      return { ok: true };
     },
 
     /**

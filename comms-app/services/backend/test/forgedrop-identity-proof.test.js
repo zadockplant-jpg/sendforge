@@ -135,7 +135,11 @@ test("a proof from the key's holder verifies; everything else is refused", () =>
   // A challenge we did not make, or one altered on the way.
   const other = makeChallenge(crypto.randomBytes(32).toString("base64")).challenge;
   assert.equal(check({ challenge: other }), "challenge_invalid");
-  assert.equal(check({ challenge: `${challenge.slice(0, -2)}AA` }), "challenge_invalid");
+  // Its last two characters changed, to "BA" when they were "AA" already,
+  // so it always differs (1 random challenge in 256 ended in "AA").
+  const altered = `${challenge.slice(0, -2)}${challenge.endsWith("AA") ? "BA" : "AA"}`;
+  assert.notEqual(altered, challenge);
+  assert.equal(check({ challenge: altered }), "challenge_invalid");
   assert.equal(check({ challenge: "not base64url!!" }), "challenge_invalid");
   assert.equal(check({ publicKeyHex: "zz" }), "identity_key_invalid");
   // A low-order key makes an all-zero secret that anyone could compute.

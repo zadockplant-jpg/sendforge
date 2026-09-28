@@ -220,10 +220,13 @@ export function createForgeDropLinkRouter({
       onError: (error) =>
         log("error", "forgedrop_link_request_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
+  // A room holds its person only while its sending page is there, as
+  // /share/open's "online" says.
   const shares =
     givenShares ||
     createShareStore({
       now,
+      present: (userId, address) => store.isPresent(userId, address),
       onError: (error) =>
         log("error", "forgedrop_link_share_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
@@ -1095,7 +1098,8 @@ export function createForgeDropLinkRouter({
   // transfer, however the address is written (freeTransfers.js). Once a
   // transfer through a room for them has finished, either page says so, and
   // a new room for them is refused, as is the first offer on one made before.
-  // A page can hold only one room for such a person at a time.
+  // One room at a time holds such a person, and only while its sender's page
+  // is there (shares.js).
 
   /**
    * Whether an address is a paid account: a verified account that owns
@@ -1248,13 +1252,15 @@ export function createForgeDropLinkRouter({
       const claiming = share.guest === null;
       if (claiming && body.type !== "offer") return res.status(202).json({ ok: true });
 
-      // One free received transfer per person. An offer that would claim a
-      // room for someone who is not a paid account is refused while a page
-      // holds another room for them, and once their free transfer is used.
-      // The page that already holds this room is never asked again, so it
-      // can offer anew. Nothing is used by a claim: only a finished transfer
-      // uses it.
-      if (claiming && !share.paid) {
+      // One free received transfer per person. An offer that would take a
+      // room's person, who is not a paid account, is refused while another
+      // room holds them (claimed, its sender's page there), and once their
+      // free transfer is used. That is a room's first claim, or its page
+      // coming back to a room that lost them while its sender was away. The
+      // room that holds them never is asked again, so its page can offer
+      // anew. Nothing is used by a claim: only a finished transfer uses it.
+      const offer = body.type === "offer";
+      if (offer && shares.taking(share.id, body.clientId)) {
         if (shares.contested(share.id)) return refuse(res, "free_transfer_used");
         let used;
         try {
@@ -1267,11 +1273,11 @@ export function createForgeDropLinkRouter({
 
       // Only to the page that made the room, while it is there. An offer it
       // cannot hear claims nothing. The claim checks again, at once, that no
-      // other page holds a room for the same person, so two pages offering
-      // together cannot both have one.
+      // other room holds the same person, so two pages offering together
+      // cannot both have them.
       const { userId, address } = share.owner;
       if (!store.isPresent(userId, address)) return res.status(404).json({ error: "sender_offline" });
-      const claimed = shares.claim(share.id, body.clientId);
+      const claimed = shares.claim(share.id, body.clientId, { offer });
       if (!claimed.ok) return refuse(res, claimed.error);
 
       const guest = `guest:${body.clientId}`;
