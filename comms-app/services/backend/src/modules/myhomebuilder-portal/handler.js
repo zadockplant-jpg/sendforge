@@ -97,9 +97,12 @@ import {
   parseManualPayment,
   todayInMichigan
 } from "./billing.js";
+import { formatDate, money } from "./format.js";
 import { isPdf, signDocument } from "./pdf.js";
+import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record } from "./books.js";
 import {
   adminBillingPage,
+  adminBooksPage,
   adminDashboardPage,
   adminRequestPage,
   adminTemplatesPage,
@@ -266,6 +269,8 @@ const NOTICES = {
   "invoice-deleted": { text: "Invoice deleted. Its link no longer works." },
   "quote-deleted": { text: "Quote deleted. Its link no longer works." },
   renumbered: { text: "Invoice numbers were updated to keep them in date order." },
+  "books-corrected": { text: "Corrections posted. The books balance again." },
+  "books-balanced": { text: "The books already balance; nothing needed correcting." },
   "delete-processing": { text: "A bank payment for this invoice is still processing, so it can be deleted once the payment finishes.", tone: "error" },
   "name-required": { text: "Enter your name to accept the quote.", tone: "error" },
   "files-not-configured": { text: "File storage is not configured, so documents cannot be stored yet.", tone: "error" }
@@ -364,17 +369,47 @@ async function buildBillingItem(store, client, values, extra = {}) {
 // Saves a new quote or invoice. An invoice then takes its place in date order, which can move
 // other invoices' numbers; the saved item comes back with its number, with `renumbered` set when
 // other invoices moved.
-async function saveNewBillingItem(store, item) {
+// What an edit changed, in words, for the activity log.
+function editSummary(before, after) {
+  const changes = [];
+  if (before.amountCents !== after.amountCents) changes.push(`total ${money(before.amountCents, before.currency)} → ${money(after.amountCents, after.currency)}`);
+  if (issuedDate(before) !== issuedDate(after)) changes.push(`date ${formatDate(issuedDate(before))} → ${formatDate(issuedDate(after))}`);
+  if (before.title !== after.title) changes.push(`title “${before.title}” → “${after.title}”`);
+  if ((before.dueDate || "") !== (after.dueDate || "")) changes.push(`due date ${formatDate(before.dueDate) || "none"} → ${formatDate(after.dueDate) || "none"}`);
+  if (before.amountCents === after.amountCents && JSON.stringify(before.lineItems || []) !== JSON.stringify(after.lineItems || [])) changes.push("line items");
+  if ((before.description || "") !== (after.description || "")) changes.push("notes and terms");
+  return `Edited ${billingLabel(after)}${changes.length ? `: ${changes.join("; ")}` : " (no changes)"}`;
+}
+
+async function saveNewBillingItem(store, item, event = {}) {
   await putShareLink(store, item.shareToken, item);
   await putBilling(store, item);
-  if (item.kind !== "invoice") return { item, renumbered: false };
-  const moved = await renumberInvoices(store);
-  return { item: (await getBilling(store, item.clientSlug, item.id)) || item, renumbered: moved.some((id) => id !== item.id) };
+  let saved = item;
+  let renumbered = false;
+  if (item.kind === "invoice") {
+    const moved = await renumberInvoices(store);
+    saved = (await getBilling(store, item.clientSlug, item.id)) || item;
+    renumbered = moved.some((id) => id !== item.id);
+    if (renumbered) await noteRenumbered(store, moved.filter((id) => id !== item.id).length);
+  }
+  await record(store, {
+    action: `${saved.kind}.created`, item: saved, amountCents: saved.amountCents,
+    summary: `Created ${billingLabel(saved)} · ${saved.title} · ${money(saved.amountCents, saved.currency)}${event.from ? ` from ${event.from}` : ""}`,
+    ...event.context
+  });
+  return { item: saved, renumbered };
 }
 
 // Re-sorts invoice numbers after an invoice is re-dated or deleted. True when any number moved.
 async function keepInvoicesInDateOrder(store, kind) {
-  return kind === "invoice" && (await renumberInvoices(store)).length > 0;
+  if (kind !== "invoice") return false;
+  const moved = await renumberInvoices(store);
+  if (moved.length) await noteRenumbered(store, moved.length);
+  return moved.length > 0;
+}
+
+async function noteRenumbered(store, count) {
+  await record(store, { actor: "system", action: "invoices.renumbered", summary: `Invoice numbers re-sorted by date: ${count} invoice${count === 1 ? "" : "s"} moved` });
 }
 
 // Emails a quote or invoice to a list of addresses, as one email. Returns the item with
@@ -483,6 +518,12 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
       const message = duplicatePaymentMessage({ item: invoice, client, session, adminUrl });
       const alert = await sendOnce(env, store, sentKey(invoice, `duplicate:${session.id}`), { to: adminEmail(env), ...message, category: "builder-notice" });
       if (!alert.ok) throw new EmailDeliveryError("duplicate payment alert");
+      const amountCents = Number.isInteger(session.amount_total) ? session.amount_total : invoice.amountCents;
+      await record(store, {
+        actor: "stripe", action: "stripe.duplicate", item: invoice, amountCents, data: { session: session.id },
+        summary: `Stripe took a second payment of ${money(amountCents, invoice.currency)} for ${billingLabel(invoice)}, which was already paid`,
+        unapplied: { externalId: session.id, amountCents, item: invoice, memo: `${billingLabel(invoice)} · second payment, already paid (refund or apply it)` }
+      });
     }
     return invoice;
   }
@@ -501,12 +542,17 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
         method: details?.method || "",
         label: details?.label || "",
         receiptUrl: details?.receiptUrl || "",
+        ...(Number.isInteger(details?.feeCents) ? { feeCents: details.feeCents } : {}),
         email: session.customer_details?.email || session.customer_email || "",
         amountCents: Number.isInteger(session.amount_total) ? session.amount_total : invoice.amountCents,
         paymentIntentId: paymentIntentId || ""
       }
     };
     await putBilling(store, paid);
+    await record(store, {
+      actor: "stripe", action: "stripe.paid", item: paid, amountCents: paid.payment.amountCents, data: { session: session.id, paymentIntent: paid.payment.paymentIntentId },
+      summary: `Stripe payment of ${money(paid.payment.amountCents, paid.currency)} for ${billingLabel(paid)}${paid.payment.label ? ` (${paid.payment.label})` : ""}${Number.isInteger(paid.payment.feeCents) ? `, Stripe fee ${money(paid.payment.feeCents, paid.currency)}` : ""}`
+    });
   }
   if (!notify) return paid;
 
@@ -527,6 +573,7 @@ async function markProcessing(store, invoice, session) {
   if (invoice.status !== "open") return invoice;
   const updated = { ...invoice, status: "processing", processingAt: new Date().toISOString(), stripeSessionId: session.id };
   await putBilling(store, updated);
+  await record(store, { actor: "stripe", action: "stripe.processing", item: updated, amountCents: Number.isInteger(session.amount_total) ? session.amount_total : invoice.amountCents, summary: `Bank payment started for ${billingLabel(invoice)}`, data: { session: session.id } });
   return updated;
 }
 
@@ -540,6 +587,7 @@ async function recordPaymentFailure(env, store, invoice, session, origin) {
   const notice = await sendOnce(env, store, sentKey(invoice, `failed:${session.id}`), { to: adminEmail(env), ...message, category: "builder-notice" });
   if (!notice.ok) throw new EmailDeliveryError("payment failure notice");
   await putBilling(store, updated);
+  await record(store, { actor: "stripe", action: "stripe.failed", item: updated, summary: `Bank payment failed for ${billingLabel(invoice)}; the invoice is open again`, data: { session: session.id } });
   return updated;
 }
 
@@ -553,6 +601,7 @@ async function checkoutUrl(env, store, invoice, client, { successUrl, cancelUrl 
     if (existing?.status === "open" && existing.url) return existing.url;
   }
   const session = await createCheckoutSession(env, { invoice, client, successUrl, cancelUrl });
+  await record(store, { actor: "client", action: "stripe.checkout", item: invoice, amountCents: invoice.amountCents, summary: `Opened Stripe Checkout for ${billingLabel(invoice)} (${money(invoice.amountCents, invoice.currency)})`, data: { session: session.id } });
   await putBilling(store, {
     ...invoice,
     checkoutSessionId: session.id,
@@ -592,6 +641,7 @@ async function acceptQuote(env, store, quote, client, acceptedBy, via, origin) {
   if (quote.kind !== "quote" || quote.status !== "open" || quote.invoiceId) return quote;
   const updated = { ...quote, status: "accepted", acceptedAt: new Date().toISOString(), acceptedBy: acceptedBy || "", acceptedVia: via };
   await putBilling(store, updated);
+  await record(store, { actor: via === "admin" ? "admin" : "client", action: "quote.accepted", item: updated, amountCents: updated.amountCents, summary: `${billingLabel(updated)} accepted${updated.acceptedBy ? ` by ${updated.acceptedBy}` : ""}` });
   const message = quoteAcceptedMessage({ item: updated, client, adminUrl: `${origin}${adminBillingPath(quote.clientSlug, quote.id)}` });
   const notice = await sendOnce(env, store, sentKey(quote, "accepted-notice"), { to: adminEmail(env), ...message, category: "builder-notice" });
   if (!notice.ok) console.error(JSON.stringify({ message: "quote accepted notice not sent", quote: quote.id }));
@@ -698,6 +748,15 @@ async function handleWebhook(context, store, origin) {
       const adminUrl = client ? `${origin}/clients/admin?client=${encodeURIComponent(client.slug)}` : `${origin}/clients/admin`;
       const alert = await sendOnce(context.env, store, `deleted-invoice:${session.id}`, { to: adminEmail(context.env), ...deletedInvoicePaymentMessage({ session, client, adminUrl }), category: "builder-notice" });
       if (!alert.ok) return new Response("Email delivery failed; retry later", { status: 500 });
+      const amountCents = Number.isInteger(session.amount_total) ? session.amount_total : 0;
+      const label = session.metadata?.invoiceNumber ? `Invoice ${session.metadata.invoiceNumber}` : "an invoice";
+      if (amountCents > 0) {
+        await record(store, {
+          actor: "stripe", action: "stripe.deleted-invoice", clientSlug: client?.slug || null, amountCents, data: { session: session.id, invoiceId },
+          summary: `Stripe payment of ${money(amountCents, session.currency || "usd")} for deleted ${label}`,
+          unapplied: { externalId: session.id, amountCents, clientSlug: client?.slug || null, memo: `${label} (deleted) · Stripe payment not tied to an invoice` }
+        });
+      }
     }
     if (invoice && invoice.kind === "invoice") {
       try {
@@ -749,6 +808,7 @@ async function storeUpload(store, slug, file, uploadedBy, flags) {
     signedKey: null
   };
   await putDocument(store, document);
+  await record(store, { actor: uploadedBy === "admin" ? "admin" : "client", action: "document.uploaded", clientSlug: slug, summary: uploadedBy === "admin" ? `Shared ${name} with the client` : `The client uploaded ${name}`, data: { documentId: id } });
   return { document };
 }
 
@@ -780,6 +840,7 @@ async function applySignature(store, document, party, form, request) {
 
   const updated = { ...document, signatures, signedKey, signedAt: signature.signedAt };
   await putDocument(store, updated);
+  await record(store, { actor: party === "admin" ? "admin" : "client", ip: signature.ip, action: "document.signed", clientSlug: document.clientSlug, summary: `${name} signed ${document.name}${party === "admin" ? " for My Home Builder" : ""}`, data: { documentId: document.id, party } });
   return { document: updated };
 }
 
@@ -831,6 +892,13 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   const slug = target.slug;
   const billingBase = `/clients/admin/clients/${encodeURIComponent(slug)}/billing`;
   const today = todayInMichigan();
+  // Every change here goes in the books: the activity log, and for invoices the journal.
+  const admin = { actor: "admin", ip: requestIp(context.request) };
+  const note = (event) => record(store, { ...admin, ...event });
+  const noteEmailed = (sent, addresses, ok) => note({
+    action: `${sent.kind}.emailed`, item: sent, data: { to: addresses, ok },
+    summary: ok ? `Emailed ${billingLabel(sent)} to ${addresses.join(", ")}` : `${billingLabel(sent)} was not emailed to ${addresses.join(", ")}: the email did not go out`
+  });
 
   if (id === "new" && !action) {
     if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
@@ -856,7 +924,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (saveTemplate && (!parsed.values.templateName || parsed.values.templateName.length > 80)) return renderError(echo, "Give the template a name of 80 characters or fewer, or untick Also save this as a template.");
 
     // Saved (and numbered in date order) before it is emailed, so the email carries its number.
-    const saved = await saveNewBillingItem(store, await buildBillingItem(store, target, parsed.values));
+    const saved = await saveNewBillingItem(store, await buildBillingItem(store, target, parsed.values), { context: admin });
     let item = saved.item;
     let notice = "billing-added";
     const projectEmails = clientEmails(target);
@@ -865,8 +933,12 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
       if (result.ok) await putBilling(store, result.item);
       item = result.item;
       notice = result.ok ? "billing-sent" : "billing-send-failed";
+      await noteEmailed(item, projectEmails, result.ok);
     }
-    if (saveTemplate) await putTemplate(store, templateRecord({ ...parsed.values, dueInDays: null }));
+    if (saveTemplate) {
+      await putTemplate(store, templateRecord({ ...parsed.values, dueInDays: null }));
+      await note({ action: "template.saved", summary: `Saved the template ${parsed.values.templateName}` });
+    }
     const also = [saveTemplate ? "&also=template-saved" : "", saved.renumbered ? "&also=renumbered" : ""].join("");
     return redirectResponse(`${adminBillingPath(slug, item.id)}?notice=${notice}${also}`);
   }
@@ -928,8 +1000,10 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     // A payment recorded by hand is the invoice paid in full, so its amount follows the new total.
     // A Stripe payment keeps the amount Stripe charged.
     const payment = item.payment?.source === "manual" ? { payment: { ...item.payment, amountCents } } : {};
-    await putBilling(store, { ...item, title, description, lineItems, amountCents, dueDate, issuedOn, ...payment, updatedAt: new Date().toISOString() });
+    const edited = { ...item, title, description, lineItems, amountCents, dueDate, issuedOn, ...payment, updatedAt: new Date().toISOString() };
+    await putBilling(store, edited);
     const renumbered = issuedOn !== issuedDate(item) && (await keepInvoicesInDateOrder(store, item.kind));
+    await note({ action: `${item.kind}.edited`, item: (await getBilling(store, slug, item.id)) || edited, amountCents, summary: editSummary(item, edited) });
     return redirectResponse(`${itemPath}?notice=billing-updated${renumbered ? "&also=renumbered" : ""}`);
   }
 
@@ -963,6 +1037,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
       unlink = { ...rest, updatedAt: new Date().toISOString() };
     }
     await deleteBilling(store, item, { unlink });
+    await note({ action: `${item.kind}.deleted`, item, deleted: true, reason: "deleted", amountCents: item.amountCents, summary: `Deleted ${billingLabel(item)} · ${item.title} · ${money(item.amountCents, item.currency)}` });
     const renumbered = await keepInvoicesInDateOrder(store, item.kind);
     return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${item.kind}-deleted${renumbered ? "&also=renumbered" : ""}`);
   }
@@ -991,6 +1066,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
       moved.push(next);
     }
     await moveBilling(store, moved, slug);
+    for (const entry of moved) await note({ action: `${entry.kind}.moved`, item: entry, moved: true, summary: `Sent ${billingLabel(entry)} from ${target.name} to ${destination.name}` });
     return redirectResponse(`${adminBillingPath(destination.slug, item.id)}?notice=${partner ? "moved-pair" : "moved"}`);
   }
 
@@ -1000,13 +1076,16 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (response) return response;
     const result = await emailBillingItem(env, store, await withShareToken(store, item), target, addresses, origin);
     await putBilling(store, result.item);
+    await noteEmailed(result.item, addresses, result.ok);
     return redirectResponse(`${itemPath}?notice=${result.ok ? "sent" : "send-failed"}`);
   }
 
   if (action === "void") {
     if (item.status === "open") {
       if (item.checkoutSessionId) await expireCheckoutSession(env, item.checkoutSessionId);
-      await putBilling(store, { ...item, status: "void", voidedAt: new Date().toISOString() });
+      const voided = { ...item, status: "void", voidedAt: new Date().toISOString() };
+      await putBilling(store, voided);
+      await note({ action: `${item.kind}.voided`, item: voided, reason: "voided", amountCents: item.amountCents, summary: `Voided ${billingLabel(item)} · ${money(item.amountCents, item.currency)}` });
     }
     return redirectResponse(`${itemPath}?notice=voided`);
   }
@@ -1025,11 +1104,15 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
       payment: { source: "manual", ...details, amountCents: item.amountCents, recordedAt: new Date().toISOString() }
     });
     await putBilling(store, updated);
+    await note({ action: "payment.recorded", item: updated, amountCents: updated.payment.amountCents, summary: `Recorded a ${updated.payment.label} payment of ${money(updated.payment.amountCents, updated.currency)} for ${billingLabel(updated)}, received ${formatDate(updated.paidAt)}` });
     let notice = "payment-recorded";
     const receiptTo = clientEmails(target);
     if (form.get("sendReceipt") === "yes" && readiness.email && receiptTo.length) {
       const receipt = await sendOnce(env, store, sentKey(updated, "receipt"), receiptMessage(env, updated, target, receiptTo, origin), { remember: true });
-      if (receipt.ok) notice = "payment-recorded-receipt";
+      if (receipt.ok) {
+        notice = "payment-recorded-receipt";
+        await note({ action: "receipt.emailed", item: updated, summary: `Emailed the receipt for ${billingLabel(updated)} to ${receiptTo.join(", ")}` });
+      }
     }
     return redirectResponse(`${itemPath}?notice=${notice}`);
   }
@@ -1043,7 +1126,11 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const entered = parseManualPayment(await readBoundedForm(context.request, MAX_FORM_BYTES));
     if (entered.error) return redirectResponse(`${itemPath}?notice=${entered.error}`);
     const { paidOn, ...details } = entered;
-    await putBilling(store, { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, amountCents: item.amountCents, updatedAt: new Date().toISOString() } });
+    const corrected = { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, amountCents: item.amountCents, updatedAt: new Date().toISOString() } };
+    await putBilling(store, corrected);
+    const was = `${item.payment?.label || "payment"}, ${formatDate(item.paidAt)}`;
+    const now = `${corrected.payment.label}, ${formatDate(corrected.paidAt)}`;
+    await note({ action: "payment.corrected", item: corrected, amountCents: corrected.payment.amountCents, summary: `Changed the payment for ${billingLabel(item)}${was === now ? "" : `: ${was} → ${now}`}` });
     return redirectResponse(`${itemPath}?notice=payment-updated`);
   }
 
@@ -1053,7 +1140,9 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (item.kind !== "invoice" || item.status !== "paid") return redirectResponse(itemPath);
     if (item.payment?.source !== "manual") return redirectResponse(`${itemPath}?notice=payment-from-stripe`);
     const { payment: _payment, paidAt: _paidAt, ...unpaid } = item;
-    await putBilling(store, { ...unpaid, status: "open", reopenedAt: new Date().toISOString() });
+    const reopened = { ...unpaid, status: "open", reopenedAt: new Date().toISOString() };
+    await putBilling(store, reopened);
+    await note({ action: "payment.removed", item: reopened, reason: "payment-removed", amountCents: item.payment?.amountCents ?? item.amountCents, summary: `Marked ${billingLabel(item)} unpaid, removing its ${item.payment?.label || ""} payment of ${money(item.payment?.amountCents ?? item.amountCents, item.currency)}`.replace("its  payment", "its payment") });
     await deleteSentEmails(store, [sentKey(item, "receipt"), sentKey(item, "paid-notice")]);
     return redirectResponse(`${itemPath}?notice=payment-removed`);
   }
@@ -1070,6 +1159,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (delivery.ok) {
       await putSentEmail(store, sentKey(item, "receipt"), { to: addresses.join(", "), sentAt: new Date().toISOString(), messageId: delivery.id || "" });
       await rememberForProject(store, target, addresses);
+      await note({ action: "receipt.emailed", item: withToken, summary: `Emailed the receipt for ${billingLabel(withToken)} to ${addresses.join(", ")}` });
     }
     return redirectResponse(`${itemPath}?notice=${delivery.ok ? "receipt-sent" : "receipt-failed"}`);
   }
@@ -1078,13 +1168,45 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (item.kind !== "quote" || item.invoiceId || !(item.status === "open" || item.status === "accepted")) return redirectResponse(itemPath);
     if (item.amountCents < MIN_INVOICE_CENTS) return redirectResponse(`${itemPath}?notice=invoice-too-small`);
     // Dated the day it is made; its number is its place in date order.
-    const { item: invoice, renumbered } = await saveNewBillingItem(store, await buildBillingItem(store, target, { ...editorValuesFromItem(item), kind: "invoice", dueDate: "", issuedOn: "", amountCents: item.amountCents }, { fromQuoteId: item.id, fromQuoteNumber: item.number }));
+    const { item: invoice, renumbered } = await saveNewBillingItem(store, await buildBillingItem(store, target, { ...editorValuesFromItem(item), kind: "invoice", dueDate: "", issuedOn: "", amountCents: item.amountCents }, { fromQuoteId: item.id, fromQuoteNumber: item.number }), { context: admin, from: billingLabel(item) });
     const accepted = item.status === "open" ? { status: "accepted", acceptedAt: new Date().toISOString(), acceptedVia: "admin" } : {};
     await putBilling(store, { ...item, ...accepted, invoiceId: invoice.id, invoiceNumber: invoice.number });
+    if (accepted.status) await note({ action: "quote.accepted", item: { ...item, ...accepted }, amountCents: item.amountCents, summary: `Marked ${billingLabel(item)} accepted by making ${billingLabel(invoice)} from it` });
     return redirectResponse(`${adminBillingPath(slug, invoice.id)}?notice=invoice-created${renumbered ? "&also=renumbered" : ""}`);
   }
 
   return notFoundResponse(null, true);
+}
+
+// The Books page: the journal, the balance check and the activity log, for all client portals or
+// one, over a date range; its corrections; and its downloads.
+async function handleBooks(context, store, pathname, url) {
+  const method = context.request.method;
+  const isRead = method === "GET" || method === "HEAD";
+  const clients = await listClients(store);
+  const names = new Map(clients.map((client) => [client.slug, client.name]));
+  const slug = names.has(url.searchParams.get("client")) ? url.searchParams.get("client") : "";
+  const day = (value) => (/^\d{4}-\d{2}-\d{2}$/u.test(value || "") ? value : "");
+  const from = day(url.searchParams.get("from"));
+  const to = day(url.searchParams.get("to"));
+
+  if (pathname === "/clients/admin/books/correct") {
+    if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+    const posted = await correctBooks(store, { ip: requestIp(context.request) });
+    return redirectResponse(`/clients/admin/books?notice=${posted ? "books-corrected" : "books-balanced"}`);
+  }
+  if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+  const report = await booksReport(store, { slug, from, to });
+  if (pathname === "/clients/admin/books/ledger.csv" || pathname === "/clients/admin/books/activity.csv") {
+    const ledger = pathname.endsWith("ledger.csv");
+    const name = `my-home-builder-${ledger ? "ledger" : "activity"}${slug ? `-${slug}` : ""}${from ? `-from-${from}` : ""}${to ? `-to-${to}` : ""}.csv`;
+    const headers = responseHeaders("text/csv; charset=utf-8");
+    headers.set("Content-Disposition", `attachment; filename="${name}"`);
+    return new Response(ledger ? ledgerCsv(report, names) : activityCsv(report, names), { status: 200, headers });
+  }
+  if (pathname !== "/clients/admin/books") return notFoundResponse(null, true);
+  const check = await checkBooks(store);
+  return htmlResponse(adminBooksPage({ report, check, clients, today: todayInMichigan(), notice: noticeFromQuery(url) }));
 }
 
 async function handleAdminTemplates(context, store, id, action) {
@@ -1111,6 +1233,7 @@ async function handleAdminTemplates(context, store, id, action) {
     if (!item) return redirectResponse(`${listPath}?notice=invalid`);
     const template = templateRecord({ ...editorValuesFromItem(item), templateName: item.title.slice(0, 80), amountCents: item.amountCents, dueInDays: null, lineItems: item.lineItems || [{ description: item.title, quantity: 1, unitCents: item.amountCents, amountCents: item.amountCents }] });
     await putTemplate(store, template);
+    await record(store, { actor: "admin", ip: requestIp(context.request), action: "template.saved", summary: `Saved ${billingLabel(item)} as the template ${template.name}` });
     return redirectResponse(`${listPath}/${encodeURIComponent(template.id)}?notice=template-saved`);
   }
 
@@ -1121,6 +1244,7 @@ async function handleAdminTemplates(context, store, id, action) {
   if (existing && action === "delete") {
     if (method !== "POST") return methodNotAllowedResponse(["POST"]);
     await deleteTemplate(store, existing.id);
+    await record(store, { actor: "admin", ip: requestIp(context.request), action: "template.deleted", summary: `Deleted the template ${existing.name}` });
     return redirectResponse(`${listPath}?notice=template-deleted`);
   }
   if (action) return notFoundResponse(null, true);
@@ -1138,6 +1262,7 @@ async function handleAdminTemplates(context, store, id, action) {
   if (parsed.error) return scriptedHtmlResponse(billingEditorPage({ mode, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: listPath }), 400);
   const template = templateRecord(parsed.values, existing);
   await putTemplate(store, template);
+  await record(store, { actor: "admin", ip: requestIp(context.request), action: "template.saved", summary: `${existing ? "Changed" : "Created"} the template ${template.name}` });
   return redirectResponse(`${listPath}?notice=template-saved`);
 }
 
@@ -1197,6 +1322,7 @@ export async function handlePortalRequest(context) {
       const destination = safeProjectDestination(form?.get("next"));
       const slug = await resolveLogin(env, store, form?.get("password"));
       if (!slug) return htmlResponse(loginPage(true, destination), 401);
+      await record(store, { actor: "client", action: "client.signed-in", clientSlug: slug, ip: requestIp(context.request), summary: `${(await getClient(store, slug))?.name || slug} signed in to their portal` });
       return redirectResponse(destination || "/clients", await createClientSession(sessionSecret, slug));
     }
 
@@ -1236,6 +1362,7 @@ export async function handlePortalRequest(context) {
         await deleteAdminChallenge(store, challengeId);
         return htmlResponse(adminRequestPage({ state: "send-failed", authenticated }), 502);
       }
+      await record(store, { actor: "visitor", action: "admin.code-requested", ip: requestIp(context.request), summary: `Admin code emailed to ${adminEmail(env)}` });
       return htmlResponse(adminRequestPage({ state: "sent", authenticated }));
     }
 
@@ -1257,17 +1384,28 @@ export async function handlePortalRequest(context) {
       const retry = (error, status) => htmlResponse(adminRequestPage({ state: "code", error, authenticated }), status);
 
       const { live, spent } = await claimAdminAttempt(store);
-      if (!live.length && spent) return retry("Too many attempts. Request a new code.", 429);
-      if (!live.length) return retry("That code has expired. Request a new one from the Admin button.", 401);
+      const rejected = (why) => record(store, { actor: "visitor", action: "admin.code-rejected", ip: requestIp(context.request), summary: `Admin code not accepted: ${why}` });
+      if (!live.length && spent) {
+        await rejected("too many attempts");
+        return retry("Too many attempts. Request a new code.", 429);
+      }
+      if (!live.length) {
+        await rejected("no code was live");
+        return retry("That code has expired. Request a new one from the Admin button.", 401);
+      }
       let matched = null;
       if (/^\d{6}$/u.test(code)) {
         for (const challenge of live) {
           if (await constantTimeMatches(await sha256Hex(`${code}:${challenge.id}`), challenge.hash)) matched = challenge;
         }
       }
-      if (!matched) return retry("That code did not match. Check the email and try again.", 401);
+      if (!matched) {
+        await rejected("it did not match");
+        return retry("That code did not match. Check the email and try again.", 401);
+      }
 
       await deleteAdminChallenge(store, matched.id);
+      await record(store, { actor: "admin", action: "admin.signed-in", ip: requestIp(context.request), summary: "Signed in to the admin panel" });
       return redirectResponse("/clients/admin", await createAdminSession(sessionSecret));
     }
 
@@ -1298,6 +1436,8 @@ export async function handlePortalRequest(context) {
 
       if (!store) return redirectResponse("/clients/admin?notice=invalid");
 
+      if (pathname === "/clients/admin/books" || pathname.startsWith("/clients/admin/books/")) return handleBooks(context, store, pathname, url);
+
       const templateMatch = pathname.match(/^\/clients\/admin\/templates(?:\/([^/]+))?(?:\/(delete))?$/u);
       if (templateMatch) return handleAdminTemplates(context, store, templateMatch[1] ? decodeSegment(templateMatch[1]) : "", templateMatch[2] || "");
 
@@ -1327,6 +1467,7 @@ export async function handlePortalRequest(context) {
         if (clientError) return dashboard({ requested: null, newClient: { ...entered, slug: entered.slug ? slug : "" }, clientError, status: 400 });
 
         await putClient(store, { slug, name: entered.name, emails: emails.addresses, active: true, passwordHash: await hashPassword(clientPassword), createdAt: new Date().toISOString() });
+        await record(store, { actor: "admin", action: "client.created", clientSlug: slug, ip: requestIp(context.request), summary: `Created the client portal ${entered.name}${emails.addresses.length ? ` for ${emails.addresses.join(", ")}` : ""}` });
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=client-added`);
       }
 
@@ -1351,7 +1492,10 @@ export async function handlePortalRequest(context) {
           const problem = emails.addresses.length || emails.invalid.length ? recipientProblem(emails) : "";
           if (problem) return dashboard({ requested: slug, notice: { text: problem, tone: "error" }, typedEmails: typed, status: 400 });
           const saved = clientEmails(target);
-          if (saved.join("\n") !== emails.addresses.join("\n") || !Array.isArray(target.emails)) await putClient(store, withClientEmails(target, emails.addresses));
+          if (saved.join("\n") !== emails.addresses.join("\n") || !Array.isArray(target.emails)) {
+            await putClient(store, withClientEmails(target, emails.addresses));
+            await record(store, { actor: "admin", action: "client.emails-saved", clientSlug: slug, ip: requestIp(context.request), summary: `Saved the emails for ${target.name}: ${emails.addresses.join(", ") || "none"}` });
+          }
           return redirectResponse(`${back}&notice=client-updated`);
         }
 

@@ -91,12 +91,15 @@ function paymentLabel(details) {
 export async function retrievePaymentDetails(env, paymentIntentId) {
   if (typeof paymentIntentId !== "string" || !paymentIntentId.startsWith("pi_")) return null;
   try {
-    const intent = await stripeRequest(env, "GET", `/payment_intents/${encodeURIComponent(paymentIntentId)}?expand[]=latest_charge`);
+    // The charge's balance transaction carries Stripe's fee, for the books.
+    const intent = await stripeRequest(env, "GET", `/payment_intents/${encodeURIComponent(paymentIntentId)}?expand[]=latest_charge&expand[]=latest_charge.balance_transaction`);
     const charge = intent.latest_charge && typeof intent.latest_charge === "object" ? intent.latest_charge : null;
+    const fee = charge?.balance_transaction && typeof charge.balance_transaction === "object" ? charge.balance_transaction.fee : null;
     return {
       method: charge?.payment_method_details?.type || "",
       label: paymentLabel(charge?.payment_method_details),
       receiptUrl: charge?.receipt_url || "",
+      ...(Number.isInteger(fee) && fee >= 0 ? { feeCents: fee } : {}),
       paymentIntentId
     };
   } catch (error) {

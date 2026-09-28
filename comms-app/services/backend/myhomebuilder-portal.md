@@ -175,6 +175,65 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   - 20 sign-in or admin-code attempts and 120 form posts per visitor address per minute
   - 3 admin code requests per address and 12 overall per 10 minutes
 
+## Books
+
+The admin panel's **Books** page (`/clients/admin/books`, `books.js`) holds the portal's
+bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tables.
+
+- **Activity log** (`mhb_activity`) records everything done in the portal, newest first:
+  - the admin's actions, with the address they came from: sign-ins and admin codes (requested
+    and rejected), client portals and their emails, quotes and invoices (created, edited,
+    emailed, voided, moved, deleted), payments recorded, corrected or removed, receipts,
+    templates and documents
+  - clients' actions: sign-ins, quotes accepted, uploads and signatures, Stripe Checkout opened
+  - Stripe's events: payments (with Stripe's fee), bank payments started or failed, second
+    payments for a paid invoice, payments for a deleted invoice
+  - the portal's own: invoice numbers re-sorted by date
+- **Journal** (`mhb_journal_entries` and `mhb_journal_lines`) is double-entry: each entry's
+  debits equal its credits, and each line is one or the other. The chart of accounts
+  (`mhb_accounts`):
+  - 1100 Accounts receivable
+  - 1200 Stripe balance
+  - 1300 Payments received outside Stripe
+  - 2100 Unapplied payments
+  - 4000 Sales
+  - 6100 Stripe fees
+- **How an invoice's entries follow it.** They are derived from its state (`syncInvoiceBooks`).
+  After any change, the journal gets only the difference: a reversal of each part that no longer
+  matches, on that part's own date, and the part as it is now. The parts:
+  - **issue:** receivable to sales, on the invoice date.
+  - **payment:** Stripe balance, or received outside Stripe, to receivable, on the payment date.
+  - **fee:** Stripe fees to Stripe balance.
+
+  A voided or deleted invoice's issue is reversed. A deleted invoice's hand-recorded payment goes
+  with it, but its Stripe payment stays, moved to unapplied payments, since Stripe holds the
+  money. Money Stripe took with no invoice to apply it to (a second payment, or a payment for a
+  deleted invoice) is posted to unapplied payments, once per Checkout: (kind, external id) is
+  unique.
+- **Recording** happens in one transaction per event, activity and journal together.
+  - It never fails the action it follows: an error is logged instead.
+  - The page's **balance check** (`checkBooks`) compares every invoice with its entries. It
+    lists any mismatch, including deleted invoices still holding sales or receivable.
+  - **Post corrections** (`correctBooks`) posts what is missing, with an activity row. Nothing
+    is ever deleted from the journal.
+- **The page** has these parts:
+  - Filters: one client portal or all, and a date range, with quick periods.
+  - Totals: invoiced, received, Stripe fees, outstanding and unapplied.
+  - The ledger, newest first, with a running amount owed.
+  - Account balances (a trial balance).
+  - The activity log.
+
+  Two CSV downloads (`ledger.csv`, one row per debit or credit, and `activity.csv`) follow the
+  same filters. A cell that a spreadsheet would run as a formula (starting `=`, `+`, `-`, `@`)
+  is prefixed with an apostrophe.
+- **Opening:** the first time the books are used, invoices saved before them get opening entries
+  (source `opening`), and every quote and invoice gets its history in the log from its saved
+  fields (`data.fromRecords`). The `books-opened` row in `mhb_counters` marks that this is done.
+- **The business bank account, later:** entries carry `source`, `external_id` and `labels`, and
+  the chart takes new accounts. Bank transactions can join the journal (source `bank`, their
+  transaction id as the external id, posted once), then be labeled and categorized against
+  expense accounts and matched to Stripe payouts.
+
 ## PDF signing library
 
 `vendor/pdf-lib.js` is pdf-lib 1.17.1 bundled into one ES module, so the module adds no npm

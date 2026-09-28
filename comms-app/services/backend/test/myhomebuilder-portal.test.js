@@ -25,6 +25,7 @@ const { up } = await import("../src/db/migrations/20260925_create_myhomebuilder_
 const { up: plainNumbers } = await import("../src/db/migrations/20260925_myhomebuilder_portal_plain_numbers.js");
 const { up: recipientsTable } = await import("../src/db/migrations/20260925_myhomebuilder_portal_recipients.js");
 const { up: projectEmails } = await import("../src/db/migrations/20260927_myhomebuilder_portal_project_emails.js");
+const { up: booksTables } = await import("../src/db/migrations/20260930_myhomebuilder_portal_books.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
 const { ADMIN_SESSION_TTL_SECONDS, createAdminSession, hmacHex, isValidSlug, slugify } = await import(
@@ -102,7 +103,8 @@ globalThis.fetch = async (input, init = {}) => {
         id: path.split("/")[2].split("?")[0],
         latest_charge: {
           receipt_url: "https://pay.stripe.com/receipts/test_receipt",
-          payment_method_details: { type: "card", card: { brand: "visa", last4: "4242" } }
+          payment_method_details: { type: "card", card: { brand: "visa", last4: "4242" } },
+          balance_transaction: { fee: 262 }
         }
       });
     }
@@ -129,7 +131,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity"];
 let server;
 let base;
 let renumbered = [];
@@ -185,6 +187,7 @@ before(async () => {
   backfilled = await db("mhb_recipients").orderBy("last_sent_at", "desc").select("email", "display");
   await insertLegacyProjects();
   await projectEmails(db);
+  await booksTables(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -1024,6 +1027,186 @@ test("a project's quotes and invoices end with invoiced, paid and outstanding to
   assert.match(body, /<div class="billing-totals-due"><dt>Outstanding<\/dt><dd>\$8,000\.00<\/dd><\/div>/u);
   assert.ok(body.indexOf("billing-totals") > body.indexOf("</table>"), "at the end of the list");
   assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: await loginAsClient() } })).text(), /billing-totals/u, "the client's portal is unchanged");
+});
+
+// ---------- Books ----------
+
+// Each account's balance (debits less credits), leaving out accounts at zero.
+async function ledgerBalances() {
+  const rows = await db("mhb_journal_lines").select("account").sum({ debit: "debit_cents", credit: "credit_cents" }).groupBy("account");
+  return Object.fromEntries(rows.map((row) => [row.account, Number(row.debit) - Number(row.credit)]).filter(([, net]) => net !== 0));
+}
+
+test("the books follow an invoice's life in balanced entries, and log each step", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000", issuedOn: "2026-09-10" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  assert.deepEqual(await ledgerBalances(), { 1100: 100000, 4000: -100000 });
+  const issue = await db("mhb_journal_entries").where({ item_id: item.id, part: "issue" }).first(db.raw("memo, to_char(entry_date, 'YYYY-MM-DD') AS date"));
+  assert.deepEqual({ ...issue }, { memo: "Invoice 1 · Framing", date: "2026-09-10" });
+
+  await request(`${path}/record-payment`, form({ method: "zelle", paidOn: "2026-09-12" }, adminCookie));
+  assert.deepEqual(await ledgerBalances(), { 1300: 100000, 4000: -100000 });
+  await request(`${path}/edit`, form({ title: "Framing", issuedOn: "2026-09-10", ...lines(["Framing", "1", "1,200"]) }, adminCookie));
+  assert.deepEqual(await ledgerBalances(), { 1300: 120000, 4000: -120000 }, "the payment recorded by hand follows the new total");
+  await request(`${path}/reopen`, form({}, adminCookie));
+  assert.deepEqual(await ledgerBalances(), { 1100: 120000, 4000: -120000 });
+  await request(`${path}/void`, form({}, adminCookie));
+  assert.deepEqual(await ledgerBalances(), {});
+
+  const entries = await db("mhb_journal_entries").where({ item_id: item.id }).orderBy("id").select("kind", "part");
+  assert.deepEqual(entries.map((entry) => `${entry.kind} ${entry.part}`), [
+    "issue issue", "payment payment",
+    "reversal issue", "issue issue", "reversal payment", "payment payment",
+    "reversal payment",
+    "reversal issue"
+  ]);
+  for (const entry of await db("mhb_journal_entries").select("id")) {
+    const sums = await db("mhb_journal_lines").where({ entry_id: entry.id }).sum({ debit: "debit_cents", credit: "credit_cents" }).first();
+    assert.equal(Number(sums.debit), Number(sums.credit), "every entry balances");
+  }
+
+  const logged = await db("mhb_activity").where({ item_id: item.id }).orderBy("id").select("action", "actor", "ip", "summary");
+  assert.deepEqual(logged.map((row) => row.action), ["invoice.created", "payment.recorded", "invoice.edited", "payment.removed", "invoice.voided"]);
+  assert.ok(logged.every((row) => row.actor === "admin"));
+  assert.equal(logged[2].summary, "Edited Invoice 1: total $1,000.00 → $1,200.00");
+  assert.equal(logged[1].summary, "Recorded a Zelle payment of $1,000.00 for Invoice 1, received Sep 12, 2026");
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+});
+
+test("Stripe payments post with their fee, repeated events post nothing, and money with no invoice is kept as unapplied", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  await request(`/clients/pay/${item.shareToken}`);
+  const first = [...stripe.sessions.keys()].at(-1);
+  await signedWebhook("checkout.session.completed", payStripeSession(first, { amount_total: 50000 }));
+  assert.deepEqual(await ledgerBalances(), { 1200: 49738, 4000: -50000, 6100: 262 }, "Stripe's fee comes out of the Stripe balance");
+  const count = async () => Number((await db("mhb_journal_entries").count({ n: "*" }).first()).n);
+  const entriesBefore = await count();
+  await signedWebhook("checkout.session.completed", stripe.sessions.get(first));
+  assert.equal(await count(), entriesBefore, "a repeated event posts nothing");
+
+  // A second payment for the paid invoice (an old Checkout, say) is kept as unapplied, once.
+  const second = { id: "cs_test_second", status: "complete", payment_status: "paid", amount_total: 50000, currency: "usd", payment_intent: "pi_second", customer_details: { email: "payer@example.com" }, metadata: { clientSlug: "muskegon-addition", invoiceId: item.id, invoiceNumber: "1" } };
+  await signedWebhook("checkout.session.completed", second);
+  await signedWebhook("checkout.session.completed", second);
+  assert.deepEqual(await ledgerBalances(), { 1200: 99738, 2100: -50000, 4000: -50000, 6100: 262 });
+
+  // Deleted after it was paid: its sale and receivable go, and Stripe's money stays, unapplied.
+  await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}/delete`, form({}, adminCookie));
+  assert.deepEqual(await ledgerBalances(), { 1200: 99738, 2100: -100000, 6100: 262 });
+  // Paid after it was deleted: unapplied too.
+  await signedWebhook("checkout.session.completed", { ...second, id: "cs_test_late", payment_intent: "pi_late" });
+  assert.deepEqual(await ledgerBalances(), { 1200: 149738, 2100: -150000, 6100: 262 });
+
+  const stripeLog = await db("mhb_activity").where({ actor: "stripe" }).orderBy("id").select("action", "summary");
+  assert.deepEqual(stripeLog.map((row) => row.action), ["stripe.paid", "stripe.duplicate", "stripe.deleted-invoice"]);
+  assert.equal(stripeLog[0].summary, "Stripe payment of $500.00 for Invoice 1 (Visa •••• 4242), Stripe fee $2.62");
+  assert.ok(await db("mhb_activity").where({ actor: "client", action: "stripe.checkout" }).first(), "opening Checkout is logged");
+  const check = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(check, /The books balance\./u);
+  assert.match(check, /<dt>Unapplied payments<\/dt><dd>\$1,500\.00<\/dd>/u);
+});
+
+test("the books open with the invoices already in the portal, and their history from their records", async () => {
+  const saved = (id, number, extra) => ({ id, clientSlug: "muskegon-addition", kind: "invoice", number, title: `Earlier ${number}`, amountCents: 100000, currency: "usd", status: "open", createdAt: "2026-08-01T15:00:00.000Z", shareToken: `tok_earlier_${id}_0123456789ab`, ...extra });
+  for (const item of [
+    saved("earlier-open", "1", {}),
+    saved("earlier-paid", "2", { status: "paid", paidAt: "2026-08-05", payment: { source: "manual", method: "check", label: "Check #12", amountCents: 100000 }, sentAt: "2026-08-02T15:00:00.000Z", sentTo: "pat@example.com" })
+  ]) {
+    await db("mhb_billing").insert({ id: item.id, client_slug: item.clientSlug, kind: item.kind, number: item.number, share_token: item.shareToken, data: JSON.stringify(item), created_at: item.createdAt });
+  }
+  const adminCookie = await loginAsAdmin();
+  const opening = await db("mhb_journal_entries").where({ source: "opening" }).orderBy("id").select("item_id", "part", db.raw("to_char(entry_date, 'YYYY-MM-DD') AS date"));
+  assert.deepEqual(opening.map((row) => `${row.item_id} ${row.part} ${row.date}`), ["earlier-open issue 2026-08-01", "earlier-paid issue 2026-08-01", "earlier-paid payment 2026-08-05"]);
+  assert.deepEqual(await ledgerBalances(), { 1100: 100000, 1300: 100000, 4000: -200000 });
+  const history = await db("mhb_activity").whereRaw("data->>'fromRecords' = 'true'").orderBy("id").select("action", "summary");
+  assert.deepEqual(history.map((row) => row.action), ["invoice.created", "invoice.created", "invoice.emailed", "payment.recorded"]);
+  assert.equal(history[3].summary, "Recorded a Check #12 payment of $1,000.00 for Invoice 2");
+  const page = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /The books balance\./u);
+  assert.match(page, /opening entry/u);
+});
+
+test("the balance check finds an invoice whose entries do not match, and corrections fix it", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
+  await db("mhb_journal_entries").where({ item_id: item.id }).del();
+  const off = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(off, /The books do not balance\./u);
+  assert.match(off, /Invoice 1 \(Muskegon Addition\): its invoiced amount does not match the journal\./u);
+
+  const corrected = await request("/clients/admin/books/correct", form({}, adminCookie));
+  assert.equal(corrected.headers.get("Location"), "/clients/admin/books?notice=books-corrected");
+  const page = await (await request(corrected.headers.get("Location"), { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /Corrections posted\. The books balance again\./u);
+  assert.match(page, /The books balance\./u);
+  assert.deepEqual(await ledgerBalances(), { 1100: 100000, 4000: -100000 });
+  assert.match((await db("mhb_activity").where({ action: "books.corrected" }).first()).summary, /Posted corrections for Invoice 1 to balance the books/u);
+  assert.equal((await request("/clients/admin/books/correct", form({}, adminCookie))).headers.get("Location"), "/clients/admin/books?notice=books-balanced");
+});
+
+test("the Books page totals, lists and downloads the books for every client portal or one, over any dates", async () => {
+  const adminCookie = await loginAsAdmin();
+  const smith = await addPortal(adminCookie, "=Smith Residence");
+  const { item: framing } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000", issuedOn: "2026-08-10" });
+  await request(`/clients/admin/clients/muskegon-addition/billing/${framing.id}/record-payment`, form({ method: "zelle", paidOn: "2026-08-15" }, adminCookie));
+  await request(`/clients/admin/clients/${smith}/billing`, form({ kind: "invoice", title: "Deck", issuedOn: "2026-09-05", ...lines(["Deck", "1", "3,000"]) }, adminCookie));
+
+  const page = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /<a href="\/clients\/admin\/books">Books<\/a>/u, "the admin menu links to the books");
+  assert.match(page, /<dt>Invoiced<\/dt><dd>\$4,000\.00<\/dd>/u);
+  assert.match(page, /<dt>Received<\/dt><dd>\$1,000\.00<\/dd>/u);
+  assert.match(page, /<dt>Outstanding<\/dt><dd>\$3,000\.00<\/dd>/u);
+  assert.match(page, /1100 · Accounts receivable<\/td>\s*<td class="books-money" data-label="Debit">\$3,000\.00<\/td>/u);
+  assert.match(page, /<th scope="row">Total<\/th><td class="books-money" data-label="Debit">\$4,000\.00<\/td><td class="books-money" data-label="Credit">\$4,000\.00<\/td>/u);
+  assert.match(page, /Recorded a Zelle payment of \$1,000\.00 for Invoice 1/u);
+
+  const smithOnly = await (await request(`/clients/admin/books?client=${smith}`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(smithOnly, /<dt>Invoiced<\/dt><dd>\$3,000\.00<\/dd>/u);
+  assert.doesNotMatch(smithOnly, /Framing/u);
+  const august = await (await request("/clients/admin/books?from=2026-08-01&to=2026-08-31", { headers: { Cookie: adminCookie } })).text();
+  assert.match(august, /<dt>Invoiced<\/dt><dd>\$1,000\.00<\/dd>/u);
+  assert.match(august, /<dt>Outstanding<\/dt><dd>\$0\.00<\/dd>/u, "owed at the end of August");
+
+  const ledger = await request("/clients/admin/books/ledger.csv", { headers: { Cookie: adminCookie } });
+  assert.equal(ledger.headers.get("Content-Type"), "text/csv; charset=utf-8");
+  assert.equal(ledger.headers.get("Content-Disposition"), 'attachment; filename="my-home-builder-ledger.csv"');
+  const ledgerText = await ledger.text();
+  assert.ok(ledgerText.startsWith("Date,Entry,Kind,Client portal,Document,Account,Account name,Debit,Credit,Memo,Source,External id,Recorded at\r\n"));
+  assert.match(ledgerText, /\r\n2026-08-10,\d+,issue,Muskegon Addition,Invoice 1,1100,Accounts receivable,1000\.00,,Invoice 1 · Framing,portal,,/u);
+  assert.match(ledgerText, /,'=Smith Residence,Invoice 2,/u, "a cell that would run as a formula is quoted");
+  const activity = await (await request(`/clients/admin/books/activity.csv?client=${smith}`, { headers: { Cookie: adminCookie } })).text();
+  assert.ok(activity.startsWith("Time,Who,Action,Client portal,Document,Amount,What happened,IP address\r\n"));
+  assert.match(activity, /,admin,invoice\.created,'=Smith Residence,Invoice 2,3000\.00,"Created Invoice 2 · Deck · \$3,000\.00",/u);
+  assert.equal((await request("/clients/admin/books/ledger.csv")).status, 303, "only the admin can download the books");
+});
+
+test("the activity log records sign-ins, client portals, templates, documents and quotes accepted", async () => {
+  await loginAsClient();
+  const adminCookie = await loginAsAdmin();
+  await request("/clients/admin/clients", form({ name: "Pine Street", password: "pine-street-2026", emails: "pine@example.com" }, adminCookie, { "CF-Connecting-IP": "198.51.100.77" }));
+  await setClientEmail(adminCookie, "pat@example.com");
+  await request("/clients/admin/templates", form({ templateName: "Deck package", kind: "quote", title: "Deck", ...lines(["Decking", "1", "400"]) }, adminCookie));
+  await request("/clients/admin/clients/muskegon-addition/documents", multipart({}, { bytes: await samplePdf(), name: "contract.pdf", type: "application/pdf" }, adminCookie));
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  const quote = (await billingRecords()).find((entry) => entry.kind === "quote");
+  await request(`/clients/quote/${quote.shareToken}/accept`, form({ name: "Pat Hayes" }));
+
+  const rows = await db("mhb_activity").orderBy("id").select("actor", "action", "summary", "ip");
+  const find = (action) => rows.find((row) => row.action === action);
+  assert.deepEqual({ actor: find("client.signed-in").actor, summary: find("client.signed-in").summary }, { actor: "client", summary: "Muskegon Addition signed in to their portal" });
+  assert.equal(find("admin.code-requested").actor, "visitor");
+  assert.equal(find("admin.signed-in").summary, "Signed in to the admin panel");
+  assert.equal(find("client.created").summary, "Created the client portal Pine Street for pine@example.com");
+  assert.equal(find("client.created").ip, "198.51.100.77", "admin actions are logged with the address they came from");
+  assert.equal(find("client.emails-saved").summary, "Saved the emails for Muskegon Addition: pat@example.com");
+  assert.equal(find("template.saved").summary, "Created the template Deck package");
+  assert.equal(find("document.uploaded").summary, "Shared contract.pdf with the client");
+  assert.deepEqual({ actor: find("quote.accepted").actor, summary: find("quote.accepted").summary }, { actor: "client", summary: "Quote 1 accepted by Pat Hayes" });
+
+  await request("/clients/admin/verify", form({ code: "000000" }));
+  assert.equal((await db("mhb_activity").where({ action: "admin.code-rejected" }).first()).summary, "Admin code not accepted: no code was live");
 });
 
 test("invoice numbers follow invoice dates across projects, and same-date invoices the order they were entered", async () => {

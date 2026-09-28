@@ -77,6 +77,7 @@ export function pageShell(content, { authenticated = false, admin = false, bodyC
     if (admin) {
       nav.push('<a href="/clients/admin">Admin panel</a>');
       nav.push('<a href="/clients/admin/templates">Templates</a>');
+      nav.push('<a href="/clients/admin/books">Books</a>');
       nav.push('<form action="/clients/admin/logout" method="post"><button class="portal-logout-button" type="submit">Exit admin</button></form>');
     } else {
       nav.push('<form action="/clients/admin/request" method="post"><button class="portal-logout-button" type="submit">Admin</button></form>');
@@ -1045,6 +1046,187 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
       </div>
       ${recipientList(recipients)}
     </div>`, { title: `${billingLabel(item)} · ${item.title}`, scripts: [BILLING_SCRIPT] });
+}
+
+// ---------- Books ----------
+
+const WHO = { admin: "Admin", client: "Client", stripe: "Stripe", system: "Portal", visitor: "Visitor" };
+const dateTimeFormat = new Intl.DateTimeFormat("en-US", { timeZone: "America/Detroit", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+
+function dateTimeText(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : escapeHtml(dateTimeFormat.format(date));
+}
+
+// Blank for nothing, so a column shows only what moved.
+function moneyCell(cents) {
+  return cents ? money(cents) : "";
+}
+
+// Periods for the Books page's quick links, from today's date (YYYY-MM-DD).
+function bookPeriods(today) {
+  const [year, month] = today.split("-").map(Number);
+  const pad = (value) => String(value).padStart(2, "0");
+  const lastDay = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const previous = month === 1 ? [year - 1, 12] : [year, month - 1];
+  return [
+    ["This month", `${year}-${pad(month)}-01`, today],
+    ["Last month", `${previous[0]}-${pad(previous[1])}-01`, `${previous[0]}-${pad(previous[1])}-${pad(lastDay(previous[0], previous[1]))}`],
+    ["This year", `${year}-01-01`, today],
+    ["Last year", `${year - 1}-01-01`, `${year - 1}-12-31`],
+    ["All time", "", ""]
+  ];
+}
+
+// The Books page. `report` from books.js booksReport, `check` from checkBooks.
+export function adminBooksPage({ report, check, clients, today, notice = null }) {
+  const names = new Map(clients.map((client) => [client.slug, client.name]));
+  const query = (extra = {}) => {
+    const params = new URLSearchParams();
+    const values = { client: report.slug, from: report.from, to: report.to, ...extra };
+    for (const [key, value] of Object.entries(values)) if (value) params.set(key, value);
+    const text = params.toString();
+    return text ? `?${text}` : "";
+  };
+  const itemLink = (entry, text) => (entry.itemExists && entry.clientSlug
+    ? `<a class="portal-inline-link" href="/clients/admin/clients/${encodeURIComponent(entry.clientSlug)}/billing/${encodeURIComponent(entry.itemId)}">${escapeHtml(text)}</a>`
+    : escapeHtml(text));
+
+  const periods = bookPeriods(today).map(([label, from, to]) => {
+    const current = report.from === from && report.to === to;
+    return `<a class="portal-secondary-link" href="/clients/admin/books${query({ from, to })}"${current ? ' aria-current="page"' : ""}>${label}</a>`;
+  }).join("");
+  const range = report.from || report.to
+    ? `${report.from ? dateText(report.from) : "the start"} to ${report.to ? dateText(report.to) : "today"}`
+    : "all time";
+
+  const balance = check.balanced
+    ? `<section class="books-check books-check-ok" aria-labelledby="books-check-heading">
+          <h2 id="books-check-heading">The books balance.</h2>
+          <p>Debits and credits are equal (${money(check.debits)} each), and every invoice matches its entries.</p>
+        </section>`
+    : `<section class="books-check books-check-off" aria-labelledby="books-check-heading">
+          <h2 id="books-check-heading">The books do not balance.</h2>
+          ${check.debits !== check.credits ? `<p>Debits are ${money(check.debits)} and credits are ${money(check.credits)}.</p>` : ""}
+          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", payment: "payment", fee: "Stripe fee" })[part]).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
+          <form action="/clients/admin/books/correct" method="post">
+            <button class="button button-solid" type="submit">Post corrections</button>
+          </form>
+          <p class="portal-security-note">Corrections reverse what no longer matches and post each invoice as it stands now. Nothing is deleted from the journal.</p>
+        </section>`;
+
+  const summary = report.summary;
+  const figures = [
+    ["Invoiced", summary.invoiced, `in ${range}`],
+    ["Received", summary.received, `in ${range}`],
+    ["Stripe fees", summary.fees, `in ${range}`],
+    ["Outstanding", summary.outstanding, report.to ? `owed on ${dateText(report.to)}` : "owed now"],
+    ["Unapplied payments", summary.unapplied, "received, not tied to an invoice"]
+  ];
+
+  const ledgerRows = report.entries.slice().reverse().map((entry) => {
+    const text = entry.itemExists ? [entry.itemLabel, ...entry.memo.split(" · ").slice(1)].join(" · ") : entry.memo;
+    const received = entry.received - entry.fees;
+    return `<tr>
+          <td>${dateText(entry.date)}</td>
+          <td>${itemLink(entry, text)}<small>${escapeHtml(names.get(entry.clientSlug) || entry.clientSlug || "")}${entry.source === "opening" ? " · opening entry" : ""}${entry.kind === "reversal" ? " · reversal" : ""}</small></td>
+          <td class="books-money" data-label="Invoiced">${moneyCell(entry.invoiced)}</td>
+          <td class="books-money" data-label="Received">${moneyCell(received)}</td>
+          <td class="books-money" data-label="Owed to you">${money(entry.owed)}</td>
+        </tr>`;
+  }).join("");
+  const ledger = report.entries.length
+    ? `<table class="portal-table books-table">
+          <thead><tr><th scope="col">Date</th><th scope="col">Entry</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Received</th><th scope="col" class="books-money">Owed to you</th></tr></thead>
+          <tbody>${ledgerRows}</tbody>
+        </table>`
+    : '<p class="portal-empty">No entries in this period.</p>';
+
+  const accountRows = report.accounts.map((account) => {
+    const net = account.debit - account.credit;
+    return `<tr>
+          <td>${escapeHtml(account.code)} · ${escapeHtml(account.name)}</td>
+          <td class="books-money" data-label="Debit">${net > 0 ? money(net) : ""}</td>
+          <td class="books-money" data-label="Credit">${net < 0 ? money(-net) : ""}</td>
+        </tr>`;
+  }).join("");
+  const debitTotal = report.accounts.reduce((sum, account) => sum + Math.max(account.debit - account.credit, 0), 0);
+  const creditTotal = report.accounts.reduce((sum, account) => sum + Math.max(account.credit - account.debit, 0), 0);
+
+  const activityRows = report.activity.map((entry) => `<tr>
+          <td>${dateTimeText(entry.at)}</td>
+          <td>${escapeHtml(WHO[entry.actor] || entry.actor)}</td>
+          <td>${entry.itemExists && entry.clientSlug ? `${itemLink(entry, entry.summary)}` : escapeHtml(entry.summary)}${entry.clientSlug ? `<small>${escapeHtml(names.get(entry.clientSlug) || entry.clientSlug)}</small>` : ""}</td>
+          <td class="books-money" data-label="Amount">${entry.amountCents === null ? "" : money(entry.amountCents)}</td>
+        </tr>`).join("");
+  const activity = report.activity.length
+    ? `<table class="portal-table books-table books-activity">
+          <thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">What happened</th><th scope="col" class="books-money">Amount</th></tr></thead>
+          <tbody>${activityRows}</tbody>
+        </table>`
+    : '<p class="portal-empty">Nothing happened in this period.</p>';
+
+  return adminShell(`<div class="site-width portal-shell books">
+      <section class="admin-intro">
+        <p class="portal-kicker">Admin panel</p>
+        <h1 class="portal-heading">Books.</h1>
+        <p class="portal-lead">Everything done in the portal, and the money it moved: invoiced, received and still owed, for ${escapeHtml(report.slug ? names.get(report.slug) || report.slug : "every client portal")}, ${escapeHtml(range)}.</p>
+        ${noticeMarkup(notice)}
+      </section>
+
+      <form class="admin-template-picker books-filters" action="/clients/admin/books" method="get">
+        <label for="books-client">Client portal
+          <select id="books-client" name="client">
+            <option value="">All client portals</option>
+            ${clients.map((client) => `<option value="${escapeAttribute(client.slug)}"${client.slug === report.slug ? " selected" : ""}>${escapeHtml(client.name)}</option>`).join("")}
+          </select>
+        </label>
+        <label for="books-from">From
+          <input id="books-from" name="from" type="date" value="${escapeAttribute(report.from)}">
+        </label>
+        <label for="books-to">To
+          <input id="books-to" name="to" type="date" value="${escapeAttribute(report.to)}">
+        </label>
+        <button class="button button-solid" type="submit">Show</button>
+      </form>
+      <nav class="books-periods" aria-label="Periods">${periods}</nav>
+
+      ${balance}
+
+      <dl class="billing-totals books-summary">
+        ${figures.map(([label, cents, note], index) => `<div${index === 3 ? ' class="billing-totals-due"' : ""}><dt>${label}</dt><dd>${money(cents)}</dd><dd class="books-summary-note">${escapeHtml(note)}</dd></div>`).join("\n        ")}
+      </dl>
+
+      <section class="books-section" aria-labelledby="books-ledger-heading">
+        <div class="books-section-head">
+          <h2 id="books-ledger-heading">Ledger</h2>
+          <a class="portal-secondary-link" href="/clients/admin/books/ledger.csv${query()}">Download the ledger (CSV)</a>
+        </div>
+        <p class="admin-meta">Newest first. Entries are dated by the invoice or payment date; the download lists each debit and credit.</p>
+        ${ledger}
+      </section>
+
+      <section class="books-section" aria-labelledby="books-accounts-heading">
+        <div class="books-section-head">
+          <h2 id="books-accounts-heading">Account balances</h2>
+        </div>
+        <p class="admin-meta">${report.to ? `On ${dateText(report.to)}` : "Now"}${report.slug ? `, for ${escapeHtml(names.get(report.slug) || report.slug)}` : ""}. Debits and credits total the same, which is what balanced books mean.</p>
+        <table class="portal-table books-table books-accounts">
+          <thead><tr><th scope="col">Account</th><th scope="col" class="books-money">Debit</th><th scope="col" class="books-money">Credit</th></tr></thead>
+          <tbody>${accountRows}</tbody>
+          <tfoot><tr><th scope="row">Total</th><td class="books-money" data-label="Debit">${money(debitTotal)}</td><td class="books-money" data-label="Credit">${money(creditTotal)}</td></tr></tfoot>
+        </table>
+      </section>
+
+      <section class="books-section" aria-labelledby="books-activity-heading">
+        <div class="books-section-head">
+          <h2 id="books-activity-heading">Activity</h2>
+          <a class="portal-secondary-link" href="/clients/admin/books/activity.csv${query()}">Download the activity (CSV)</a>
+        </div>
+        <p class="admin-meta">Everything done by the admin, clients and Stripe, newest first.</p>
+        ${activity}
+      </section>
+    </div>`, { title: "Books" });
 }
 
 // Confirms deleting a quote or invoice, saying what goes with it. `partner` is the quote an
