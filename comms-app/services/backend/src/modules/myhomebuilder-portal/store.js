@@ -2,7 +2,7 @@
 // 20260925_create_myhomebuilder_portal.js). Records keep their full JSON in a
 // `data` column; the columns beside it exist for lookups and constraints.
 import { createHash } from "node:crypto";
-import { ADMIN_CODE_TTL_SECONDS } from "./security.js";
+import { ADMIN_CODE_MAX_ATTEMPTS, ADMIN_CODE_TTL_SECONDS } from "./security.js";
 import { billingNumber } from "./billing.js";
 
 export const DEFAULT_CLIENT_SLUG = "muskegon-addition";
@@ -296,15 +296,18 @@ export async function putAdminChallenge(store, id, codeHash) {
     .timeout(QUERY_TIMEOUT_MS);
 }
 
-export async function getAdminChallenge(store, id) {
-  const row = await store.db("mhb_admin_challenges").where({ id }).where("expires_at", ">", store.db.fn.now()).first().timeout(QUERY_TIMEOUT_MS);
-  return row ? { hash: row.code_hash, attempts: row.attempts } : null;
-}
-
-// Counts an attempt atomically, so parallel guesses cannot share one count.
-export async function recordAdminAttempt(store, id) {
-  const [row] = await store.db("mhb_admin_challenges").where({ id }).increment("attempts", 1).returning("attempts").timeout(QUERY_TIMEOUT_MS);
-  return Number(row?.attempts ?? Number.MAX_SAFE_INTEGER);
+// A code can be entered on any device, so an attempt is not tied to one code: each attempt counts
+// against every live code, atomically, so parallel guesses cannot share a count and no code is
+// tried more than ADMIN_CODE_MAX_ATTEMPTS times. Returns the live codes still within their
+// attempts (`live`) and how many this attempt used up (`spent`), which are removed.
+export async function claimAdminAttempt(store) {
+  const result = await store.db.raw(
+    "UPDATE mhb_admin_challenges SET attempts = attempts + 1 WHERE expires_at > now() RETURNING id, code_hash, attempts"
+  ).timeout(QUERY_TIMEOUT_MS);
+  const rows = result.rows.map((row) => ({ id: row.id, hash: row.code_hash, attempts: Number(row.attempts) }));
+  const spent = rows.filter((row) => row.attempts > ADMIN_CODE_MAX_ATTEMPTS).map((row) => row.id);
+  if (spent.length) await store.db("mhb_admin_challenges").whereIn("id", spent).del().timeout(QUERY_TIMEOUT_MS);
+  return { live: rows.filter((row) => row.attempts <= ADMIN_CODE_MAX_ATTEMPTS), spent: spent.length };
 }
 
 export async function deleteAdminChallenge(store, id) {

@@ -270,9 +270,9 @@ async function loginAsAdmin(env = portal(), cookies = "") {
   const headers = { "CF-Connecting-IP": `203.0.113.${adminIp % 250}`, ...(cookies ? { Cookie: cookies } : {}) };
   const requested = await request("/clients/admin/request", { method: "POST", headers }, env);
   assert.equal(requested.status, 200);
-  const challengeId = (await requested.text()).match(/name="challenge" type="hidden" value="([^"]+)"/u)[1];
+  assert.match(await requested.text(), /action="\/clients\/admin\/verify"/u);
   const code = email.delivered.at(-1).text.match(/Verification code: (\d{6})/u)[1];
-  const verify = await request("/clients/admin/verify", form({ challenge: challengeId, code }, cookies), env);
+  const verify = await request("/clients/admin/verify", form({ code }, cookies), env);
   assert.equal(verify.status, 303);
   assert.equal(verify.headers.get("Location"), "/clients/admin");
   const adminCookie = cookieValue(verify);
@@ -448,13 +448,72 @@ test("throttles admin code requests per address and burns a challenge after too 
   assert.match(await blocked.text(), /Too many code requests/u);
   assert.equal((await request("/clients/admin/request", { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.8" } })).status, 200);
 
-  const challenged = await request("/clients/admin/request", { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.9" } });
-  const challengeId = (await challenged.text()).match(/name="challenge" type="hidden" value="([^"]+)"/u)[1];
+  assert.equal((await request("/clients/admin/request", { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.9" } })).status, 200);
+  const live = (await db("mhb_admin_challenges").select("id")).map((row) => row.id);
+  assert.equal(live.length, 5);
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    assert.equal((await request("/clients/admin/verify", form({ challenge: challengeId, code: "000000" }))).status, 401);
+    assert.equal((await request("/clients/admin/verify", form({ code: "000000" }))).status, 401);
   }
-  assert.equal((await request("/clients/admin/verify", form({ challenge: challengeId, code: "000000" }))).status, 429);
-  assert.equal(await db("mhb_admin_challenges").where({ id: challengeId }).first(), undefined);
+  const burned = await request("/clients/admin/verify", form({ code: "000000" }));
+  assert.equal(burned.status, 429);
+  assert.match(await burned.text(), /Too many attempts\. Request a new code\./u);
+  assert.equal((await db("mhb_admin_challenges").whereIn("id", live)).length, 0);
+});
+
+test("an admin code works on any device, once, and every try counts against every live code", async () => {
+  // Asked for on one device (a client's browser), entered on another with no cookies.
+  const clientCookie = await loginAsClient();
+  const asked = await request("/clients/admin/request", { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.31", Cookie: clientCookie } });
+  const askedBody = await asked.text();
+  assert.doesNotMatch(askedBody, /name="challenge"/u, "the code is not tied to the page that asked for it");
+  assert.match(askedBody, /href="\/clients\/admin\/code">myhomebuilderllc\.com\/clients\/admin\/code<\/a>/u);
+  const codeEmail = email.delivered.at(-1);
+  assert.match(codeEmail.text, /can be used once, on any device/u);
+  assert.match(codeEmail.text, /To use it on another device, enter it at https:\/\/myhomebuilderllc\.com\/clients\/admin\/code/u);
+  const code = codeEmail.text.match(/Verification code: (\d{6})/u)[1];
+
+  const login = await (await request("/clients")).text();
+  assert.match(login, /Administrator access<\/button>\s*<a class="portal-logout-button" href="\/clients\/admin\/code">Enter a code<\/a>/u);
+  const page = await request("/clients/admin/code", { headers: { "CF-Connecting-IP": "203.0.113.200" } });
+  assert.equal(page.status, 200);
+  const pageBody = await page.text();
+  assert.match(pageBody, /Enter the verification code/u);
+  assert.match(pageBody, /form="admin-email-code">Email a code<\/button>/u);
+  assert.match(pageBody, /id="admin-email-code" action="\/clients\/admin\/request" method="post"/u);
+
+  const other = await request("/clients/admin/verify", form({ code }, "", { "CF-Connecting-IP": "203.0.113.200" }));
+  assert.equal(other.status, 303);
+  assert.equal(other.headers.get("Location"), "/clients/admin");
+  const adminCookie = cookieValue(other);
+  assert.equal((await request("/clients/admin", { headers: { Cookie: adminCookie } })).status, 200);
+  assert.equal((await request("/clients/admin/code", { headers: { Cookie: adminCookie } })).headers.get("Location"), "/clients/admin");
+
+  const again = await request("/clients/admin/verify", form({ code }));
+  assert.equal(again.status, 401, "a code works once");
+  assert.match(await again.text(), /That code has expired\. Request a new one from the Admin button\./u);
+
+  // Two codes asked for: either works. A wrong code counts against both, so tries entered from
+  // any device still reach no code more than five times.
+  const newCode = async (ip) => {
+    await request("/clients/admin/request", { method: "POST", headers: { "CF-Connecting-IP": ip } });
+    return email.delivered.at(-1).text.match(/Verification code: (\d{6})/u)[1];
+  };
+  const first = await newCode("198.51.100.32");
+  const second = await newCode("198.51.100.33");
+  assert.equal((await request("/clients/admin/verify", form({ code: first }))).status, 303, "an earlier code still works");
+  assert.equal((await request("/clients/admin/verify", form({ code: second }))).status, 303);
+  const third = await newCode("198.51.100.34");
+  await newCode("198.51.100.35");
+  const wrong = third === "000000" ? "111111" : "000000";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const response = await request("/clients/admin/verify", form({ code: wrong }, "", { "CF-Connecting-IP": `203.0.113.${210 + attempt}` }));
+    assert.equal(response.status, 401);
+    assert.match(await response.text(), /That code did not match\. Check the email and try again\./u);
+  }
+  assert.deepEqual((await db("mhb_admin_challenges").select("attempts")).map((row) => Number(row.attempts)), [4, 4]);
+  assert.equal((await request("/clients/admin/verify", form({ code: third }))).status, 303, "the fifth try, if right, still opens the panel");
+  assert.equal((await request("/clients/admin/verify", form({ code: wrong }))).status, 429, "the other code has had its five tries");
+  assert.equal((await db("mhb_admin_challenges").select("id")).length, 0);
 });
 
 test("admin creates a client portal whose hashed login opens its own portal", async () => {

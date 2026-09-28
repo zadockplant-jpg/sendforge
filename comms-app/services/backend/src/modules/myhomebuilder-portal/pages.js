@@ -184,7 +184,10 @@ export function loginPage(hasError = false, destination = "") {
       </form>
       <form class="portal-admin-entry" action="/clients/admin/request" method="post">
         <span>My Home Builder staff?</span>
-        <button class="portal-logout-button" type="submit">Administrator access</button>
+        <div class="portal-admin-entry-actions">
+          <button class="portal-logout-button" type="submit">Administrator access</button>
+          <a class="portal-logout-button" href="/clients/admin/code">Enter a code</a>
+        </div>
       </form>
     </div>`, { title: "Client Login" });
 }
@@ -499,20 +502,29 @@ export function signPage({ document, party, actionPath, backPath, error = "", ad
     </div>`, { authenticated, admin, scripts: ["/clients/portal/sign.js"], title: `Sign ${document.name}` });
 }
 
-export function adminRequestPage({ state, challengeId = "", error = "", authenticated = false }) {
+// Admin sign-in. "sent" follows a code request; "code" is the page any device can open to enter a
+// code it already has (/clients/admin/code). A code is not tied to the page that asked for it.
+export function adminRequestPage({ state, error = "", authenticated = false }) {
   let body;
-  if (state === "sent") {
+  if (state === "sent" || state === "code") {
+    const intro = state === "sent"
+      ? `<p>A 6-digit code was sent to <strong>mb@myhomebuilderllc.com</strong>. It expires in 10 minutes and works on any device.</p>`
+      : `<p>Enter the 6-digit code emailed to <strong>mb@myhomebuilderllc.com</strong>. It works on any device for 10 minutes after it was sent.</p>`;
+    const elsewhere = state === "sent"
+      ? `<p class="portal-security-note">On another device, open <a class="portal-inline-link" href="/clients/admin/code">myhomebuilderllc.com/clients/admin/code</a> and enter the code there.</p>`
+      : `<p class="portal-security-note">No code yet? <button class="portal-logout-button" type="submit" form="admin-email-code">Email a code</button></p>`;
     body = `<form class="portal-login-card" action="/clients/admin/verify" method="post">
         <h2>Enter the verification code</h2>
-        <p>A 6-digit code was sent to <strong>mb@myhomebuilderllc.com</strong>. It expires in 10 minutes.</p>
+        ${intro}
         ${error ? `<p class="portal-error" role="alert">${escapeHtml(error)}</p>` : ""}
-        <input name="challenge" type="hidden" value="${escapeAttribute(challengeId)}">
         <label for="admin-code">Verification code
           <input id="admin-code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus>
         </label>
         <button class="button button-solid" type="submit">Open admin panel</button>
         <p class="portal-security-note">Codes are single use and are checked securely.</p>
-      </form>`;
+        ${elsewhere}
+      </form>
+      ${state === "code" ? '<form id="admin-email-code" action="/clients/admin/request" method="post" hidden></form>' : ""}`;
   } else if (state === "email-not-configured") {
     body = `<div class="portal-login-card">
         <h2>Email delivery is not set up</h2>

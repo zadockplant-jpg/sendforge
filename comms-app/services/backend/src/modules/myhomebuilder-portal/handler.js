@@ -3,7 +3,6 @@
 // adapts Express requests from the site's forwarding Function (and Stripe's webhook) to it.
 import { db } from "../../config/db.js";
 import {
-  ADMIN_CODE_MAX_ATTEMPTS,
   constantTimeMatches,
   createAdminSession,
   createClientSession,
@@ -25,13 +24,13 @@ import {
 import {
   DEFAULT_CLIENT_SLUG,
   allowAdminRequest,
+  claimAdminAttempt,
   claimSentEmail,
   completeSentEmail,
   createStore,
   deleteSentEmails,
   deleteAdminChallenge,
   deleteTemplate,
-  getAdminChallenge,
   getBilling,
   getBillingById,
   getClient,
@@ -55,7 +54,6 @@ import {
   putSentEmail,
   putShareLink,
   putTemplate,
-  recordAdminAttempt,
   releaseSentEmail,
   rememberRecipient
 } from "./store.js";
@@ -1173,33 +1171,44 @@ export async function handlePortalRequest(context) {
       const code = randomCode();
       const challengeId = randomId(16);
       await putAdminChallenge(store, challengeId, await sha256Hex(`${code}:${challengeId}`));
-      const message = adminCodeMessage(code, requestIp(context.request));
+      const message = adminCodeMessage(code, requestIp(context.request), `${origin}/clients/admin/code`);
       const delivery = await sendEmail(env, { to: adminEmail(env), ...message, category: "admin-code" });
       if (!delivery.ok) {
         await deleteAdminChallenge(store, challengeId);
         return htmlResponse(adminRequestPage({ state: "send-failed", authenticated }), 502);
       }
-      return htmlResponse(adminRequestPage({ state: "sent", challengeId, authenticated }));
+      return htmlResponse(adminRequestPage({ state: "sent", authenticated }));
     }
 
+    // Where a code is entered on any device, without asking for a new one.
+    if (pathname === "/clients/admin/code") {
+      if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+      if (admin) return redirectResponse("/clients/admin");
+      return htmlResponse(adminRequestPage({ state: "code", authenticated }));
+    }
+
+    // A code works on any device, not just the one that asked for it: it is checked against every
+    // code still live. Each attempt counts against all of them (claimAdminAttempt), so no code is
+    // tried more than ADMIN_CODE_MAX_ATTEMPTS times, as when a code was tied to one page.
     if (pathname === "/clients/admin/verify") {
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
       if (!store) return htmlResponse(adminRequestPage({ state: "storage-not-configured", authenticated }), 503);
       const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-      const challengeId = form?.get("challenge") || "";
-      const code = (form?.get("code") || "").trim();
-      const challenge = /^[A-Za-z0-9_-]{8,64}$/u.test(challengeId) ? await getAdminChallenge(store, challengeId) : null;
-      if (!challenge) return htmlResponse(adminRequestPage({ state: "sent", challengeId, error: "That code has expired. Request a new one from the Admin button.", authenticated }), 401);
+      const code = String(form?.get("code") || "").trim();
+      const retry = (error, status) => htmlResponse(adminRequestPage({ state: "code", error, authenticated }), status);
 
-      const attempts = await recordAdminAttempt(store, challengeId, challenge);
-      if (attempts > ADMIN_CODE_MAX_ATTEMPTS) {
-        await deleteAdminChallenge(store, challengeId);
-        return htmlResponse(adminRequestPage({ state: "sent", challengeId, error: "Too many attempts. Request a new code.", authenticated }), 429);
+      const { live, spent } = await claimAdminAttempt(store);
+      if (!live.length && spent) return retry("Too many attempts. Request a new code.", 429);
+      if (!live.length) return retry("That code has expired. Request a new one from the Admin button.", 401);
+      let matched = null;
+      if (/^\d{6}$/u.test(code)) {
+        for (const challenge of live) {
+          if (await constantTimeMatches(await sha256Hex(`${code}:${challenge.id}`), challenge.hash)) matched = challenge;
+        }
       }
-      const matches = /^\d{6}$/u.test(code) && (await constantTimeMatches(await sha256Hex(`${code}:${challengeId}`), challenge.hash));
-      if (!matches) return htmlResponse(adminRequestPage({ state: "sent", challengeId, error: "That code did not match. Check the email and try again.", authenticated }), 401);
+      if (!matched) return retry("That code did not match. Check the email and try again.", 401);
 
-      await deleteAdminChallenge(store, challengeId);
+      await deleteAdminChallenge(store, matched.id);
       return redirectResponse("/clients/admin", await createAdminSession(sessionSecret));
     }
 

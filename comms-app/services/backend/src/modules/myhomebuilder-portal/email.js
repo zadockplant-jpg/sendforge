@@ -113,7 +113,8 @@ export async function sendEmail(env, { to, subject, text, html, from, replyTo, c
   return { ok: false, reason: "email-delivery-failed" };
 }
 
-export function adminCodeMessage(code, requestedFrom) {
+// The code works on any device; codeUrl is the page for entering it without asking for another.
+export function adminCodeMessage(code, requestedFrom, codeUrl = "") {
   return {
     subject: `${code} is your My Home Builder admin code`,
     text: [
@@ -121,7 +122,8 @@ export function adminCodeMessage(code, requestedFrom) {
       "",
       `Verification code: ${code}`,
       "",
-      "The code expires in 10 minutes and can be used once.",
+      "The code expires in 10 minutes and can be used once, on any device.",
+      codeUrl ? `To use it on another device, enter it at ${codeUrl}` : "",
       requestedFrom ? `Request origin: ${requestedFrom}` : "",
       "",
       "If you did not request this, you can ignore this message."

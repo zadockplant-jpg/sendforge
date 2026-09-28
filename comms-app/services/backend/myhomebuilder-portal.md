@@ -58,6 +58,21 @@ the same way jayje.com forwards its account pages. Everything else lives here:
 
 `ADMIN_WRITES_ENABLED=false` pauses admin changes here too; sign-in and viewing keep working.
 
+## Admin sign-in
+
+"Administrator access" (on the login page) and "Admin" (inside a portal) email a 6-digit
+code to the admin address. A code expires in 10 minutes, works once, and works on any
+device. It is not tied to the page that asked for it.
+
+- **Entering a code:** another device opens `/clients/admin/code` ("Enter a code" on the
+  login page) and types it there. The code email names that page too.
+- **How a code is checked:** the entered code is checked against every live code
+  (`mhb_admin_challenges`).
+- **Limits:** each attempt counts against all live codes (`claimAdminAttempt`), so no code is
+  tried more than 5 times, the same as when a code was bound to one page. A code past its
+  tries is removed.
+- A sign-in lasts 24 hours. Client project logins are separate and unchanged.
+
 ## Data
 
 `20260925_create_myhomebuilder_portal.js` adds `mhb_*` tables only, with no foreign keys
