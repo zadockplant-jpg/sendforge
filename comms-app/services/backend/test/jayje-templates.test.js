@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import knex from 'knex';
 import { PGlite } from '@electric-sql/pglite';
 import { up,down } from '../src/db/migrations/20260907_create_jayje_portal.js';
-import { up as templatesUp, down as templatesDown } from '../src/db/migrations/20260920_create_jayje_document_templates.js';
+import { up as templatesUp, down as templatesDown } from '../src/db/migrations/20261001_create_jayje_document_templates.js';
 import { up as requestsUp, down as requestsDown } from '../src/db/migrations/20260906_create_jayje_service_requests.js';
 import { up as referralsUp, down as referralsDown } from '../src/db/migrations/20260917_create_jayje_referrals.js';
 import { createPortalService } from '../src/modules/jayje-portal/service.js';
