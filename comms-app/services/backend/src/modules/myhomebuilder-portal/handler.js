@@ -381,7 +381,7 @@ async function keepInvoicesInDateOrder(store, kind) {
 // sentAt/sentTo set for the caller to save.
 async function emailBillingItem(env, store, item, client, to, origin) {
   const links = shareLinks(origin, item);
-  const message = billingIssuedMessage({ item, client, viewUrl: links.view, payUrl: item.kind === "invoice" && stripeConfigured(env) ? links.pay : "" });
+  const message = billingIssuedMessage({ item, client, viewUrl: links.view, payUrl: isPayable(item) && stripeConfigured(env) ? links.pay : "" });
   const delivery = await sendEmail(env, { to, ...message, ...clientSender(env), category: item.kind });
   if (!delivery.ok) return { ok: false, item };
   await rememberForProject(store, client, to);

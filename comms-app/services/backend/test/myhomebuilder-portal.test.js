@@ -972,6 +972,40 @@ test("a paid invoice deletes with its payment record, a processing one waits, an
   assert.equal(await db("mhb_billing").where({ id: quote.id }).first(), undefined);
 });
 
+test("an invoice emailed after it is paid says paid and has no pay link, and so does one with a bank payment processing", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Pre Construction Services", amount: "80" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  await request(`${path}/send`, form({ to: "pat@example.com" }, adminCookie));
+  const open = email.delivered.at(-1);
+  assert.equal(open.subject, "Invoice 1 from My Home Builder LLC");
+  assert.ok(open.html.includes(`/clients/pay/${item.shareToken}`));
+  assert.match(open.html, /Pay \$80\.00/u);
+
+  await request(`${path}/record-payment`, form({ method: "zelle", paidOn: "2026-09-28" }, adminCookie));
+  await request(`${path}/send`, form({ to: "pat@example.com" }, adminCookie));
+  const paid = email.delivered.at(-1);
+  assert.equal(paid.subject, "Invoice 1 from My Home Builder LLC (paid)");
+  for (const part of [paid.html, paid.text]) {
+    assert.doesNotMatch(part, /\/clients\/pay\/|Pay \$|Pay online|Amount due/u);
+    assert.ok(part.includes(`/clients/invoice/${item.shareToken}`), "the invoice itself is still linked");
+  }
+  assert.match(paid.html, /It is paid\. Thank you\./u);
+  assert.match(paid.html, /Invoice 1 · Paid/u);
+  assert.match(paid.html, />View the paid invoice</u);
+  assert.match(paid.text, /Status: Paid\nPaid on: Sep 28, 2026\nPayment method: Zelle\nBalance due: \$0\.00/u);
+
+  const { item: bank } = await postInvoice(adminCookie, { title: "Foundation", amount: "400" });
+  await request(`/clients/pay/${bank.shareToken}`);
+  await signedWebhook("checkout.session.completed", payStripeSession([...stripe.sessions.keys()].at(-1), { payment_status: "unpaid", amount_total: 40000 }));
+  await request(`/clients/admin/clients/muskegon-addition/billing/${bank.id}/send`, form({ to: "pat@example.com" }, adminCookie));
+  const processing = email.delivered.at(-1);
+  assert.equal(processing.subject, "Invoice 2 from My Home Builder LLC (payment processing)");
+  assert.match(processing.text, /Your bank payment for it is processing\./u);
+  assert.doesNotMatch(processing.html, /\/clients\/pay\/|Pay \$/u);
+});
+
 test("a project's quotes and invoices end with invoiced, paid and outstanding totals", async () => {
   const adminCookie = await loginAsAdmin();
   const dashboard = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();

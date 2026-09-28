@@ -233,9 +233,63 @@ function joinText(lines) {
 
 // ---------- Messages ----------
 
+// An invoice emailed after it was paid, or while a bank payment for it is processing, says so and
+// has no Pay button, so the client is not asked to pay twice.
+function settledInvoiceMessage({ item, client, viewUrl }) {
+  const total = money(item.amountCents, item.currency);
+  const processing = item.status === "processing";
+  const payment = item.payment || {};
+  const paidOn = formatDate(item.paidAt);
+  const balance = money(Math.max(item.amountCents - (payment.amountCents ?? item.amountCents), 0), item.currency);
+  const status = processing ? "Payment processing" : "Paid";
+  const lead = processing
+    ? "Here is your invoice from My Home Builder LLC. Your bank payment for it is processing."
+    : "Here is your invoice from My Home Builder LLC. It is paid. Thank you.";
+  const rows = [["Invoice", item.number], ["Project", client.name], ["Invoice total", total], ["Status", status]];
+  if (!processing) rows.push(["Paid on", paidOn], ["Payment method", payment.label || ""], ["Balance due", balance]);
+  const body = [
+    paragraph(escapeHtml(lead)),
+    facts(rows),
+    button(viewUrl, processing ? "View the invoice" : "View the paid invoice"),
+    linesTable(item, "Invoice total"),
+    notesBlock(item)
+  ].join("\n");
+  return {
+    subject: `Invoice ${item.number} from My Home Builder LLC (${processing ? "payment processing" : "paid"})`,
+    html: layout({
+      title: `Invoice ${item.number}`,
+      preheader: processing ? `Payment processing · ${item.title}` : `${total} paid${paidOn ? ` on ${paidOn}` : ""} · ${item.title}`,
+      kicker: `Invoice ${item.number} · ${status}`,
+      heading: item.title,
+      body
+    }),
+    text: joinText([
+      lead,
+      "",
+      `Invoice: ${item.number}`,
+      `Project: ${client.name}`,
+      `Title: ${item.title}`,
+      `Invoice total: ${total}`,
+      `Status: ${status}`,
+      !processing && paidOn ? `Paid on: ${paidOn}` : null,
+      !processing && payment.label ? `Payment method: ${payment.label}` : null,
+      !processing ? `Balance due: ${balance}` : null,
+      "",
+      ...textLines(item, "Invoice total"),
+      "",
+      `View the invoice: ${viewUrl}`,
+      item.description ? `\nNotes and terms:\n${item.description}` : null,
+      "",
+      "Questions? Reply to this email.",
+      "My Home Builder LLC · Muskegon, Michigan"
+    ])
+  };
+}
+
 export function billingIssuedMessage({ item, client, viewUrl, payUrl }) {
   const total = money(item.amountCents, item.currency);
   const due = formatDate(item.dueDate);
+  if (item.kind === "invoice" && (item.status === "paid" || item.status === "processing")) return settledInvoiceMessage({ item, client, viewUrl });
   if (item.kind === "invoice") {
     const body = [
       paragraph("Here is your invoice from My Home Builder LLC."),

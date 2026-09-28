@@ -149,6 +149,10 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
     item keep the number the row has, so a save made while numbers move cannot restore an old
     one.
   - Quotes keep their `mhb_counters` sequence, in the order entered.
+- Only an open invoice's email has a Pay button and pay link.
+  - An invoice emailed after it is paid says so: "(paid)" in the subject, then the paid date,
+    method and balance due, with a "View the paid invoice" button.
+  - One emailed while a bank payment is processing says that instead.
 - A quote or invoice can be deleted from its page (Delete invoice / Delete quote).
   - A confirmation page first says what goes with it: a recorded payment, a link already
     emailed, the quote or invoice linked to it.
