@@ -1,4 +1,4 @@
-import { billingLabel, billingLineItems, isEditable, moneyInput, PAYMENT_METHODS, quantityText } from "./billing.js";
+import { billingLabel, billingLineItems, isEditable, issuedDate, moneyInput, PAYMENT_METHODS, quantityText, todayInMichigan } from "./billing.js";
 import { addressesText, clientEmails, MAX_RECIPIENTS } from "./email.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 
@@ -235,7 +235,25 @@ function billingRows(items, { basePath, viewer }) {
   return `<table class="portal-table">
         <thead><tr><th scope="col">Number</th><th scope="col">Item</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Action</span></th></tr></thead>
         <tbody>${rows.join("")}</tbody>
-      </table>`;
+      </table>${viewer === "admin" ? billingTotals(items) : ""}`;
+}
+
+// Invoiced, paid and outstanding across a project's invoices; voided invoices and quotes are left
+// out. Outstanding is each invoice's balance due, as its page shows it: all of an unpaid invoice,
+// and whatever a payment fell short of a paid one's total.
+function billingTotals(items) {
+  const invoices = items.filter((item) => item.kind === "invoice" && item.status !== "void");
+  if (!invoices.length) return "";
+  const paidOf = (item) => (item.status === "paid" ? item.payment?.amountCents ?? item.amountCents : 0);
+  const invoiced = invoices.reduce((sum, item) => sum + item.amountCents, 0);
+  const paid = invoices.reduce((sum, item) => sum + paidOf(item), 0);
+  const outstanding = invoices.reduce((sum, item) => sum + Math.max(item.amountCents - paidOf(item), 0), 0);
+  return `
+      <dl class="billing-totals">
+        <div><dt>Invoiced</dt><dd>${money(invoiced)}</dd></div>
+        <div><dt>Paid</dt><dd>${money(paid)}</dd></div>
+        <div class="billing-totals-due"><dt>Outstanding</dt><dd>${money(outstanding)}</dd></div>
+      </dl>`;
 }
 
 function documentRows(documents, { basePath, viewer }) {
@@ -363,7 +381,7 @@ export function billingDocument({ item, client }) {
         </header>
         <dl class="billing-doc-meta">
           <div><dt>${invoice ? "Bill to" : "Prepared for"}</dt><dd>${escapeHtml(client.name)}</dd></div>
-          <div><dt>Issued</dt><dd>${dateText(item.createdAt)}</dd></div>
+          <div><dt>Issued</dt><dd>${dateText(issuedDate(item))}</dd></div>
           ${item.dueDate ? `<div><dt>${invoice ? "Due" : "Valid until"}</dt><dd>${dateText(item.dueDate)}</dd></div>` : ""}
           <div><dt>Status</dt><dd><span class="portal-status portal-status-${tone}">${label}</span></dd></div>
         </dl>
@@ -784,7 +802,11 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
           ? `<label for="due-in-days">Days until due (optional)
           <input id="due-in-days" name="dueInDays" type="text" inputmode="numeric" maxlength="3" value="${escapeAttribute(values.dueInDays ?? "")}" placeholder="15">
         </label>`
-          : `<label for="billing-due">${kind === "invoice" ? "Due date" : "Valid until"} (optional)
+          : `<label for="billing-date">Date
+          <input id="billing-date" name="issuedOn" type="date" required value="${escapeAttribute(values.issuedOn || todayInMichigan())}">
+          <small class="admin-field-hint">Shown as the issue date. Invoices are numbered in date order across every client portal; invoices with the same date, in the order they were entered.</small>
+        </label>
+        <label for="billing-due">${kind === "invoice" ? "Due date" : "Valid until"} (optional)
           <input id="billing-due" name="dueDate" type="date" value="${escapeAttribute(values.dueDate || "")}">
         </label>`}
         <label for="billing-description">Notes and terms
@@ -1007,6 +1029,7 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   cards.push(`<section class="admin-card">
           <h2>Manage</h2>
           <div class="admin-manage">${manage.join("\n            ")}</div>
+          <div class="admin-danger"><a class="portal-logout-button" href="${base}/delete">Delete ${invoice ? "invoice" : "quote"}</a></div>
           ${activity(item, receipt)}
         </section>`);
 
@@ -1022,6 +1045,56 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
       </div>
       ${recipientList(recipients)}
     </div>`, { title: `${billingLabel(item)} · ${item.title}`, scripts: [BILLING_SCRIPT] });
+}
+
+// Confirms deleting a quote or invoice, saying what goes with it. `partner` is the quote an
+// invoice was made from, or the invoice made from a quote.
+export function billingDeletePage({ client, item, partner = null }) {
+  const base = `/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.id)}`;
+  const invoice = item.kind === "invoice";
+  const noun = invoice ? "invoice" : "quote";
+  const label = billingLabel(item);
+  const [, status] = billingStatus(item);
+  const facts = [
+    ["Title", item.title],
+    [invoice ? "Amount" : "Quote total", money(item.amountCents, item.currency)],
+    ["Status", status],
+    ["Client portal", client.name]
+  ];
+  const notes = [];
+  if (item.status === "paid") {
+    const paid = `${paymentSummary(item)} · ${money(item.payment?.amountCents ?? item.amountCents, item.currency)}`;
+    notes.push(item.payment?.source === "stripe"
+      ? `It was paid online through Stripe (${paid}). The payment stays in the Stripe account; this portal will no longer show it.`
+      : `It is marked paid (${paid}). That payment record is deleted with it.`);
+  }
+  if (item.sentAt) notes.push(`It was emailed to ${item.sentTo}. The link in that email will stop working.`);
+  if (partner) {
+    notes.push(invoice
+      ? `It was made from Quote ${partner.number}. The quote stays and can be invoiced again.`
+      : `Invoice ${partner.number} was made from it. The invoice stays.`);
+  }
+  if (item.status === "open" && invoice) notes.push("To keep a record of it instead, go back and use Mark void.");
+  const numbering = invoice
+    ? "Later invoices move up a number, so invoice numbers stay in date order."
+    : "Its number is not used again.";
+  const action = item.status === "processing"
+    ? `<p class="portal-error" role="alert">A bank payment for this invoice is still processing, so it can be deleted once the payment finishes.</p>
+          <a class="portal-secondary-link" href="${base}">Back to ${escapeHtml(label)}</a>`
+    : `<form class="admin-manage" action="${base}/delete" method="post">
+            <button class="button button-danger" type="submit">Delete ${noun}</button>
+            <a class="portal-secondary-link" href="${base}">Cancel</a>
+          </form>`;
+  return adminShell(`<div class="site-width portal-shell">
+      <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a></p>
+      <h1 class="portal-heading portal-heading-sm">Delete ${escapeHtml(label)}?</h1>
+      <section class="admin-card billing-delete">
+        <ol class="admin-activity">${facts.map(([name, value]) => `<li><span>${escapeHtml(name)}</span><span>${escapeHtml(value)}</span></li>`).join("")}</ol>
+        ${notes.map((note) => `<p class="admin-meta">${escapeHtml(note)}</p>`).join("\n        ")}
+        <p class="admin-meta"><strong>Deleting can't be undone.</strong> ${numbering}</p>
+        ${action}
+      </section>
+    </div>`, { title: `Delete ${label}` });
 }
 
 export function adminTemplatesPage({ templates, notice = null }) {

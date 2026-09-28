@@ -3,7 +3,7 @@
 // `data` column; the columns beside it exist for lookups and constraints.
 import { createHash } from "node:crypto";
 import { ADMIN_CODE_MAX_ATTEMPTS, ADMIN_CODE_TTL_SECONDS } from "./security.js";
-import { billingNumber } from "./billing.js";
+import { billingNumber, issuedDate } from "./billing.js";
 
 export const DEFAULT_CLIENT_SLUG = "muskegon-addition";
 export const DEFAULT_PROJECT_PATH = "/clients/muskegon-addition";
@@ -75,9 +75,51 @@ export async function putClient(store, client) {
 
 // ---------- Quotes and invoices ----------
 
+// Newest date first; on the same date, the latest entered first.
 export async function listBilling(store, slug) {
   const rows = await store.db("mhb_billing").where({ client_slug: slug }).orderBy("created_at", "desc").select("data").timeout(QUERY_TIMEOUT_MS);
-  return rows.map(data);
+  return rows.map(data).sort((left, right) => issuedDate(right).localeCompare(issuedDate(left)) || String(right.createdAt).localeCompare(String(left.createdAt)));
+}
+
+// Serializes renumbering, so two requests cannot hand out the same numbers.
+const INVOICE_NUMBER_LOCK = 72648110;
+
+// Invoices are numbered 1, 2, 3 … in date order across every client portal, and invoices with
+// the same date in the order they were entered. Run after an invoice is added, re-dated or
+// deleted. Numbers move in two steps, so no two invoices hold one number in between, and a quote
+// made into an invoice keeps naming it. Returns the ids of invoices whose number changed.
+export async function renumberInvoices(store) {
+  return store.db.transaction(async (trx) => {
+    await trx.raw("SELECT pg_advisory_xact_lock(?)", [INVOICE_NUMBER_LOCK]).timeout(QUERY_TIMEOUT_MS);
+    const invoices = (await trx("mhb_billing").where({ kind: "invoice" }).select("id", "number", "data").timeout(QUERY_TIMEOUT_MS))
+      .map((row) => ({ id: row.id, number: row.number, item: data(row) }))
+      .sort((left, right) => issuedDate(left.item).localeCompare(issuedDate(right.item))
+        || String(left.item.createdAt).localeCompare(String(right.item.createdAt))
+        || left.id.localeCompare(right.id));
+    const changed = invoices.map((entry, index) => ({ ...entry, next: billingNumber(index + 1) })).filter((entry) => entry.number !== entry.next);
+    if (!changed.length) return [];
+
+    for (const entry of changed) {
+      await trx("mhb_billing").where({ id: entry.id }).update({ number: `~${entry.id}`.slice(0, 16) }).timeout(QUERY_TIMEOUT_MS);
+    }
+    // Only the number changes, in place, so a save made meanwhile to anything else is kept.
+    for (const entry of changed) {
+      await trx("mhb_billing")
+        .where({ id: entry.id })
+        .update({ number: entry.next, data: trx.raw("jsonb_set(data, '{number}', to_jsonb(?::text))", [entry.next]), updated_at: trx.fn.now() })
+        .timeout(QUERY_TIMEOUT_MS);
+    }
+    const numbers = new Map(changed.map((entry) => [entry.id, entry.next]));
+    const quotes = await trx("mhb_billing").where({ kind: "quote" }).whereRaw("data->>'invoiceId' IS NOT NULL").select("id", "data").timeout(QUERY_TIMEOUT_MS);
+    for (const row of quotes) {
+      const quote = data(row);
+      const number = numbers.get(quote.invoiceId);
+      if (number && quote.invoiceNumber !== number) {
+        await trx("mhb_billing").where({ id: row.id }).update({ data: trx.raw("jsonb_set(data, '{invoiceNumber}', to_jsonb(?::text))", [number]) }).timeout(QUERY_TIMEOUT_MS);
+      }
+    }
+    return changed.map((entry) => entry.id);
+  });
 }
 
 export async function getBilling(store, slug, id) {
@@ -90,6 +132,19 @@ export async function getBillingById(store, id) {
   return data(await store.db("mhb_billing").where({ id: String(id) }).first().timeout(QUERY_TIMEOUT_MS));
 }
 
+// Deletes a quote or invoice with its sent-email records (the caller re-sorts invoice numbers).
+// `unlink` is the quote or invoice linked to it, saved without the link, in the same transaction.
+export async function deleteBilling(store, item, { unlink = null } = {}) {
+  await store.db.transaction(async (trx) => {
+    await trx("mhb_billing").where({ id: item.id, client_slug: item.clientSlug }).del().timeout(QUERY_TIMEOUT_MS);
+    const prefix = `${item.clientSlug}:${item.id}:`;
+    await trx.raw("DELETE FROM mhb_sent_emails WHERE left(key, ?) = ?", [prefix.length, prefix]).timeout(QUERY_TIMEOUT_MS);
+    if (unlink) {
+      await trx("mhb_billing").where({ id: unlink.id }).update({ data: keepNumber(trx, unlink), updated_at: trx.fn.now() }).timeout(QUERY_TIMEOUT_MS);
+    }
+  });
+}
+
 // Moves quotes or invoices (already carrying their new clientSlug) out of fromSlug. Their
 // sent-email records are keyed by project, so they move too: a receipt already sent is not sent
 // again, and the admin page still shows it.
@@ -98,7 +153,7 @@ export async function moveBilling(store, items, fromSlug) {
     for (const item of items) {
       await trx("mhb_billing")
         .where({ id: item.id, client_slug: fromSlug })
-        .update({ client_slug: item.clientSlug, data: JSON.stringify(item), updated_at: trx.fn.now() })
+        .update({ client_slug: item.clientSlug, data: keepNumber(trx, item), updated_at: trx.fn.now() })
         .timeout(QUERY_TIMEOUT_MS);
       const from = `${fromSlug}:${item.id}:`;
       await trx.raw(
@@ -107,6 +162,12 @@ export async function moveBilling(store, items, fromSlug) {
       ).timeout(QUERY_TIMEOUT_MS);
     }
   });
+}
+
+// Numbers are set only by renumberInvoices, which re-sorts them by date. A save of an item read
+// earlier keeps the number the row has now, so it cannot put back an old one.
+function keepNumber(db, item) {
+  return db.raw("jsonb_set(?::jsonb, '{number}', to_jsonb(number))", [JSON.stringify(item)]);
 }
 
 export async function putBilling(store, item) {
@@ -122,7 +183,7 @@ export async function putBilling(store, item) {
   await store.db("mhb_billing")
     .insert(row)
     .onConflict("id")
-    .merge({ share_token: row.share_token, data: row.data, updated_at: store.db.fn.now() })
+    .merge({ share_token: row.share_token, data: store.db.raw("jsonb_set(excluded.data, '{number}', to_jsonb(mhb_billing.number))"), updated_at: store.db.fn.now() })
     .timeout(QUERY_TIMEOUT_MS);
 }
 

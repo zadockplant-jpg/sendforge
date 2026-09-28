@@ -30,6 +30,7 @@ import {
   createStore,
   deleteSentEmails,
   deleteAdminChallenge,
+  deleteBilling,
   deleteTemplate,
   getBilling,
   getBillingById,
@@ -45,6 +46,7 @@ import {
   listRecipients,
   listTemplates,
   moveBilling,
+  renumberInvoices,
   nextBillingNumber,
   putAdminChallenge,
   putBilling,
@@ -73,6 +75,7 @@ import {
   billingIssuedMessage,
   clientEmails,
   clientSender,
+  deletedInvoicePaymentMessage,
   duplicatePaymentMessage,
   emailConfigured,
   isValidEmail,
@@ -87,6 +90,7 @@ import {
   addDays,
   billingLabel,
   billingLineItems,
+  issuedDate,
   isEditable,
   isPayable,
   parseBillingForm,
@@ -99,6 +103,7 @@ import {
   adminDashboardPage,
   adminRequestPage,
   adminTemplatesPage,
+  billingDeletePage,
   billingDetailPage,
   billingEditorPage,
   loginPage,
@@ -258,12 +263,16 @@ const NOTICES = {
   "moved-pair": { text: "Sent to this project with its linked quote or invoice. Both keep their numbers and links." },
   "move-processing": { text: "A bank payment for this invoice is still processing, so it stays in this project until the payment finishes.", tone: "error" },
   "project-invalid": { text: "Choose one of the other client portals.", tone: "error" },
+  "invoice-deleted": { text: "Invoice deleted. Its link no longer works." },
+  "quote-deleted": { text: "Quote deleted. Its link no longer works." },
+  renumbered: { text: "Invoice numbers were updated to keep them in date order." },
+  "delete-processing": { text: "A bank payment for this invoice is still processing, so it can be deleted once the payment finishes.", tone: "error" },
   "name-required": { text: "Enter your name to accept the quote.", tone: "error" },
   "files-not-configured": { text: "File storage is not configured, so documents cannot be stored yet.", tone: "error" }
 };
 
 function noticeFromQuery(url) {
-  const texts = [url.searchParams.get("notice"), url.searchParams.get("also")].map((code) => NOTICES[code]).filter(Boolean);
+  const texts = [url.searchParams.get("notice"), ...url.searchParams.getAll("also")].map((code) => NOTICES[code]).filter(Boolean);
   if (!texts.length) return null;
   return { text: texts.map((notice) => notice.text).join(" "), tone: texts.some((notice) => notice.tone === "error") ? "error" : texts[0].tone };
 }
@@ -344,6 +353,7 @@ async function buildBillingItem(store, client, values, extra = {}) {
     amountCents: values.amountCents,
     currency: "usd",
     dueDate: values.dueDate || "",
+    issuedOn: values.issuedOn || todayInMichigan(),
     status: "open",
     shareToken: randomId(24),
     createdAt: new Date().toISOString(),
@@ -351,9 +361,20 @@ async function buildBillingItem(store, client, values, extra = {}) {
   };
 }
 
+// Saves a new quote or invoice. An invoice then takes its place in date order, which can move
+// other invoices' numbers; the saved item comes back with its number, with `renumbered` set when
+// other invoices moved.
 async function saveNewBillingItem(store, item) {
   await putShareLink(store, item.shareToken, item);
   await putBilling(store, item);
+  if (item.kind !== "invoice") return { item, renumbered: false };
+  const moved = await renumberInvoices(store);
+  return { item: (await getBilling(store, item.clientSlug, item.id)) || item, renumbered: moved.some((id) => id !== item.id) };
+}
+
+// Re-sorts invoice numbers after an invoice is re-dated or deleted. True when any number moved.
+async function keepInvoicesInDateOrder(store, kind) {
+  return kind === "invoice" && (await renumberInvoices(store)).length > 0;
 }
 
 // Emails a quote or invoice to a list of addresses, as one email. Returns the item with
@@ -525,7 +546,9 @@ async function recordPaymentFailure(env, store, invoice, session, origin) {
 // Reuses the invoice's open Checkout Session so two tabs or two clicks cannot start two payments.
 async function checkoutUrl(env, store, invoice, client, { successUrl, cancelUrl }) {
   const now = Math.floor(Date.now() / 1000);
-  if (invoice.checkoutSessionId && invoice.checkoutSuccessUrl === successUrl && invoice.checkoutAmountCents === invoice.amountCents && (invoice.checkoutExpiresAt || 0) > now + 300) {
+  // An open Checkout is reused only while it still shows this total and number (numbers follow
+  // invoice dates, so they can change).
+  if (invoice.checkoutSessionId && invoice.checkoutSuccessUrl === successUrl && invoice.checkoutAmountCents === invoice.amountCents && invoice.checkoutNumber === invoice.number && (invoice.checkoutExpiresAt || 0) > now + 300) {
     const existing = await retrieveCheckoutSession(env, invoice.checkoutSessionId).catch(() => null);
     if (existing?.status === "open" && existing.url) return existing.url;
   }
@@ -535,7 +558,8 @@ async function checkoutUrl(env, store, invoice, client, { successUrl, cancelUrl 
     checkoutSessionId: session.id,
     checkoutExpiresAt: session.expires_at || now + 23 * 60 * 60,
     checkoutSuccessUrl: successUrl,
-    checkoutAmountCents: invoice.amountCents
+    checkoutAmountCents: invoice.amountCents,
+    checkoutNumber: invoice.number
   });
   return session.url;
 }
@@ -666,6 +690,15 @@ async function handleWebhook(context, store, origin) {
     // By id alone: the session's clientSlug is the project the invoice was in when Checkout
     // started, and the invoice may have been sent to another project since.
     const invoice = await getBillingById(store, invoiceId);
+    // Paid for an invoice deleted from the portal: the money is in Stripe with nothing here to
+    // record it on, so the builder is told, once per Checkout.
+    if (!invoice && event.type !== "checkout.session.async_payment_failed" && session.payment_status === "paid") {
+      const slug = session.metadata?.clientSlug;
+      const client = isValidSlug(slug) ? await getClient(store, slug) : null;
+      const adminUrl = client ? `${origin}/clients/admin?client=${encodeURIComponent(client.slug)}` : `${origin}/clients/admin`;
+      const alert = await sendOnce(context.env, store, `deleted-invoice:${session.id}`, { to: adminEmail(context.env), ...deletedInvoicePaymentMessage({ session, client, adminUrl }), category: "builder-notice" });
+      if (!alert.ok) return new Response("Email delivery failed; retry later", { status: 500 });
+    }
     if (invoice && invoice.kind === "invoice") {
       try {
         if (event.type === "checkout.session.async_payment_failed") {
@@ -803,7 +836,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
     const templates = await listTemplates(store);
     const template = url.searchParams.get("template") ? templates.find((entry) => entry.id === url.searchParams.get("template")) : null;
-    const values = template ? editorValuesFromTemplate(template, today) : { kind: url.searchParams.get("kind") === "quote" ? "quote" : "invoice", lineItems: [] };
+    const values = { ...(template ? editorValuesFromTemplate(template, today) : { kind: url.searchParams.get("kind") === "quote" ? "quote" : "invoice", lineItems: [] }), issuedOn: today };
     return scriptedHtmlResponse(billingEditorPage({ mode: "create", client: target, values, actionPath: billingBase, backPath: `/clients/admin?client=${encodeURIComponent(slug)}`, templates, readiness }));
   }
 
@@ -822,17 +855,20 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (parsed.error) return renderError(echo, parsed.error);
     if (saveTemplate && (!parsed.values.templateName || parsed.values.templateName.length > 80)) return renderError(echo, "Give the template a name of 80 characters or fewer, or untick Also save this as a template.");
 
-    let item = await buildBillingItem(store, target, parsed.values);
+    // Saved (and numbered in date order) before it is emailed, so the email carries its number.
+    const saved = await saveNewBillingItem(store, await buildBillingItem(store, target, parsed.values));
+    let item = saved.item;
     let notice = "billing-added";
     const projectEmails = clientEmails(target);
     if (sendNow && readiness.email && projectEmails.length) {
       const result = await emailBillingItem(env, store, item, target, projectEmails, origin);
+      if (result.ok) await putBilling(store, result.item);
       item = result.item;
       notice = result.ok ? "billing-sent" : "billing-send-failed";
     }
-    await saveNewBillingItem(store, item);
     if (saveTemplate) await putTemplate(store, templateRecord({ ...parsed.values, dueInDays: null }));
-    return redirectResponse(`${adminBillingPath(slug, item.id)}?notice=${notice}${saveTemplate ? "&also=template-saved" : ""}`);
+    const also = [saveTemplate ? "&also=template-saved" : "", saved.renumbered ? "&also=renumbered" : ""].join("");
+    return redirectResponse(`${adminBillingPath(slug, item.id)}?notice=${notice}${also}`);
   }
 
   let item = await getBilling(store, slug, id);
@@ -876,7 +912,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     // How a paid invoice was paid ("manual" or "stripe"), for the editor's note; "" when unpaid.
     const paid = item.status === "paid" ? (item.payment?.source === "stripe" ? "stripe" : "manual") : "";
     if (isRead) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: editorValuesFromItem(item), actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }));
+      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: { ...editorValuesFromItem(item), issuedOn: issuedDate(item) }, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }));
     }
     if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
     const form = await readBoundedForm(context.request, MAX_BILLING_FORM_BYTES);
@@ -888,11 +924,13 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     }
     if (item.checkoutSessionId && parsed.values.amountCents !== item.amountCents) await expireCheckoutSession(env, item.checkoutSessionId);
     const { title, description, lineItems, amountCents, dueDate } = parsed.values;
+    const issuedOn = parsed.values.issuedOn || issuedDate(item);
     // A payment recorded by hand is the invoice paid in full, so its amount follows the new total.
     // A Stripe payment keeps the amount Stripe charged.
     const payment = item.payment?.source === "manual" ? { payment: { ...item.payment, amountCents } } : {};
-    await putBilling(store, { ...item, title, description, lineItems, amountCents, dueDate, ...payment, updatedAt: new Date().toISOString() });
-    return redirectResponse(`${itemPath}?notice=billing-updated`);
+    await putBilling(store, { ...item, title, description, lineItems, amountCents, dueDate, issuedOn, ...payment, updatedAt: new Date().toISOString() });
+    const renumbered = issuedOn !== issuedDate(item) && (await keepInvoicesInDateOrder(store, item.kind));
+    return redirectResponse(`${itemPath}?notice=billing-updated${renumbered ? "&also=renumbered" : ""}`);
   }
 
   // Copy to another project: that project's new quote or invoice editor, filled in from this one
@@ -901,11 +939,32 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
     const destination = await otherProject(url.searchParams.get("to") || "");
     if (!destination) return redirectResponse(`${itemPath}?notice=project-invalid`);
-    const values = { ...editorValuesFromItem(item), lineItems: billingLineItems(item), dueDate: item.dueDate && item.dueDate >= today ? item.dueDate : "" };
+    const values = { ...editorValuesFromItem(item), lineItems: billingLineItems(item), dueDate: item.dueDate && item.dueDate >= today ? item.dueDate : "", issuedOn: today };
     const notice = { text: `Copied from ${billingLabel(item)} in ${target.name}. Review it, then post it to ${destination.name}.` };
     return scriptedHtmlResponse(billingEditorPage({
       mode: "create", client: destination, values, notice, actionPath: `/clients/admin/clients/${encodeURIComponent(destination.slug)}/billing`, backPath: itemPath, readiness
     }));
+  }
+
+  // Delete: a page confirming what goes with it, then the quote or invoice is removed with its
+  // sent-email records. Later invoices move up a number (a quote's number is not used again), and
+  // a quote and the invoice made from it lose their link to each other. An unpaid invoice's open
+  // Checkout is closed first; a bank payment still processing keeps the invoice until it finishes.
+  if (action === "delete") {
+    const partnerId = item.kind === "invoice" ? item.fromQuoteId : item.invoiceId;
+    const partner = partnerId ? await getBilling(store, slug, partnerId) : null;
+    if (isRead) return scriptedHtmlResponse(billingDeletePage({ client: target, item, partner }));
+    if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
+    if (item.status === "processing") return redirectResponse(`${itemPath}?notice=delete-processing`);
+    if (item.status === "open" && item.checkoutSessionId) await expireCheckoutSession(env, item.checkoutSessionId);
+    let unlink = null;
+    if (partner) {
+      const { invoiceId: _invoiceId, invoiceNumber: _invoiceNumber, fromQuoteId: _quoteId, fromQuoteNumber: _quoteNumber, ...rest } = partner;
+      unlink = { ...rest, updatedAt: new Date().toISOString() };
+    }
+    await deleteBilling(store, item, { unlink });
+    const renumbered = await keepInvoicesInDateOrder(store, item.kind);
+    return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${item.kind}-deleted${renumbered ? "&also=renumbered" : ""}`);
   }
 
   if (method !== "POST") return methodNotAllowedResponse(["POST"]);
@@ -1018,11 +1077,11 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   if (action === "invoice") {
     if (item.kind !== "quote" || item.invoiceId || !(item.status === "open" || item.status === "accepted")) return redirectResponse(itemPath);
     if (item.amountCents < MIN_INVOICE_CENTS) return redirectResponse(`${itemPath}?notice=invoice-too-small`);
-    const invoice = await buildBillingItem(store, target, { ...editorValuesFromItem(item), kind: "invoice", dueDate: "", amountCents: item.amountCents }, { fromQuoteId: item.id, fromQuoteNumber: item.number });
-    await saveNewBillingItem(store, invoice);
+    // Dated the day it is made; its number is its place in date order.
+    const { item: invoice, renumbered } = await saveNewBillingItem(store, await buildBillingItem(store, target, { ...editorValuesFromItem(item), kind: "invoice", dueDate: "", issuedOn: "", amountCents: item.amountCents }, { fromQuoteId: item.id, fromQuoteNumber: item.number }));
     const accepted = item.status === "open" ? { status: "accepted", acceptedAt: new Date().toISOString(), acceptedVia: "admin" } : {};
     await putBilling(store, { ...item, ...accepted, invoiceId: invoice.id, invoiceNumber: invoice.number });
-    return redirectResponse(`${adminBillingPath(slug, invoice.id)}?notice=invoice-created`);
+    return redirectResponse(`${adminBillingPath(slug, invoice.id)}?notice=invoice-created${renumbered ? "&also=renumbered" : ""}`);
   }
 
   return notFoundResponse(null, true);

@@ -134,10 +134,34 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
 - Uploaded documents, signature images and signed PDFs are stored in `mhb_files` (up to
   20 MB each).
 - Invoices are numbered 1, 2, 3 … with no prefix, dash or leading zeros, and quotes have
-  their own 1, 2, 3 … sequence. The counters in `mhb_counters` are shared by every client
-  portal, so a number is unique per kind across the business. Wherever a number appears
-  on its own, it is labeled "Invoice 12" or "Quote 3". Migration
-  `20260925_myhomebuilder_portal_plain_numbers.js` rewrote earlier numbers (INV-0012 became 12).
+  their own 1, 2, 3 … sequence. Wherever a number appears on its own, it is labeled
+  "Invoice 12" or "Quote 3". Migration `20260925_myhomebuilder_portal_plain_numbers.js`
+  rewrote earlier numbers (INV-0012 became 12).
+  - Each quote and invoice has a date (`issuedOn`, the editor's Date field, shown as
+    "Issued"). It defaults to the day it is entered; ones saved before dates existed use the
+    day they were created.
+  - Invoice numbers follow those dates across every client portal. Invoices with the same
+    date are numbered in the order they were entered.
+  - `renumberInvoices` re-sorts them after an invoice is added, re-dated or deleted, so
+    numbers can move, and a quote made into an invoice keeps naming it. Emails already sent
+    keep the number they were sent with.
+  - An open Checkout is reused only while it shows the current number. Saves of a whole
+    item keep the number the row has, so a save made while numbers move cannot restore an old
+    one.
+  - Quotes keep their `mhb_counters` sequence, in the order entered.
+- A quote or invoice can be deleted from its page (Delete invoice / Delete quote).
+  - A confirmation page first says what goes with it: a recorded payment, a link already
+    emailed, the quote or invoice linked to it.
+  - Deleting removes it and its sent-email records. An unpaid invoice's open Checkout is
+    closed, and a bank payment still processing blocks the delete. The linked quote can be
+    invoiced again.
+  - If Stripe is later paid through a deleted invoice's Checkout, the builder is emailed once
+    ("Stripe payment for deleted Invoice N"), since the portal has nothing to record it on.
+- Each project's list of quotes and invoices in the admin panel ends with its totals.
+  - **Invoiced:** every invoice not voided.
+  - **Paid:** what was recorded as paid.
+  - **Outstanding:** the sum of each invoice's balance due.
+  - Quotes are left out. Clients' portals do not show these totals.
 - Automatic emails (receipts and builder notices) are claimed in `mhb_sent_emails` before
   sending, so a payment produces one receipt however many times Stripe delivers the event.
   If SendGrid fails, the claim is released and the webhook answers 500, so Stripe retries.

@@ -414,6 +414,28 @@ export function duplicatePaymentMessage({ item, client, session, adminUrl }) {
   };
 }
 
+// Stripe took a payment for an invoice no longer in the portal (deleted), so nothing records it.
+export function deletedInvoicePaymentMessage({ session, client, adminUrl }) {
+  const number = session.metadata?.invoiceNumber || "";
+  const label = number ? `Invoice ${number}` : "an invoice";
+  const amount = money(Number.isInteger(session.amount_total) ? session.amount_total : 0, session.currency || "usd");
+  const payer = session.customer_details?.email || session.customer_email || "";
+  const reference = session.payment_intent ? String(session.payment_intent) : String(session.id || "");
+  const project = client?.name || "";
+  const lead = `Stripe received ${amount}${payer ? ` from ${payer}` : ""} for ${label}${project ? ` (${project})` : ""}, which was deleted from the client portal, so the portal has no record of this payment.`;
+  const action = `Check payment ${reference} in the Stripe dashboard. Refund it, or create the invoice again and record the payment on it. If the invoice was deleted after it was paid, nothing needs doing.`;
+  const body = [
+    paragraph(escapeHtml(lead)),
+    paragraph(escapeHtml(action), "font-size:13px;color:#555555;"),
+    adminUrl ? button(adminUrl, "Open the client portal") : ""
+  ].join("\n");
+  return {
+    subject: `Stripe payment for deleted ${label.replace(/^an /u, "")}`,
+    html: layout({ title: "Payment for a deleted invoice", preheader: `${amount}${payer ? ` from ${payer}` : ""}`, kicker: "Payment received", heading: "A deleted invoice was paid.", body, forClient: false }),
+    text: joinText([lead, action, adminUrl ? `\nAdmin panel: ${adminUrl}` : null])
+  };
+}
+
 export function paymentFailedMessage({ item, client, adminUrl }) {
   const label = billingLabel(item);
   const body = [

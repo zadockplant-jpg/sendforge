@@ -113,10 +113,11 @@ export function parseBillingForm(form, { template = false } = {}) {
   const title = String(form.get("title") || "").trim();
   const description = String(form.get("description") || "").trim();
   const dueDate = String(form.get("dueDate") || "").trim();
+  const issuedOn = String(form.get("issuedOn") || "").trim();
   const dueInDaysText = String(form.get("dueInDays") || "").trim();
   const name = String(form.get("templateName") || "").trim();
 
-  const values = { kind: kind || "invoice", title, description, dueDate, dueInDays: dueInDaysText, templateName: name };
+  const values = { kind: kind || "invoice", title, description, dueDate, issuedOn, dueInDays: dueInDaysText, templateName: name };
   const lines = form.has("amount") && !form.has("itemDescription") ? singleAmountLine(form.get("amount"), title) : parseLineItems(form);
   values.lineItems = lines.lineItems || rawLineItems(form);
 
@@ -125,6 +126,7 @@ export function parseBillingForm(form, { template = false } = {}) {
   if (!title || title.length > MAX_TITLE) return { values, error: `Enter a title of ${MAX_TITLE} characters or fewer.` };
   if (description.length > MAX_NOTES) return { values, error: `Keep notes and terms under ${MAX_NOTES} characters.` };
   if (!template && dueDate && !isValidDate(dueDate)) return { values, error: "Enter a valid date." };
+  if (!template && issuedOn && !isValidDate(issuedOn)) return { values, error: "Enter a valid date for the quote or invoice." };
   let dueInDays = null;
   if (template && dueInDaysText) {
     if (!/^\d{1,3}$/u.test(dueInDaysText)) return { values, error: "Days until due must be a whole number from 0 to 999." };
@@ -141,6 +143,7 @@ export function parseBillingForm(form, { template = false } = {}) {
       title,
       description,
       dueDate: template ? "" : dueDate,
+      issuedOn: template ? "" : issuedOn,
       dueInDays,
       templateName: name,
       lineItems: lines.lineItems,
@@ -189,6 +192,12 @@ export function todayInMichigan(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Detroit", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
   const get = (type) => parts.find((part) => part.type === type)?.value;
   return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+// The date a quote or invoice carries (YYYY-MM-DD): the one entered with it, or, for those saved
+// before dates were entered, the day it was created in Michigan. Invoices are numbered in this order.
+export function issuedDate(item) {
+  return isValidDate(item?.issuedOn || "") ? item.issuedOn : todayInMichigan(new Date(item?.createdAt || Date.now()));
 }
 
 // One Checkout line for the invoice total keeps Stripe's amount identical to the invoice,

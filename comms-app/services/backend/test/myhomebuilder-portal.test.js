@@ -33,6 +33,7 @@ const { ADMIN_SESSION_TTL_SECONDS, createAdminSession, hmacHex, isValidSlug, slu
 const { addressesText, parseEmailList } = await import("../src/modules/myhomebuilder-portal/email.js");
 const { parseLineItems, parseMoney, addDays, todayInMichigan } = await import("../src/modules/myhomebuilder-portal/billing.js");
 const { STRIPE_API_VERSION } = await import("../src/modules/myhomebuilder-portal/stripe.js");
+const { createStore, putBilling } = await import("../src/modules/myhomebuilder-portal/store.js");
 const { PDFDocument } = await import("../src/modules/myhomebuilder-portal/vendor/pdf-lib.js");
 
 // ---------- Fakes for SendGrid and Stripe ----------
@@ -891,6 +892,174 @@ test("a quote sent to another project takes the invoice made from it, and a proc
   assert.equal((await stored(invoice)).clientSlug, smith);
   assert.equal((await stored(quote)).clientSlug, smith);
   assert.match((await request(`${invoicePath}/move`, form({ to: smith }, adminCookie))).headers.get("Location"), /notice=project-invalid/u);
+});
+
+// ---------- Deleting, totals and invoice numbers in date order ----------
+
+test("deleting an invoice asks first, says what goes with it, and removes it and its link", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  const quote = (await billingRecords()).find((entry) => entry.kind === "quote");
+  const quotePath = `/clients/admin/clients/muskegon-addition/billing/${quote.id}`;
+  await request(`${quotePath}/invoice`, form({}, adminCookie));
+  const invoice = (await billingRecords()).find((entry) => entry.kind === "invoice");
+  const path = `/clients/admin/clients/muskegon-addition/billing/${invoice.id}`;
+  await request(`${path}/send`, form({ to: "pat@example.com" }, adminCookie));
+  await request(`/clients/pay/${invoice.shareToken}`);
+  const session = [...stripe.sessions.keys()].at(-1);
+
+  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /<div class="admin-danger"><a class="portal-logout-button" href="[^"]+\/delete">Delete invoice<\/a><\/div>/u);
+  const confirm = await (await request(`${path}/delete`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(confirm, /Delete Invoice 1\?/u);
+  assert.match(confirm, /It was emailed to pat@example\.com\. The link in that email will stop working\./u);
+  assert.match(confirm, /It was made from Quote 1\. The quote stays and can be invoiced again\./u);
+  assert.match(confirm, /To keep a record of it instead, go back and use Mark void\./u);
+  assert.match(confirm, /Deleting can't be undone\.<\/strong> Later invoices move up a number/u);
+  assert.match(confirm, /class="button button-danger" type="submit">Delete invoice<\/button>/u);
+  assert.ok(await db("mhb_billing").where({ id: invoice.id }).first(), "nothing is deleted until confirmed");
+
+  const deleted = await request(`${path}/delete`, form({}, adminCookie));
+  assert.equal(deleted.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=invoice-deleted");
+  assert.equal(await db("mhb_billing").where({ id: invoice.id }).first(), undefined);
+  assert.ok(stripe.expired.includes(session), "its open Checkout is closed");
+  assert.equal((await request(path, { headers: { Cookie: adminCookie } })).status, 404);
+  assert.equal((await request(`/clients/invoice/${invoice.shareToken}`)).status, 404);
+  assert.match(await (await request(deleted.headers.get("Location"), { headers: { Cookie: adminCookie } })).text(), /Invoice deleted\. Its link no longer works\./u);
+  assert.equal((await stored(quote)).invoiceId, undefined);
+  assert.match(await (await request(quotePath, { headers: { Cookie: adminCookie } })).text(), /Create invoice from this quote/u, "the quote can be invoiced again");
+
+  // A payment through its old Checkout is not lost: the builder is told, once.
+  await signedWebhook("checkout.session.completed", payStripeSession(session, { amount_total: 400000 }));
+  const alert = deliveredTo("mb@myhomebuilderllc.com").at(-1);
+  assert.equal(alert.subject, "Stripe payment for deleted Invoice 1");
+  assert.match(alert.text, /Stripe received \$4,000\.00 from payer@example\.com for Invoice 1 \(Muskegon Addition\), which was deleted/u);
+  const deliveredBefore = email.delivered.length;
+  assert.equal((await signedWebhook("checkout.session.completed", stripe.sessions.get(session))).status, 200);
+  assert.equal(email.delivered.length, deliveredBefore, "told once");
+});
+
+test("a paid invoice deletes with its payment record, a processing one waits, and quotes delete too", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item: paid } = await postInvoice(adminCookie, { title: "Deposit", amount: "5,000" });
+  const paidPath = `/clients/admin/clients/muskegon-addition/billing/${paid.id}`;
+  await request(`${paidPath}/record-payment`, form({ method: "zelle", paidOn: "2026-07-30", sendReceipt: "yes" }, adminCookie));
+  assert.ok(await sentEmail(`muskegon-addition:${paid.id}:receipt`));
+  const confirm = await (await request(`${paidPath}/delete`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(confirm, /It is marked paid \(Jul 30, 2026 · Zelle · \$5,000\.00\)\. That payment record is deleted with it\./u);
+  assert.doesNotMatch(confirm, /Mark void/u);
+  await request(`${paidPath}/delete`, form({}, adminCookie));
+  assert.equal(await sentEmail(`muskegon-addition:${paid.id}:receipt`), undefined, "its sent-email records go too");
+
+  const { item: bank } = await postInvoice(adminCookie, { title: "Foundation", amount: "400" });
+  const bankPath = `/clients/admin/clients/muskegon-addition/billing/${bank.id}`;
+  await request(`/clients/pay/${bank.shareToken}`);
+  await signedWebhook("checkout.session.completed", payStripeSession([...stripe.sessions.keys()].at(-1), { payment_status: "unpaid", amount_total: 40000 }));
+  const waiting = await (await request(`${bankPath}/delete`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(waiting, /A bank payment for this invoice is still processing/u);
+  assert.doesNotMatch(waiting, /button-danger/u);
+  assert.match((await request(`${bankPath}/delete`, form({}, adminCookie))).headers.get("Location"), /notice=delete-processing/u);
+  assert.ok(await db("mhb_billing").where({ id: bank.id }).first());
+
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  const quote = (await billingRecords()).find((entry) => entry.kind === "quote");
+  const quotePath = `/clients/admin/clients/muskegon-addition/billing/${quote.id}`;
+  const quoteConfirm = await (await request(`${quotePath}/delete`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(quoteConfirm, /Delete Quote 1\?/u);
+  assert.match(quoteConfirm, /Its number is not used again\./u);
+  assert.match((await request(`${quotePath}/delete`, form({}, adminCookie))).headers.get("Location"), /notice=quote-deleted/u);
+  assert.equal(await db("mhb_billing").where({ id: quote.id }).first(), undefined);
+});
+
+test("a project's quotes and invoices end with invoiced, paid and outstanding totals", async () => {
+  const adminCookie = await loginAsAdmin();
+  const dashboard = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  assert.doesNotMatch(await dashboard(), /billing-totals/u, "quotes alone have no invoice totals");
+
+  const { item: paid } = await postInvoice(adminCookie, { title: "Deposit", amount: "5,000" });
+  await request(`/clients/admin/clients/muskegon-addition/billing/${paid.id}/record-payment`, form({ method: "zelle", paidOn: "2026-07-30" }, adminCookie));
+  await postInvoice(adminCookie, { title: "Framing", amount: "8,000" });
+  const { item: voided } = await postInvoice(adminCookie, { title: "Mistake", amount: "1,000" });
+  await request(`/clients/admin/clients/muskegon-addition/billing/${voided.id}/void`, form({}, adminCookie));
+
+  const body = await dashboard();
+  assert.match(body, /<div><dt>Invoiced<\/dt><dd>\$13,000\.00<\/dd><\/div>/u, "the quote and the voided invoice are left out");
+  assert.match(body, /<div><dt>Paid<\/dt><dd>\$5,000\.00<\/dd><\/div>/u);
+  assert.match(body, /<div class="billing-totals-due"><dt>Outstanding<\/dt><dd>\$8,000\.00<\/dd><\/div>/u);
+  assert.ok(body.indexOf("billing-totals") > body.indexOf("</table>"), "at the end of the list");
+  assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: await loginAsClient() } })).text(), /billing-totals/u, "the client's portal is unchanged");
+});
+
+test("invoice numbers follow invoice dates across projects, and same-date invoices the order they were entered", async () => {
+  const adminCookie = await loginAsAdmin();
+  const smith = await addPortal(adminCookie, "Smith Residence");
+  const post = async (slug, fields) => {
+    const before = new Set((await billingRecords()).map((item) => item.id));
+    const response = await request(`/clients/admin/clients/${slug}/billing`, form({ kind: "invoice", ...fields }, adminCookie));
+    assert.equal(response.status, 303, await response.clone().text());
+    return { response, item: (await billingRecords()).find((entry) => !before.has(entry.id)) };
+  };
+  const numbers = async () => Object.fromEntries((await billingRecords()).filter((item) => item.kind === "invoice").map((item) => [item.title, item.number]));
+
+  const editor = await (await request("/clients/admin/clients/muskegon-addition/billing/new?kind=invoice", { headers: { Cookie: adminCookie } })).text();
+  assert.match(editor, new RegExp(`id="billing-date" name="issuedOn" type="date" required value="${todayInMichigan()}"`, "u"));
+
+  const september = await post("muskegon-addition", { title: "Muskegon September", amount: "1,000", issuedOn: "2026-09-10" });
+  await post(smith, { title: "Smith September", amount: "2,000", issuedOn: "2026-09-10" });
+  assert.deepEqual(await numbers(), { "Muskegon September": "1", "Smith September": "2" }, "the same date: in the order entered");
+
+  const july = await post(smith, { title: "Smith July", amount: "3,000", issuedOn: "2026-07-30" });
+  assert.match(july.response.headers.get("Location"), /notice=billing-added&also=renumbered/u);
+  assert.deepEqual(await numbers(), { "Smith July": "1", "Muskegon September": "2", "Smith September": "3" });
+  const page = await (await request(july.response.headers.get("Location"), { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /Invoice numbers were updated to keep them in date order\./u);
+  assert.match(page, />Invoice 1<\/h1>/u);
+  assert.match(page, /<dt>Issued<\/dt><dd>Jul 30, 2026<\/dd>/u);
+  for (const row of await db("mhb_billing").where({ kind: "invoice" }).select("number", "data")) assert.equal(json(row.data).number, row.number);
+
+  // Re-dating an invoice moves it; deleting one moves later invoices up.
+  const septemberPath = `/clients/admin/clients/muskegon-addition/billing/${september.item.id}`;
+  const redated = await request(`${septemberPath}/edit`, form({ title: "Muskegon September", issuedOn: "2026-06-01", ...lines(["Work", "1", "1,000"]) }, adminCookie));
+  assert.match(redated.headers.get("Location"), /notice=billing-updated&also=renumbered/u);
+  assert.deepEqual(await numbers(), { "Muskegon September": "1", "Smith July": "2", "Smith September": "3" });
+  const deleted = await request(`/clients/admin/clients/${smith}/billing/${july.item.id}/delete`, form({}, adminCookie));
+  assert.match(deleted.headers.get("Location"), /notice=invoice-deleted&also=renumbered/u);
+  assert.deepEqual(await numbers(), { "Muskegon September": "1", "Smith September": "2" });
+});
+
+test("a quote made into an invoice keeps naming it as numbers move, and Checkout is not reused under an old number", async () => {
+  const adminCookie = await loginAsAdmin();
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  const quote = (await billingRecords()).find((entry) => entry.kind === "quote");
+  const quotePath = `/clients/admin/clients/muskegon-addition/billing/${quote.id}`;
+  await request(`${quotePath}/invoice`, form({}, adminCookie));
+  const invoice = (await billingRecords()).find((entry) => entry.kind === "invoice");
+  assert.equal(invoice.number, "1");
+  await request(`/clients/pay/${invoice.shareToken}`);
+  assert.equal(stripe.created.at(-1)["line_items[0][price_data][product_data][name]"], "Invoice 1 · Deck");
+
+  await postInvoice(adminCookie, { title: "Earlier work", amount: "500", issuedOn: "2026-01-05" });
+  assert.equal((await stored(invoice)).number, "2");
+  assert.equal((await stored(quote)).invoiceNumber, "2");
+  assert.match(await (await request(quotePath, { headers: { Cookie: adminCookie } })).text(), />Invoice 2<\/a>/u);
+
+  await request(`/clients/pay/${invoice.shareToken}`);
+  assert.equal(stripe.created.length, 2, "the open Checkout says Invoice 1, so a new one is made");
+  assert.equal(stripe.created.at(-1)["line_items[0][price_data][product_data][name]"], "Invoice 2 · Deck");
+});
+
+test("a save of an invoice read before its number moved keeps the new number", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Later", amount: "500", issuedOn: "2026-09-20" });
+  const stale = await stored(item);
+  await postInvoice(adminCookie, { title: "Earlier", amount: "500", issuedOn: "2026-09-01" });
+  assert.equal((await stored(item)).number, "2");
+  await putBilling(createStore(db), { ...stale, title: "Later, renamed" });
+  const saved = await stored(item);
+  assert.equal(saved.number, "2");
+  assert.equal(saved.title, "Later, renamed");
 });
 
 test("invoices and quotes number 1, 2, 3 in separate sequences, shown as Invoice 1 and Quote 1", async () => {
