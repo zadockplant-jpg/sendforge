@@ -62,6 +62,10 @@ export const forgedropLinkRouter = await loadForgeDropLink(async () => {
     // for it, the token after the "#" as well.
     sendRequestEmail: sendForgeDropFileRequestEmail,
     requestLink: (token) => `${siteUrl("/s/")}#${token}`,
+    // Share links (share.md): the free transfer of an address that is not a
+    // paid account is kept by a keyed hash of it, keyed from JWT_SECRET as
+    // the install tokens are, so there is nothing new to configure.
+    freeTransferSecret: () => env.jwtSecret,
     log,
   });
 });

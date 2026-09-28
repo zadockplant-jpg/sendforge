@@ -28,6 +28,12 @@
  *   POST /request/open     page     what an emailed request's link is for
  *   POST /request/poll     page     its long-poll, as a guest of the asker
  *   POST /request/signal   page     an offer or bye to the desktop that asked
+ *   POST /share/create     phone    a room for sending to someone by a link
+ *   POST /share/end        phone    end it: cancelled, or sent
+ *   POST /share/open       page     who is sending, and whether their page is open
+ *   POST /share/poll       page     its long-poll, as a guest of the sender
+ *   POST /share/signal     page     an offer or bye to the sending page
+ *   POST /share/received   page     a transfer through it has finished
  *
  * Desktops of one account also swap connection candidates here to reach each
  * other across the internet (DropForge 1.4); the files then go directly
@@ -47,18 +53,29 @@
  * one asked, reaches the asking desktop as the phone link does, as a guest of
  * the asking account. The desktop answers it through /signal.
  *
+ * Share links (ForgeDrop/docs/share.md) need no desktop at all: an owner's
+ * phone page sends to anyone, who needs no account. shares.js keeps the room,
+ * whose link the phone sends from its own email or number, and the page it
+ * opens (the website's /g/) reaches the sending page as a guest of the
+ * sender's account. The phone answers it through /signal, the only guest a
+ * phone ever may. Whether the address is a paid account is said to the sender;
+ * one that is not gets one free transfer, kept in the database
+ * (freeTransfers.js).
+ *
  * A desktop signs in with its offline licence (auth.js), a phone with the
  * customer's Bearer token. Either way the account must own DropForge. The
  * pages an email opens sign in with nothing: the token their link carries is
- * the key.
+ * the key, as a share's id is for its page.
  */
 
 import express from "express";
 import { createRateLimiter, rateLimitByIp } from "../../middleware/rateLimit.js";
 import { licensedProduct } from "../../services/licensedProducts.js";
+import { ensureReferralCodeForUser } from "../../services/referrals/referral.service.js";
 import { createDesktopAuth, hasLicenceHeader } from "./auth.js";
 import { createCodeStore } from "./codes.js";
 import { createAccountDirectory, createDeviceDirectory } from "./devices.js";
+import { createFreeTransfers } from "./freeTransfers.js";
 import { createPeopleStore } from "./people.js";
 import { createRequestStore } from "./requests.js";
 import {
@@ -76,6 +93,7 @@ import {
   isPlainObject,
   isRequestToken,
   isSession,
+  isShareId,
   KNOCK_OUTCOMES,
   KNOCK_PURPOSES,
   LINK_LIMITS,
@@ -89,14 +107,17 @@ import {
   parseWait,
   PERSON_LIMITS,
   PERSON_TYPES,
+  PHONE_TO_GUEST_TYPES,
   SENDABLE_TYPES,
+  SHARE_LIMITS,
   takesDials,
   takesGuests,
   takesPeople,
 } from "./shapes.js";
+import { createShareStore } from "./shares.js";
 import { createLinkStore } from "./store.js";
 
-export { CODE_LIMITS, LINK_LIMITS, PERSON_LIMITS };
+export { CODE_LIMITS, LINK_LIMITS, PERSON_LIMITS, SHARE_LIMITS };
 
 // How the code and person stores' refusals reach the client. A 404 is the
 // same answer whether the thing never existed, has run out or belongs to
@@ -108,9 +129,12 @@ const REFUSALS = Object.freeze({
   person_gone: 404,
   invite_gone: 404,
   request_gone: 404,
+  share_gone: 404,
   too_many_codes: 409,
   too_many_messages: 409,
   invite_over: 409,
+  share_taken: 409,
+  free_transfer_used: 409,
 });
 
 // An account id no account has. A knock on an address nobody has asks the
@@ -147,6 +171,13 @@ export function createForgeDropLinkRouter({
   requests: givenRequests = null,
   sendRequestEmail = null,
   requestLink = (token) => `https://sendforge.app/s/#${token}`,
+  // Share links (share.md): their rooms, and the free transfers of addresses
+  // that are not paid accounts, kept by a keyed hash whose key is derived from
+  // this secret (JWT_SECRET in production). Without one, a share for an
+  // address that is not a paid account answers 503.
+  shares: givenShares = null,
+  freeTransfers: givenFreeTransfers = null,
+  freeTransferSecret = () => "",
   rate = {},
   rateLimitPrefix = "forgedrop-link",
   log = () => {},
@@ -189,7 +220,15 @@ export function createForgeDropLinkRouter({
       onError: (error) =>
         log("error", "forgedrop_link_request_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
     });
-  const limits = { ...LINK_LIMITS.rate, ...CODE_LIMITS.rate, ...PERSON_LIMITS.rate, ...rate };
+  const shares =
+    givenShares ||
+    createShareStore({
+      now,
+      onError: (error) =>
+        log("error", "forgedrop_link_share_sweep_failed", { message: String(error?.message || error).slice(0, 200) }),
+    });
+  const freeTransfers = givenFreeTransfers || createFreeTransfers({ db, secret: freeTransferSecret, now });
+  const limits = { ...LINK_LIMITS.rate, ...CODE_LIMITS.rate, ...PERSON_LIMITS.rate, ...SHARE_LIMITS.rate, ...rate };
   const devices = createDeviceDirectory(db, product.slug);
   const accounts = createAccountDirectory(db);
   const owns = (userId) => hasProductEntitlement(userId, product.entitlementSlug || product.slug);
@@ -243,10 +282,10 @@ export function createForgeDropLinkRouter({
     return next();
   });
 
-  const limiter = (name, max, keyGenerator) =>
+  const limiter = (name, max, keyGenerator, windowMs = 60 * 1000) =>
     createRateLimiter({
       name: `${rateLimitPrefix}-${name}`,
-      windowMs: 60 * 1000,
+      windowMs,
       max,
       keyGenerator,
       message: "rate_limited",
@@ -294,6 +333,26 @@ export function createForgeDropLinkRouter({
   const guestPollLimiter = limiter(
     "request-poll",
     limits.requestPagePerMinute,
+    (req) => `guest:${String(req.body?.clientId ?? "")}`
+  );
+  // Making a share room says whether an address is a paid account: 20 an
+  // hour per account, whichever of its phone pages makes them. Every request
+  // counts, whatever its answer, and before the ownership query.
+  const shareCreateLimiter = limiter(
+    "share-create",
+    limits.shareCreatePerHour,
+    (req) => req.link.userId,
+    60 * 60 * 1000
+  );
+  const shareEndLimiter = limiter("share-end", limits.shareEndPerMinute, (req) => req.link.userId);
+  // A share's page signs in with nothing, as a request's does: limited by the
+  // address it calls from, its four routes together, and its polls per
+  // clientId as well (keyed as sent, before it is checked; the limiter hashes
+  // it). Apart from the request pages' allowances.
+  const sharePageLimiter = limiter("share-page", limits.sharePagePerMinute, rateLimitByIp);
+  const sharePollLimiter = limiter(
+    "share-poll",
+    limits.sharePagePerMinute,
     (req) => `guest:${String(req.body?.clientId ?? "")}`
   );
   const refuse = (res, error) => res.status(REFUSALS[error] || 400).json({ error });
@@ -603,9 +662,18 @@ export function createForgeDropLinkRouter({
 
       const to = parseAddress(body.to);
       if (!to) return res.status(400).json({ error: "bad_recipient" });
-      // A request page's guest (1.9) is answered by its account's desktops,
-      // never reached from a phone.
-      if (to.kind === "guest" && sender.kind !== "desktop") return res.status(400).json({ error: "bad_recipient" });
+      // A phone page reaches a guest only when that guest has claimed one of
+      // that very page's share rooms, to answer it or say bye. Every other
+      // guest, a request page's (1.9) among them, is never reached from a
+      // phone: it is answered by its account's desktops.
+      let ownGuest = false;
+      if (to.kind === "guest" && sender.kind !== "desktop") {
+        const page = parseAddress(body.from);
+        if (!page || page.kind !== "phone" || !shares.answers({ userId, address: page.address }, to.id)) {
+          return res.status(400).json({ error: "bad_recipient" });
+        }
+        ownGuest = true;
+      }
       // Phone to phone never; desktop to desktop only to dial (below), and
       // never to itself.
       const betweenDesktops = sender.kind === "desktop" && to.kind === "desktop";
@@ -621,7 +689,9 @@ export function createForgeDropLinkRouter({
       }
 
       if (!isSession(body.session)) return res.status(400).json({ error: "bad_session" });
-      const allowed = betweenDesktops ? DESKTOP_TO_DESKTOP_TYPES : SENDABLE_TYPES[sender.kind];
+      let allowed = SENDABLE_TYPES[sender.kind];
+      if (betweenDesktops) allowed = DESKTOP_TO_DESKTOP_TYPES;
+      else if (ownGuest) allowed = PHONE_TO_GUEST_TYPES;
       if (!allowed.has(body.type)) return res.status(400).json({ error: "bad_type" });
 
       const data = body.data === undefined ? {} : body.data;
@@ -1005,6 +1075,210 @@ export function createForgeDropLinkRouter({
       // answer may come before its first poll.
       store.touch(userId, guest);
       return res.status(202).json({ ok: true });
+    })
+  );
+
+  // ------------------------------------------------- share links (share.md)
+  //
+  // An owner's phone page sends to anyone, who needs no account. It makes a
+  // room and sends its link (the room's id after the "#") from its own email
+  // or number; sendforge.app sends nothing. The page the link opens (the
+  // website's /g/) signs in with nothing but that id, and reaches the sending
+  // page as the guest "guest:<clientId>" under the sender's account: it
+  // offers, and the phone answers through /signal. The first page to offer
+  // claims the room, and the phone answers that page and no other. CORS is
+  // app.js's, ahead of this router, so the site can call these.
+  //
+  // The sender is told whether the address is a paid account (a verified
+  // account that owns DropForge): the owner asked for that, and nothing else
+  // here says it. An address that is not gets one free transfer. Once a
+  // transfer through its room has finished, either page says so, and a new
+  // room for that address is refused.
+
+  /**
+   * Whether an address is a paid account: a verified account that owns
+   * DropForge. The same two questions to the database whoever it is, as a
+   * knock asks them.
+   */
+  async function isPaid(address) {
+    const account = await accounts.findVerified(address);
+    const userId = account ? canonicalUuid(String(account.id)) || String(account.id) : NOBODY;
+    const owned = await owns(userId);
+    return Boolean(account) && Boolean(owned);
+  }
+
+  /**
+   * The sender's own referral code, for the page's Get DropForge link: the
+   * one their account page shows, made the first time it is asked for, as it
+   * is there. Null when there is none or it cannot be read; the send goes on
+   * without it.
+   */
+  async function referralOf(userId) {
+    try {
+      const user = await db("users").where({ id: userId }).first("id", "email", "cash_app_tag");
+      if (!user) return null;
+      return (await ensureReferralCodeForUser(user, db))?.code ?? null;
+    } catch (error) {
+      log("error", "forgedrop_link_share_referral_failed", { message: String(error?.message || error).slice(0, 200) });
+      return null;
+    }
+  }
+
+  /**
+   * A transfer through `share` has finished: its address's free transfer is
+   * used, when it is not a paid account. Only once a page has claimed the
+   * room: nothing can have gone through it before that.
+   */
+  async function spendFreeTransfer(share) {
+    if (share.paid || share.recipient === null || share.guest === null) return;
+    await freeTransfers.use(share.recipient);
+  }
+
+  router.post(
+    "/share/create",
+    phoneAuth,
+    shareCreateLimiter,
+    requireForgeDrop,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      if (!isClientId(body.clientId)) return res.status(400).json({ error: "bad_client_id" });
+      const name = cleanText(body.name, SHARE_LIMITS.nameChars);
+      if (!name) return res.status(400).json({ error: "bad_name" });
+      const to = parseEmail(body.to);
+      if (!to) return res.status(400).json({ error: "bad_email" });
+
+      const { userId } = req.link;
+      let paid;
+      let recipient = null;
+      try {
+        paid = await isPaid(to);
+        if (!paid) {
+          recipient = freeTransfers.keyOf(to);
+          if (await freeTransfers.used(recipient)) return refuse(res, "free_transfer_used");
+        }
+      } catch (error) {
+        return unavailable(res, "forgedrop_link_share_check_failed", error);
+      }
+      const referral = await referralOf(userId);
+      const { share } = shares.create({ userId, address: `phone:${body.clientId}` }, { name, paid, referral, recipient });
+      return res.status(201).json({ share, paid, referral });
+    })
+  );
+
+  // The sender is done with a room: cancelled, or with "sent": true the files
+  // went, which uses a free transfer as the page's word does. The same answer
+  // for a room that is over or is another account's: which rooms are whose is
+  // not said.
+  router.post(
+    "/share/end",
+    phoneAuth,
+    shareEndLimiter,
+    requireForgeDrop,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      if (!isShareId(body.share)) return res.status(400).json({ error: "bad_share" });
+      if (given(body.sent) && typeof body.sent !== "boolean") return res.status(400).json({ error: "bad_sent" });
+      const share = shares.byId(body.share);
+      if (share && share.owner.userId === req.link.userId) {
+        if (body.sent === true) {
+          try {
+            await spendFreeTransfer(share);
+          } catch (error) {
+            return unavailable(res, "forgedrop_link_free_transfer_failed", error);
+          }
+        }
+        shares.end(req.link.userId, share.id);
+      }
+      return res.json({ ok: true });
+    })
+  );
+
+  /** The room a page's id opens, while it lasts; else null, malformed or not. */
+  const shareOf = (req) => {
+    const id = (req.body || {}).share;
+    return isShareId(id) ? shares.byId(id) : null;
+  };
+
+  // Who is sending, whether their page can be reached now, whether the
+  // address it was sent to is a paid account, and the sender's referral code.
+  router.post("/share/open", sharePageLimiter, (req, res) => {
+    const share = shareOf(req);
+    if (!share) return refuse(res, "share_gone");
+    const { userId, address } = share.owner;
+    return res.json({
+      name: share.name,
+      online: store.isPresent(userId, address),
+      paid: share.paid,
+      referral: share.referral,
+    });
+  });
+
+  router.post("/share/poll", sharePageLimiter, sharePollLimiter, (req, res) => {
+    const body = req.body || {};
+    const share = shareOf(req);
+    if (!share) return refuse(res, "share_gone");
+    if (!isClientId(body.clientId)) return res.status(400).json({ error: "bad_client_id" });
+    const waitSeconds = parseWait(body.wait);
+    if (waitSeconds === null) return res.status(400).json({ error: "bad_wait" });
+    return longPoll(res, share.owner.userId, `guest:${body.clientId}`, waitSeconds, null);
+  });
+
+  router.post("/share/signal", sharePageLimiter, (req, res) => {
+    const body = req.body || {};
+    const share = shareOf(req);
+    if (!share) return refuse(res, "share_gone");
+    if (!isClientId(body.clientId)) return res.status(400).json({ error: "bad_client_id" });
+    if (!isSession(body.session)) return res.status(400).json({ error: "bad_session" });
+    if (!GUEST_TYPES.has(body.type)) return res.status(400).json({ error: "bad_type" });
+    const data = body.data === undefined ? {} : body.data;
+    if (!isPlainObject(data)) return res.status(400).json({ error: "bad_data" });
+    if (Buffer.byteLength(JSON.stringify(data), "utf8") > LINK_LIMITS.dataBytes) {
+      return res.status(413).json({ error: "data_too_large" });
+    }
+
+    // Once a page has claimed the room it is that page's alone, whether or
+    // not the sender is there. Only an offer claims it: a bye before any
+    // offer has nothing to end, and reaches nobody.
+    if (share.guest !== null && share.guest !== body.clientId) return refuse(res, "share_taken");
+    if (share.guest === null && body.type !== "offer") return res.status(202).json({ ok: true });
+    // Only to the page that made the room, while it is there. An offer it
+    // cannot hear claims nothing.
+    const { userId, address } = share.owner;
+    if (!store.isPresent(userId, address)) return res.status(404).json({ error: "sender_offline" });
+    const claimed = shares.claim(share.id, body.clientId);
+    if (!claimed.ok) return refuse(res, claimed.error);
+
+    const guest = `guest:${body.clientId}`;
+    store.deliver(userId, address, {
+      from: guest,
+      session: body.session,
+      type: body.type,
+      // Which room this is, as this server knows it; whatever the page said
+      // about that is replaced.
+      data: { ...data, share: { id: share.id } },
+      sentAt: new Date(now()).toISOString(),
+    });
+    // A guest that just spoke is there, as a request's is: the answer may
+    // come before its first poll.
+    store.touch(userId, guest);
+    return res.status(202).json({ ok: true });
+  });
+
+  // The page's word that a transfer through the room has finished, which
+  // uses the address's free transfer, as the sender's "sent" does. Twice is
+  // the same as once.
+  router.post(
+    "/share/received",
+    sharePageLimiter,
+    wrap(async (req, res) => {
+      const share = shareOf(req);
+      if (!share) return refuse(res, "share_gone");
+      try {
+        await spendFreeTransfer(share);
+      } catch (error) {
+        return unavailable(res, "forgedrop_link_free_transfer_failed", error);
+      }
+      return res.json({ ok: true });
     })
   );
 

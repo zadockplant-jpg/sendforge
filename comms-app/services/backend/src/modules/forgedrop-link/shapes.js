@@ -135,8 +135,41 @@ export const PERSON_TYPES = new Set(["here", "dial", "dial-answer", "bye"]);
 
 // What a request's page (a guest, 1.9) says to the desktop that asked: the
 // phone link's offer and bye. The desktop answers through /signal, as it
-// answers a phone.
+// answers a phone. A share's page (below) says the same to the sending page.
 export const GUEST_TYPES = new Set(["offer", "bye"]);
+
+// Share links (ForgeDrop/docs/share.md): a signed-in owner's phone page sends
+// files to anyone, who needs no account, through a room shares.js keeps.
+export const SHARE_LIMITS = Object.freeze({
+  // A room is open a day, unless its sender ends it first.
+  shareMs: 24 * 60 * 60_000,
+  // The most rooms one account keeps open; a new one ends the oldest.
+  sharesPerAccount: 10,
+  // A room's name is its phone page's, cleaned as a device name is.
+  nameChars: 64,
+  rate: Object.freeze({
+    // Per account, whichever of its phone pages creates. A room says whether
+    // an address is a paid account, so creating costs.
+    shareCreatePerHour: 20,
+    // Per account. Ending reads the database, so it is limited like the
+    // desktop list, with an allowance of its own.
+    shareEndPerMinute: LINK_LIMITS.rate.desktopsPerMinute,
+    // Per client address, a share page's four routes together; its polls
+    // also per clientId, as a request page's are.
+    sharePagePerMinute: 60,
+  }),
+});
+
+// What a phone page says to the guest that claimed one of its own rooms: the
+// answer to its offer, and bye. No other guest is ever reached from a phone.
+export const PHONE_TO_GUEST_TYPES = new Set(["answer", "bye"]);
+
+const SHARE_ID = /^[A-Za-z0-9_-]{22}$/;
+
+/** A share room's id as shares.js makes them: 16 random bytes, 22 base64url characters. */
+export function isShareId(value) {
+  return typeof value === "string" && SHARE_ID.test(value);
+}
 
 const NAMEPLATE = /^[0-9]{1,9}$/;
 const CODE_SESSION = /^[A-Za-z0-9_-]{22}$/;
@@ -289,7 +322,8 @@ export function isSession(value) {
 
 /**
  * "desktop:<uuid>", "phone:<clientId>" or "guest:<clientId>" (a request's
- * page, 1.9, which only desktops may address), else null.
+ * page, 1.9, which only desktops may address, or a share's page, which only
+ * the phone page whose room it claimed may), else null.
  */
 export function parseAddress(value) {
   if (typeof value !== "string") return null;
