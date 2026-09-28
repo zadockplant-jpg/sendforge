@@ -143,6 +143,47 @@ category is `handyman` are discounted; an earned credit is cash and applies to
 the whole document. Failed invitations are listed and retried with
 `node src/modules/jayje-portal/referrals-cli.js`.
 
+## Books
+
+Migration `20261002_create_jayje_books.js` adds the books: a chart of accounts
+(`jayje_accounts`), a double-entry journal (`jayje_journal_entries`,
+`jayje_journal_lines`), an activity log (`jayje_activity`), each Stripe event
+handled (`jayje_stripe_events`) and each refund (`jayje_payment_refunds`).
+`jayje_payments` gains Stripe's fee, the charge time and the dispute, and can
+hold a payment received outside Stripe. It is additive and applied by the
+existing Render migration step. Saved templates are migration
+`20261001_create_jayje_document_templates.js`.
+
+The activity log records everything done in the portal: admin changes by name,
+client actions, sign-ins with the visitor's address, referral invitations and
+claims, template changes, and every Stripe payment, expiry, failure, refund and
+dispute. The journal follows each invoice's state (`books.js` explains each
+entry): issuing posts the sale, tax and any referral discount or credit; a
+payment moves it to the Stripe balance or to Payments received outside Stripe,
+with Stripe's fee; refunds and disputes post on their own dates. Voiding,
+correcting or removing reverses only what changed. Money Stripe took that no
+invoice can take is kept in Unapplied payments, once per Checkout. The first
+time the books are used they open from what the portal already holds: the
+JayJe rows in `admin_audit_log` become the start of the activity log and every
+invoice gets its opening entries.
+
+`GET /v1/jayje/portal/books?client=&from=&to=` (admin only) returns the
+journal, account balances, activity, totals, credits available and the balance
+check. `POST .../books/correct` posts whatever the check finds missing.
+
+Payments received outside Stripe (check, cash, Zelle and others) are admin
+only: `POST .../documents/:id/payment` with `method`, `method_name` (for
+`other`), `reference` and `paid_on` records one and marks the invoice paid,
+closing any open Checkout first. `.../payment/update` corrects it and
+`.../payment/remove` removes it, which opens the invoice for payment again and
+withdraws a referral credit it earned, unless that credit is already spent.
+Stripe payments are changed only in Stripe. Clients never see Stripe's fee or
+who recorded a payment.
+
+For the books to see a refund that fails and a dispute's money as it moves,
+also subscribe the JayJe endpoint to `charge.refund.updated`,
+`charge.dispute.funds_withdrawn` and `charge.dispute.funds_reinstated`.
+
 ## Verification and rollback
 
 Run `npm test` in this backend directory with isolated test database/Redis URLs. The portal itself uses PostgreSQL for rate limits and OAuth state; it does not depend on Redis availability.

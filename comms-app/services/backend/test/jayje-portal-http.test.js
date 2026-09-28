@@ -92,3 +92,13 @@ test('Google identity requires verified email, trusted issuer, subject and match
   assert.deepEqual(validateGoogleIdentity(good,'expected'),{subject:'immutable-google-id',email:'client@example.com'});
   for(const changed of [{iss:'https://evil.example'},{email_verified:false},{sub:''},{nonce:'another-browser'}])assert.throws(()=>validateGoogleIdentity({...good,...changed},'expected'));
 });
+test('the books and payments outside Stripe are for the admin only',async()=>{
+  const customer=issueCustomerAccessToken({id:user.id,email:user.email,authVersion:0});
+  assert.equal((await request('/books',{token:customer})).status,403);
+  const id='dddddddd-dddd-4ddd-dddd-dddddddddddd';
+  for(const path of ['/books/correct',`/documents/${id}/payment`,`/documents/${id}/payment/update`,`/documents/${id}/payment/remove`])assert.equal((await request(path,{token:customer,body:{}})).status,403);
+  process.env.JAYJE_ADMIN_EMAILS='client@example.com';
+  const admin=issueJayjeAdminToken({id:user.id,email:user.email,authVersion:0});
+  for(const query of ['?from=yesterday','?client=not-a-uuid','?to=2026-9-1'])assert.equal((await request(`/books${query}`,{token:admin})).status,400);
+  delete process.env.JAYJE_ADMIN_EMAILS;
+});

@@ -202,5 +202,20 @@ export function createReferrals({ db, siteUrl = 'https://jayje.com', mail = null
     return referral;
   }
 
-  return { codeFor, summary, invite, send, claim, pending, applyCredits, release, settle };
+  /** A payment recorded by mistake is removed: the referral is open again and the referrer's
+   * credit is withdrawn. A credit already used on another document cannot be withdrawn. */
+  async function unsettle(trx, invoice) {
+    if (!invoice.referral_id) return null;
+    const referral = await trx('jayje_referrals').where({ id: invoice.referral_id }).forUpdate().first();
+    if (!referral || referral.status !== 'redeemed') return null;
+    const credit = await trx('jayje_referral_credits').where({ referral_id: referral.id }).forUpdate().first();
+    if (credit && credit.status !== 'available') throw fail(409, 'referral_credit_in_use');
+    if (credit) await trx('jayje_referral_credits').where({ id: credit.id }).delete();
+    await trx('jayje_referrals').where({ id: referral.id }).update({
+      status: 'joined', discount_cents: 0, credit_cents: 0, redeemed_at: null, updated_at: trx.fn.now(),
+    });
+    return referral;
+  }
+
+  return { codeFor, summary, invite, send, claim, pending, applyCredits, release, settle, unsettle };
 }

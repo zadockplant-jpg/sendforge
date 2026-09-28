@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
 import { isoDate } from './service.js';
+import { paymentLabel } from './books.js';
 
 const money=(cents,currency='usd')=>new Intl.NumberFormat('en-US',{style:'currency',currency:currency.toUpperCase()}).format(cents/100);
 // PDFs use built-in fonts and text only: no remote fetches or user HTML.
@@ -31,6 +32,7 @@ export function documentPdf(invoice,payment=null) {
     if(payment) {
       pdf.font('Helvetica').fontSize(11).text(`Payment confirmed: ${new Date(payment.paid_at).toISOString().slice(0,10)}`);
       pdf.text(`Amount paid: ${money(payment.amount_cents)}`);
+      if(payment.source==='manual')pdf.text(`Paid by: ${paymentLabel(payment)}`);
       pdf.text(`Receipt: ${payment.id}`);
       if(payment.refunded_cents)pdf.text(`Amount refunded: ${money(payment.refunded_cents)}`);
     }

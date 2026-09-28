@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { SERVICE_NAMES } from '../jayje/config.js';
+import { money } from './books.js';
 
 export const fail = (status, code) => Object.assign(new Error(code),{status,publicCode:code});
+// What a client sees of a payment: not Stripe's fee or who recorded it.
+export const paymentView=(actor,payment)=>{
+  if(!payment || actor.role==='admin') return payment;
+  const {fee_cents,recorded_by,dispute_fee_cents,dispute_fee_returned_cents,...shown}=payment;return shown;
+};
 export const isoDate = value => value instanceof Date ? value.toISOString().slice(0,10) : String(value).slice(0,10);
 export const clientSchema = z.object({email:z.string().trim().email().max(254).transform(s=>s.toLowerCase()),name:z.string().trim().min(1).max(160),phone:z.string().trim().max(40).default(''),address:z.string().trim().max(1000).default(''),
   // A code carried in from the public request form, so the referral survives
@@ -25,7 +31,8 @@ export function totals(items,taxBps,discountCents=0) {
   if(!Number.isSafeInteger(total) || total<50 || total>99999999) throw fail(400,'invoice_amount_out_of_range');
   return {items:lines,subtotal_cents:subtotal,discount_cents:discount,tax_cents:tax,total_cents:total};
 }
-export function createPortalService(db,referrals=null) {
+// `books` (books.js) logs every change and keeps invoices' entries in step; tests may leave it out.
+export function createPortalService(db,referrals=null,books=null) {
   const ensureClient=async actor => {
     if(actor.role==='admin') return null;
     const email=actor.email.toLowerCase();
@@ -63,7 +70,7 @@ export function createPortalService(db,referrals=null) {
       const query=db('jayje_documents').where({client_id:id}).orderBy('created_at','desc');
       if(actor.role!=='admin') query.whereNot({status:'draft'});
       const documents=await query.limit(500);
-      const payments=await db('jayje_payments').whereIn('invoice_id',documents.map(d=>d.id)).orderBy('paid_at','desc');
+      const payments=(await db('jayje_payments').whereIn('invoice_id',documents.map(d=>d.id)).orderBy('paid_at','desc')).map(payment=>paymentView(actor,payment));
       if(!referrals) return {client:row,documents,payments};
       const referred_by=await db('jayje_referrals').where('jayje_referrals.referred_client_id',id)
         .leftJoin('jayje_clients','jayje_clients.id','jayje_referrals.referrer_client_id')
@@ -77,7 +84,9 @@ export function createPortalService(db,referrals=null) {
         const existing=await trx('jayje_clients').where({email:data.email}).first();
         if(existing) throw fail(409,'client_already_exists');
         const [created]=await trx('jayje_clients').insert({id:randomUUID(),...data}).returning('*');
-        await audit(trx,actor,'client_created',created.id);return created;
+        await audit(trx,actor,'client_created',created.id);
+        await books?.record(trx,{...books.by(actor),action:'client.created',clientId:created.id,summary:`Added the client ${created.name} (${created.email})`});
+        return created;
       });
       // A bad or already-used code must not cost the owner the new client.
       if(code&&referrals) await referrals.claim(row,{code}).catch(()=>null);
@@ -90,12 +99,14 @@ export function createPortalService(db,referrals=null) {
       const rows=await query;return {messages:rows.reverse(),has_more:rows.length===100};
     },
     async sendMessage(actor,id,input) {
-      await client(actor,id);
+      const recipient=await client(actor,id);
       const {body,request_key}=z.object({body:z.string().trim().min(1).max(10000),request_key:z.string().uuid()}).strict().parse(input);
       const row={id:randomUUID(),client_id:id,sender_id:actor.sub,sender_role:actor.role,body,request_key};
       await db('jayje_messages').insert(row).onConflict(['sender_id','request_key']).ignore();
       const saved=await db('jayje_messages').where({sender_id:actor.sub,request_key}).first();
       if(saved.body!==body || saved.client_id!==id) throw fail(409,'request_key_conflict');
+      // Logged once, not on a repeated request; the log says who wrote, not what.
+      if(saved.id===row.id) await books?.record(null,{...books.by(actor),action:'message.sent',clientId:id,summary:actor.role==='admin'?`Messaged ${recipient.name}`:`${recipient.name} sent a message`});
       await db('jayje_clients').where({id}).update({updated_at:db.fn.now()});return saved;
     },
     async createDocument(actor,input) {
@@ -114,7 +125,10 @@ export function createPortalService(db,referrals=null) {
             customer:{name:customer.name,email:customer.email,address:customer.address,phone:customer.phone}}).returning('*');
         } catch(error) { throw error?.code==='23505'&&applied.referral_id?fail(409,'referral_already_applied'):error; }
         await referrals?.applyCredits(trx,row);
-        await audit(trx,actor,'document_created',row.id);return row;
+        await audit(trx,actor,'document_created',row.id);
+        await books?.record(trx,{...books.by(actor),action:`${row.kind}.created`,clientId:row.client_id,documentId:row.id,reference:row.reference,amountCents:row.total_cents,
+          summary:`Created ${row.kind} ${row.reference} · ${row.title} · ${money(row.total_cents)} (draft)`});
+        return row;
       });
     },
     async action(actor,id,action) {
@@ -136,10 +150,21 @@ export function createPortalService(db,referrals=null) {
             reference:`JJ-INV-${new Date().getUTCFullYear()}-${randomUUID().slice(0,8).toUpperCase()}`,items:JSON.stringify(row.items),discount_detail:JSON.stringify(row.discount_detail||[])}).returning('*');
           // The quote's discount and any applied credits follow the invoice.
           await referrals?.applyCredits(trx,invoice);
-          await audit(trx,actor,'quote_converted',invoice.id);return invoice;
+          await audit(trx,actor,'quote_converted',invoice.id);
+          await books?.record(trx,{...books.by(actor),action:'quote.converted',clientId:invoice.client_id,documentId:invoice.id,reference:invoice.reference,amountCents:invoice.total_cents,
+            summary:`Made invoice ${invoice.reference} (draft) from quote ${row.reference} · ${money(invoice.total_cents)}`});
+          return invoice;
         } else throw fail(409,'document_action_unavailable');
         const [saved]=await trx('jayje_documents').where({id}).update({status,updated_at:trx.fn.now(),...(action==='issue'?{issued_at:trx.fn.now()}: {})}).returning('*');
-        await audit(trx,actor,`document_${action}`,id);return saved;
+        await audit(trx,actor,`document_${action}`,id);
+        // Issuing or voiding an invoice changes what it owes, so its entries follow.
+        const who=saved.customer?.name||'The client';
+        const words={issue:`Issued ${saved.kind} ${saved.reference} · ${money(saved.total_cents)}`,void:`Voided ${saved.kind} ${saved.reference}`,
+          accept:`${who} accepted quote ${saved.reference}`,decline:`${who} declined quote ${saved.reference}`};
+        await books?.record(trx,{...books.by(actor),action:`${saved.kind}.${({issue:'issued',void:'voided',accept:'accepted',decline:'declined'})[action]}`,
+          clientId:saved.client_id,documentId:saved.id,reference:saved.reference,amountCents:saved.total_cents,summary:words[action],
+          sync:saved.kind==='invoice'?[saved.id]:[],reason:action==='void'?'void':'changed'});
+        return saved;
       });
     },
   };
