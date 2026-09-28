@@ -1091,9 +1091,11 @@ export function createForgeDropLinkRouter({
   //
   // The sender is told whether the address is a paid account (a verified
   // account that owns DropForge): the owner asked for that, and nothing else
-  // here says it. An address that is not gets one free transfer. Once a
-  // transfer through its room has finished, either page says so, and a new
-  // room for that address is refused.
+  // here says it. The person at an address that is not gets one free
+  // transfer, however the address is written (freeTransfers.js). Once a
+  // transfer through a room for them has finished, either page says so, and
+  // a new room for them is refused, as is the first offer on one made before.
+  // A page can hold only one room for such a person at a time.
 
   /**
    * Whether an address is a paid account: a verified account that owns
@@ -1223,46 +1225,71 @@ export function createForgeDropLinkRouter({
     return longPoll(res, share.owner.userId, `guest:${body.clientId}`, waitSeconds, null);
   });
 
-  router.post("/share/signal", sharePageLimiter, (req, res) => {
-    const body = req.body || {};
-    const share = shareOf(req);
-    if (!share) return refuse(res, "share_gone");
-    if (!isClientId(body.clientId)) return res.status(400).json({ error: "bad_client_id" });
-    if (!isSession(body.session)) return res.status(400).json({ error: "bad_session" });
-    if (!GUEST_TYPES.has(body.type)) return res.status(400).json({ error: "bad_type" });
-    const data = body.data === undefined ? {} : body.data;
-    if (!isPlainObject(data)) return res.status(400).json({ error: "bad_data" });
-    if (Buffer.byteLength(JSON.stringify(data), "utf8") > LINK_LIMITS.dataBytes) {
-      return res.status(413).json({ error: "data_too_large" });
-    }
+  router.post(
+    "/share/signal",
+    sharePageLimiter,
+    wrap(async (req, res) => {
+      const body = req.body || {};
+      const share = shareOf(req);
+      if (!share) return refuse(res, "share_gone");
+      if (!isClientId(body.clientId)) return res.status(400).json({ error: "bad_client_id" });
+      if (!isSession(body.session)) return res.status(400).json({ error: "bad_session" });
+      if (!GUEST_TYPES.has(body.type)) return res.status(400).json({ error: "bad_type" });
+      const data = body.data === undefined ? {} : body.data;
+      if (!isPlainObject(data)) return res.status(400).json({ error: "bad_data" });
+      if (Buffer.byteLength(JSON.stringify(data), "utf8") > LINK_LIMITS.dataBytes) {
+        return res.status(413).json({ error: "data_too_large" });
+      }
 
-    // Once a page has claimed the room it is that page's alone, whether or
-    // not the sender is there. Only an offer claims it: a bye before any
-    // offer has nothing to end, and reaches nobody.
-    if (share.guest !== null && share.guest !== body.clientId) return refuse(res, "share_taken");
-    if (share.guest === null && body.type !== "offer") return res.status(202).json({ ok: true });
-    // Only to the page that made the room, while it is there. An offer it
-    // cannot hear claims nothing.
-    const { userId, address } = share.owner;
-    if (!store.isPresent(userId, address)) return res.status(404).json({ error: "sender_offline" });
-    const claimed = shares.claim(share.id, body.clientId);
-    if (!claimed.ok) return refuse(res, claimed.error);
+      // Once a page has claimed the room it is that page's alone, whether or
+      // not the sender is there. Only an offer claims it: a bye before any
+      // offer has nothing to end, and reaches nobody.
+      if (share.guest !== null && share.guest !== body.clientId) return refuse(res, "share_taken");
+      const claiming = share.guest === null;
+      if (claiming && body.type !== "offer") return res.status(202).json({ ok: true });
 
-    const guest = `guest:${body.clientId}`;
-    store.deliver(userId, address, {
-      from: guest,
-      session: body.session,
-      type: body.type,
-      // Which room this is, as this server knows it; whatever the page said
-      // about that is replaced.
-      data: { ...data, share: { id: share.id } },
-      sentAt: new Date(now()).toISOString(),
-    });
-    // A guest that just spoke is there, as a request's is: the answer may
-    // come before its first poll.
-    store.touch(userId, guest);
-    return res.status(202).json({ ok: true });
-  });
+      // One free received transfer per person. An offer that would claim a
+      // room for someone who is not a paid account is refused while a page
+      // holds another room for them, and once their free transfer is used.
+      // The page that already holds this room is never asked again, so it
+      // can offer anew. Nothing is used by a claim: only a finished transfer
+      // uses it.
+      if (claiming && !share.paid) {
+        if (shares.contested(share.id)) return refuse(res, "free_transfer_used");
+        let used;
+        try {
+          used = await freeTransfers.used(share.recipient);
+        } catch (error) {
+          return unavailable(res, "forgedrop_link_free_transfer_failed", error);
+        }
+        if (used) return refuse(res, "free_transfer_used");
+      }
+
+      // Only to the page that made the room, while it is there. An offer it
+      // cannot hear claims nothing. The claim checks again, at once, that no
+      // other page holds a room for the same person, so two pages offering
+      // together cannot both have one.
+      const { userId, address } = share.owner;
+      if (!store.isPresent(userId, address)) return res.status(404).json({ error: "sender_offline" });
+      const claimed = shares.claim(share.id, body.clientId);
+      if (!claimed.ok) return refuse(res, claimed.error);
+
+      const guest = `guest:${body.clientId}`;
+      store.deliver(userId, address, {
+        from: guest,
+        session: body.session,
+        type: body.type,
+        // Which room this is, as this server knows it; whatever the page said
+        // about that is replaced.
+        data: { ...data, share: { id: share.id } },
+        sentAt: new Date(now()).toISOString(),
+      });
+      // A guest that just spoke is there, as a request's is: the answer may
+      // come before its first poll.
+      store.touch(userId, guest);
+      return res.status(202).json({ ok: true });
+    })
+  );
 
   // The page's word that a transfer through the room has finished, which
   // uses the address's free transfer, as the sender's "sent" does. Twice is

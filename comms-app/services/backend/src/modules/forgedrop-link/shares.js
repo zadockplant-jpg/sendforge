@@ -18,6 +18,10 @@
  * referral code, the keyed hash of that address when it is not a paid one
  * (freeTransfers.js), and the clientId that claimed it.
  *
+ * One free received transfer per person: while a page holds one room for a
+ * person who is not a paid account, no other room for that person (from any
+ * sender) can be claimed. The rooms are indexed by that keyed hash for it.
+ *
  * A room's id is the capability to join it, as a request's token is: it is
  * never logged.
  *
@@ -48,6 +52,8 @@ export function createShareStore({
   const shares = new Map();
   /** account -> ids of its open rooms, oldest first */
   const kept = new Map();
+  /** a person who is not a paid account (their keyed hash) -> ids of the open rooms for them */
+  const recipients = new Map();
 
   /** 16 random bytes, 22 base64url characters, never one in use. */
   function newId() {
@@ -60,6 +66,9 @@ export function createShareStore({
 
   function forget(share) {
     shares.delete(share.id);
+    const same = recipients.get(share.recipient);
+    same?.delete(share.id);
+    if (same && !same.size) recipients.delete(share.recipient);
     const ids = kept.get(share.owner.userId);
     if (!ids) return;
     const index = ids.indexOf(share.id);
@@ -74,6 +83,20 @@ export function createShareStore({
     if (share.expiresAt > at) return share;
     forget(share);
     return null;
+  }
+
+  /**
+   * Whether a page holds another open room for the person `share` is for,
+   * when that person is not a paid account. A paid account's rooms never are.
+   */
+  function contested(share, at) {
+    if (share.recipient === null) return false;
+    for (const id of [...(recipients.get(share.recipient) ?? [])]) {
+      if (id === share.id) continue;
+      const other = live(id, at);
+      if (other && other.guest !== null) return true;
+    }
+    return false;
   }
 
   function sweep() {
@@ -118,6 +141,10 @@ export function createShareStore({
       shares.set(share.id, share);
       if (!kept.has(userId)) kept.set(userId, []);
       kept.get(userId).push(share.id);
+      if (share.recipient !== null) {
+        if (!recipients.has(share.recipient)) recipients.set(share.recipient, new Set());
+        recipients.get(share.recipient).add(share.id);
+      }
       return { share: share.id };
     },
 
@@ -127,14 +154,31 @@ export function createShareStore({
     },
 
     /**
+     * Whether the room is for a person who is not a paid account and a page
+     * holds another open room for them now: a claim of it would be refused.
+     */
+    contested(id) {
+      const at = now();
+      const share = live(id, at);
+      return Boolean(share) && contested(share, at);
+    },
+
+    /**
      * Claim a room for a page's clientId: the first to claim it has it, and
      * claiming it again is the same as once. Any other clientId is refused
-     * with share_taken; a room that is over is share_gone.
+     * with share_taken, and a room that is over is share_gone. A room for a
+     * person who is not a paid account cannot be claimed while a page holds
+     * another room for them (free_transfer_used). That is checked here, with
+     * the claim, so two pages can never hold two such rooms at once.
      */
     claim(id, clientId) {
-      const share = live(id, now());
+      const at = now();
+      const share = live(id, at);
       if (!share) return { ok: false, error: "share_gone" };
-      if (share.guest === null) share.guest = clientId;
+      if (share.guest === null) {
+        if (contested(share, at)) return { ok: false, error: "free_transfer_used" };
+        share.guest = clientId;
+      }
       return share.guest === clientId ? { ok: true } : { ok: false, error: "share_taken" };
     },
 

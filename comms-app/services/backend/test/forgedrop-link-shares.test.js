@@ -45,7 +45,7 @@ const { forgedropFingerprint } = await import("../src/services/identityProof.ser
 const { createForgeDropLinkRouter, SHARE_LIMITS } = await import("../src/modules/forgedrop-link/router.js");
 const { createLinkStore } = await import("../src/modules/forgedrop-link/store.js");
 const { createShareStore } = await import("../src/modules/forgedrop-link/shares.js");
-const { createFreeTransfers, FREE_TRANSFERS_TABLE } = await import(
+const { createFreeTransfers, FREE_TRANSFERS_TABLE, personOf } = await import(
   "../src/modules/forgedrop-link/freeTransfers.js"
 );
 const { GUEST_TYPES, isShareId, PHONE_TO_GUEST_TYPES } = await import("../src/modules/forgedrop-link/shapes.js");
@@ -237,9 +237,15 @@ let relays = 0;
  * A relay of its own: a fresh router and stores, at a path of its own.
  * `withCors` puts app.js's CORS in front, as the real API has it; `store`
  * gives it a link store made for the test; `secret` is what free transfers
- * are keyed from.
+ * are keyed from, and `freeTransfers` stands in for the database's record.
  */
-function relay({ rate = UNLIMITED, withCors = false, store: givenStore = null, secret = () => env.jwtSecret } = {}) {
+function relay({
+  rate = UNLIMITED,
+  withCors = false,
+  store: givenStore = null,
+  secret = () => env.jwtSecret,
+  freeTransfers = null,
+} = {}) {
   relays += 1;
   const base = `/relay-${relays}`;
   const store = givenStore || createLinkStore({ now });
@@ -256,6 +262,7 @@ function relay({ rate = UNLIMITED, withCors = false, store: givenStore = null, s
     store,
     shares,
     freeTransferSecret: secret,
+    freeTransfers,
     sendRequestEmail: async (message) => {
       emails.push(message);
     },
@@ -1070,7 +1077,215 @@ test("a paid address is never counted, and one that buys DropForge after its fre
   assert.equal((await r.page(bought.body.share).open()).body.paid, true);
 });
 
+test("a free transfer used under one way of writing an address is used under every other, while paid is asked of the address as typed", async () => {
+  const r = relay();
+  const tag = crypto.randomBytes(4).toString("hex");
+  const typed = `Jo.Ann.${tag}+photos@GoogleMail.com`;
+  const person = `joann${tag}@gmail.com`;
+  addresses.push(typed, person, `joann${tag}@example.com`, `jo.ann.${tag}@example.com`);
+
+  const room = await r.start(accounts.alice, { to: typed });
+  assert.equal(room.body.paid, false);
+  assert.equal((await (await r.connect(room)).received()).status, 200);
+  // Kept once, as the person, never as the address was typed.
+  assert.equal((await keptRows(person)).length, 1);
+  assert.equal((await keptRows(typed)).length, 0);
+
+  for (const alias of [person, `j.o.a.n.n.${tag}@gmail.com`, `JOANN${tag}+work@googlemail.com`, `joann${tag}+@gmail.com`]) {
+    assert.deepEqual(
+      await answer(r.phone(accounts.dana).create({ to: alias })),
+      [409, { error: "free_transfer_used" }],
+      alias
+    );
+  }
+  // The same name at another domain is another person, and its dots count there.
+  assert.equal((await r.phone(accounts.dana).create({ to: `joann${tag}@example.com` })).status, 201);
+  assert.equal((await r.phone(accounts.dana).create({ to: `jo.ann.${tag}@example.com` })).status, 201);
+
+  // Whether an address is a paid account is asked of it as typed: Bob's own
+  // address is one, and a +tag of it is no account at all.
+  assert.equal((await r.phone(accounts.alice).create({ to: "bob+work@example.com" })).body.paid, false);
+  assert.equal((await r.phone(accounts.alice).create({ to: "Bob@Example.com" })).body.paid, true);
+});
+
+test("while a page holds one room for someone who is not a paid account, no page can claim another room for them", async () => {
+  const r = relay();
+  const tag = crypto.randomBytes(4).toString("hex");
+  const person = `pat${tag}@example.net`;
+  addresses.push(person);
+  const refused = async (response, note) =>
+    assert.deepEqual(await answer(response), [409, { error: "free_transfer_used" }], note);
+
+  // Two senders, each with a room for the same person written two ways, and
+  // a third room whose sender is not there.
+  const first = await r.start(accounts.alice, { to: `Pat${tag}+one@Example.net` });
+  const second = await r.start(accounts.dana, { to: person });
+  const away = await r.phone(accounts.alice).create({ to: `pat${tag}+two@example.net` });
+  assert.equal(away.status, 201);
+
+  const holder = await r.connect(first);
+  const other = r.page(second.share);
+  await refused(other.offer(), "another sender's room for the same person");
+  await refused(r.page(away.body.share).offer(), "ahead of sender_offline: there is nothing to wait for");
+  assert.deepEqual(await second.sender.mail(), [], "and its sender hears nothing");
+  // A bye before any offer is still nothing at all.
+  assert.deepEqual(await answer(other.signal({ session: newSession(), type: "bye" })), [202, { ok: true }]);
+
+  // The page holding its room is never refused, as after a reload with its clientId.
+  assert.equal((await r.page(first.share, { clientId: holder.clientId }).offer()).status, 202);
+
+  // Once the room it held ends unsent, another can be claimed, and nothing was used.
+  assert.equal((await first.sender.end(first.share)).status, 200);
+  assert.equal((await other.offer()).status, 202);
+  assert.equal((await keptRows(person)).length, 0);
+  const third = await r.start(accounts.alice, { to: person });
+  await refused(r.page(third.share).offer(), "the room held now is the second");
+
+  // A paid account's rooms are never held against each other.
+  await r.connect(await r.start(accounts.alice));
+  await r.connect(await r.start(accounts.dana));
+});
+
+test("once someone's free transfer is used, the first offer on any room made for them before is free_transfer_used, and claims nothing", async () => {
+  const r = relay();
+  const person = newcomer();
+  const refused = async (guest, note) =>
+    assert.deepEqual(await answer(guest.offer()), [409, { error: "free_transfer_used" }], note);
+
+  const first = await r.start(accounts.alice, { to: person });
+  const earlier = await r.start(accounts.dana, { to: person }); // made while nothing was used
+  const holder = await r.connect(first);
+  assert.equal((await holder.received()).status, 200);
+  // The page that had the transfer may still offer on its own room.
+  assert.equal((await r.page(first.share, { clientId: holder.clientId }).offer()).status, 202);
+  assert.equal((await first.sender.end(first.share, { sent: true })).status, 200);
+
+  // The room made before is refused on the database's word, whichever page
+  // offers, and the refusal took no claim.
+  const page = r.page(earlier.share);
+  await refused(page, "its sender is there");
+  await refused(r.page(earlier.share), "another page: the refusal claimed nothing");
+  assert.deepEqual(await earlier.sender.mail(), []);
+  // Ahead of sender_offline: the page is not told to wait for nothing.
+  advance(61_000);
+  await refused(page, "its sender is away");
+});
+
+/**
+ * The database's record of free transfers, with its answers to "used?" held
+ * until the test lets them go, or failing, as the test says.
+ */
+function heldFreeTransfers() {
+  const real = createFreeTransfers({ db, secret: () => env.jwtSecret });
+  const held = { hold: false, fail: false, waiting: [] };
+  held.keyOf = (address) => real.keyOf(address);
+  held.use = (key) => real.use(key);
+  held.used = (key) => {
+    if (held.fail) return Promise.reject(new Error("the database is not answering"));
+    if (!held.hold) return real.used(key);
+    return new Promise((resolve, reject) => held.waiting.push(() => real.used(key).then(resolve, reject)));
+  };
+  return held;
+}
+
+test("two pages offering together on two rooms for the same person: one claims its room, the other is refused", async () => {
+  const freeTransfers = heldFreeTransfers();
+  const r = relay({ freeTransfers });
+  const person = newcomer();
+  const a = await r.start(accounts.alice, { to: person });
+  const b = await r.start(accounts.dana, { to: person });
+
+  // Both offers get past every check made before the claim, and wait on the
+  // database together; then both go on.
+  freeTransfers.hold = true;
+  const offers = [r.page(a.share).offer(), r.page(b.share).offer()];
+  await until(() => freeTransfers.waiting.length === 2, "both offers asking the database");
+  freeTransfers.hold = false;
+  for (const go of freeTransfers.waiting.splice(0)) go();
+  const results = await Promise.all(offers);
+  assert.deepEqual(results.map((res) => res.status).sort(), [202, 409]);
+  assert.deepEqual(results.find((res) => res.status === 409).body, { error: "free_transfer_used" });
+  const mail = [...(await a.sender.mail()), ...(await b.sender.mail())];
+  assert.deepEqual(mail.map((m) => m.type), ["offer"], "one offer reached one sender");
+});
+
+test("when the database cannot say whether a free transfer is used, the offer is 503 and claims nothing", async () => {
+  const freeTransfers = heldFreeTransfers();
+  const r = relay({ freeTransfers });
+  const room = await r.start(accounts.alice, { to: newcomer() });
+
+  freeTransfers.fail = true;
+  assert.deepEqual(await answer(r.page(room.share).offer()), [503, { error: "link_unavailable" }]);
+  const at = logged.findIndex((entry) => entry.msg === "forgedrop_link_free_transfer_failed");
+  assert.deepEqual(logged[at], {
+    level: "error",
+    msg: "forgedrop_link_free_transfer_failed",
+    meta: { message: "the database is not answering" },
+  });
+  logged.splice(at, 1); // expected, so not left for "nothing went wrong unnoticed"
+  assert.deepEqual(await room.sender.mail(), []);
+
+  freeTransfers.fail = false;
+  assert.equal((await r.page(room.share).offer()).status, 202, "another page can claim it");
+});
+
 // ---------------------------------------------------------------- the pieces
+
+test("free transfers count the person an address stands for: lower case, no +tag, and at Gmail no dots, googlemail.com being gmail.com", () => {
+  for (const [address, person] of [
+    ["  Jo.Ann+Photos@Example.COM ", "jo.ann@example.com"],
+    ["jo.ann+a+b@example.com", "jo.ann@example.com"],
+    ["jo.ann+@example.com", "jo.ann@example.com"],
+    ["Jo.Ann+photos@GoogleMail.com", "joann@gmail.com"],
+    ["j.o.a.n.n@gmail.com", "joann@gmail.com"],
+    ["joann@googlemail.com", "joann@gmail.com"],
+    ["jo.ann@mail.gmail.com", "jo.ann@mail.gmail.com"],
+    ["jo.ann@gmail.co", "jo.ann@gmail.co"],
+    ["plain@example.org", "plain@example.org"],
+  ]) {
+    assert.equal(personOf(address), person, address);
+  }
+  const record = createFreeTransfers({ db, secret: () => env.jwtSecret });
+  assert.equal(record.keyOf("Jo.Ann+x@googlemail.com"), record.keyOf("joann@gmail.com"));
+  assert.equal(record.keyOf("joann@gmail.com"), keptAs("joann@gmail.com"));
+  assert.notEqual(record.keyOf("jo.ann@example.com"), record.keyOf("joann@example.com"));
+});
+
+test("the share store holds one room at a time for someone who is not a paid account, and none for a paid one", () => {
+  let t = 1_000_000;
+  const shares = createShareStore({ now: () => t });
+  stoppable.push(shares);
+  const person = "cd".repeat(32);
+  const make = (userId, extra) =>
+    shares.create({ userId, address: `phone:${userId}` }, { name: userId, paid: false, recipient: person, ...extra }).share;
+
+  const x = make("u1");
+  const y = make("u2");
+  const z = make("u3");
+  assert.equal(shares.contested(y), false);
+  assert.deepEqual(shares.claim(x, "g1"), { ok: true });
+  assert.equal(shares.contested(y), true);
+  assert.equal(shares.contested(x), false, "not by itself");
+  assert.deepEqual(shares.claim(y, "g2"), { ok: false, error: "free_transfer_used" });
+  assert.deepEqual(shares.claim(y, "g1"), { ok: false, error: "free_transfer_used" }, "whichever page asks");
+  assert.deepEqual(shares.claim(x, "g1"), { ok: true }, "its holder is never refused");
+  assert.equal(shares.byId(y).guest, null, "a refusal claims nothing");
+
+  // Ended, or run out, the held room holds nothing.
+  assert.equal(shares.end("u1", x), true);
+  assert.deepEqual(shares.claim(y, "g2"), { ok: true });
+  assert.equal(shares.contested(z), true);
+  t += 24 * 60 * 60_000;
+  const w = make("u4");
+  assert.equal(shares.contested(w), false, "the room that held them is over");
+
+  // Paid accounts' rooms keep no person, and are never held against each other.
+  const p = shares.create({ userId: "u5", address: "phone:u5" }, { name: "P", paid: true, recipient: person }).share;
+  const q = shares.create({ userId: "u6", address: "phone:u6" }, { name: "Q", paid: true, recipient: person }).share;
+  assert.deepEqual(shares.claim(p, "g5"), { ok: true });
+  assert.deepEqual(shares.claim(q, "g6"), { ok: true });
+  assert.equal(shares.contested(w), false, "a paid room holds no one");
+});
 
 test("the share store: an id each, one claimant, whose guest is whose, ending, so many an account, a day, and a timer that never holds the process open", async () => {
   let t = 1_000_000;
