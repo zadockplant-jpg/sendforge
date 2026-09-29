@@ -74,6 +74,7 @@ import {
 } from "./stripe.js";
 import {
   MAX_RECIPIENTS,
+  adminCodeEmail,
   adminCodeMessage,
   adminEmail,
   adminPaidMessage,
@@ -85,6 +86,7 @@ import {
   emailConfigured,
   mismatchedPaymentMessage,
   isValidEmail,
+  maskedEmail,
   parseEmailList,
   paymentFailedMessage,
   paymentReceiptMessage,
@@ -1502,6 +1504,8 @@ export async function handlePortalRequest(context) {
       email: emailConfigured(env)
     };
 
+    const codeTo = maskedEmail(adminCodeEmail(env));
+
     if (pathname === "/clients/stripe/webhook") {
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
       return handleWebhook(context, store, origin);
@@ -1559,30 +1563,30 @@ export async function handlePortalRequest(context) {
     if (pathname === "/clients/admin/request") {
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
       if (admin) return redirectResponse("/clients/admin");
-      if (!store) return htmlResponse(adminRequestPage({ state: "storage-not-configured", authenticated }), 503);
-      if (!readiness.email) return htmlResponse(adminRequestPage({ state: "email-not-configured", authenticated }), 503);
+      if (!store) return htmlResponse(adminRequestPage({ codeTo, state: "storage-not-configured", authenticated }), 503);
+      if (!readiness.email) return htmlResponse(adminRequestPage({ codeTo, state: "email-not-configured", authenticated }), 503);
       if (!(await allowAdminRequest(store, requestIp(context.request) || "unknown"))) {
-        return htmlResponse(adminRequestPage({ state: "rate-limited", authenticated }), 429);
+        return htmlResponse(adminRequestPage({ codeTo, state: "rate-limited", authenticated }), 429);
       }
 
       const code = randomCode();
       const challengeId = randomId(16);
       await putAdminChallenge(store, challengeId, await sha256Hex(`${code}:${challengeId}`));
       const message = adminCodeMessage(code, requestIp(context.request), `${origin}/clients/admin/code`);
-      const delivery = await sendEmail(env, { to: adminEmail(env), ...message, category: "admin-code" });
+      const delivery = await sendEmail(env, { to: adminCodeEmail(env), ...message, category: "admin-code" });
       if (!delivery.ok) {
         await deleteAdminChallenge(store, challengeId);
-        return htmlResponse(adminRequestPage({ state: "send-failed", authenticated }), 502);
+        return htmlResponse(adminRequestPage({ codeTo, state: "send-failed", authenticated }), 502);
       }
-      await record(store, { actor: "visitor", action: "admin.code-requested", ip: requestIp(context.request), summary: `Admin code emailed to ${adminEmail(env)}` });
-      return htmlResponse(adminRequestPage({ state: "sent", authenticated }));
+      await record(store, { actor: "visitor", action: "admin.code-requested", ip: requestIp(context.request), summary: `Admin code emailed to ${adminCodeEmail(env)}` });
+      return htmlResponse(adminRequestPage({ codeTo, state: "sent", authenticated }));
     }
 
     // Where a code is entered on any device, without asking for a new one.
     if (pathname === "/clients/admin/code") {
       if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
       if (admin) return redirectResponse("/clients/admin");
-      return htmlResponse(adminRequestPage({ state: "code", authenticated }));
+      return htmlResponse(adminRequestPage({ codeTo, state: "code", authenticated }));
     }
 
     // A code works on any device, not just the one that asked for it: it is checked against every
@@ -1590,10 +1594,10 @@ export async function handlePortalRequest(context) {
     // tried more than ADMIN_CODE_MAX_ATTEMPTS times, as when a code was tied to one page.
     if (pathname === "/clients/admin/verify") {
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
-      if (!store) return htmlResponse(adminRequestPage({ state: "storage-not-configured", authenticated }), 503);
+      if (!store) return htmlResponse(adminRequestPage({ codeTo, state: "storage-not-configured", authenticated }), 503);
       const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
       const code = String(form?.get("code") || "").trim();
-      const retry = (error, status) => htmlResponse(adminRequestPage({ state: "code", error, authenticated }), status);
+      const retry = (error, status) => htmlResponse(adminRequestPage({ codeTo, state: "code", error, authenticated }), status);
 
       const { live, spent } = await claimAdminAttempt(store);
       const rejected = (why) => record(store, { actor: "visitor", action: "admin.code-rejected", ip: requestIp(context.request), summary: `Admin code not accepted: ${why}` });

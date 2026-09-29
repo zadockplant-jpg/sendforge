@@ -50,6 +50,8 @@ export function portalEnv(env = process.env) {
     EMAIL_CLIENT_FROM: env.MHB_EMAIL_CLIENT_FROM || "",
     EMAIL_REPLY_TO: env.MHB_EMAIL_REPLY_TO || "",
     ADMIN_EMAIL: env.MHB_ADMIN_EMAIL || "",
+    // Where admin sign-in codes go, when not the admin email (email.js adminCodeEmail).
+    ADMIN_CODE_EMAIL: String(env.MHB_ADMIN_CODE_EMAIL || "").trim(),
     // Encrypts crew paperwork (secure.js): 32 random bytes, base64. Optional; see secure.js.
     DATA_KEY: String(env.MHB_DATA_KEY || "").trim()
   };

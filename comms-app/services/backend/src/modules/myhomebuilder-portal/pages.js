@@ -590,12 +590,14 @@ export function signPage({ document, party, actionPath, backPath, error = "", ad
 
 // Admin sign-in. "sent" follows a code request; "code" is the page any device can open to enter a
 // code it already has (/clients/admin/code). A code is not tied to the page that asked for it.
-export function adminRequestPage({ state, error = "", authenticated = false }) {
+// `codeTo` names the inbox the codes go to, masked (email.js maskedEmail).
+export function adminRequestPage({ state, error = "", authenticated = false, codeTo = "" }) {
+  const inbox = codeTo ? `<strong>${escapeHtml(codeTo)}</strong>` : "the admin email";
   let body;
   if (state === "sent" || state === "code") {
     const intro = state === "sent"
-      ? `<p>A 6-digit code was sent to <strong>mb@myhomebuilderllc.com</strong>. It expires in 10 minutes and works on any device.</p>`
-      : `<p>Enter the 6-digit code emailed to <strong>mb@myhomebuilderllc.com</strong>. It works on any device for 10 minutes after it was sent.</p>`;
+      ? `<p>A 6-digit code was sent to ${inbox}. It expires in 10 minutes and works on any device.</p>`
+      : `<p>Enter the 6-digit code emailed to ${inbox}. It works on any device for 10 minutes after it was sent.</p>`;
     const elsewhere = state === "sent"
       ? `<p class="portal-security-note">On another device, open <a class="portal-inline-link" href="/clients/admin/code">myhomebuilderllc.com/clients/admin/code</a> and enter the code there.</p>`
       : `<p class="portal-security-note">No code yet? <button class="portal-logout-button" type="submit" form="admin-email-code">Email a code</button></p>`;

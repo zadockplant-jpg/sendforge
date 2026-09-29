@@ -65,7 +65,10 @@ the same way jayje.com forwards its account pages. Everything else lives here:
 - Optional overrides:
   - `MHB_SITE_URL` (default `https://myhomebuilderllc.com`), used for links in emails the webhook sends
   - `MHB_ALLOWED_ORIGINS` (default the apex and `www` origins)
-  - `MHB_ADMIN_EMAIL` (default `mb@myhomebuilderllc.com`)
+  - `MHB_ADMIN_EMAIL` (default `mb@myhomebuilderllc.com`): builder notices, and where clients'
+    replies go
+  - `MHB_ADMIN_CODE_EMAIL`: where admin sign-in codes go instead of `MHB_ADMIN_EMAIL`, so only
+    the owner's inbox opens the admin panel. The sign-in page shows it masked.
   - `MHB_EMAIL_FROM`, `MHB_EMAIL_CLIENT_FROM` and `MHB_EMAIL_REPLY_TO`
   - `MHB_DATA_KEY` (32 random bytes, base64): the key for crew paperwork (see Labor). Without
     it, a key derived from `MHB_SESSION_SECRET` is used.
@@ -75,7 +78,8 @@ the same way jayje.com forwards its account pages. Everything else lives here:
 ## Admin sign-in
 
 "Administrator access" (on the login page) and "Admin" (inside a portal) email a 6-digit
-code to the admin address. A code expires in 10 minutes, works once, and works on any
+code to `MHB_ADMIN_CODE_EMAIL`, or to the admin address when that is not set; the page shows
+the inbox masked. A code expires in 10 minutes, works once, and works on any
 device. It is not tied to the page that asked for it.
 
 - **Entering a code:** another device opens `/clients/admin/code` ("Enter a code" on the

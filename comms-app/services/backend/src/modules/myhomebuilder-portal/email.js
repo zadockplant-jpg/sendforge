@@ -55,6 +55,21 @@ export function adminEmail(env) {
   return env.ADMIN_EMAIL || ADMIN_EMAIL;
 }
 
+// Admin sign-in codes go to MHB_ADMIN_CODE_EMAIL when it is set (an inbox only the owner reads),
+// else to the admin email. Builder notices and clients' replies stay with the admin email.
+export function adminCodeEmail(env) {
+  return env.ADMIN_CODE_EMAIL || adminEmail(env);
+}
+
+// "z••••••••t@gmail.com": enough to tell which inbox a code went to, without showing the
+// address to everyone who presses Admin.
+export function maskedEmail(address) {
+  const [local = "", domain = ""] = String(address || "").split("@");
+  if (!local || !domain) return "";
+  const hidden = local.length <= 2 ? "•" : "•".repeat(Math.min(local.length - 2, 8));
+  return `${local[0]}${hidden}${local.length > 2 ? local.at(-1) : ""}@${domain}`;
+}
+
 // Client-facing mail is signed by the business and replies go to the builder's inbox.
 export function clientSender(env) {
   return { from: env.EMAIL_CLIENT_FROM || env.EMAIL_FROM || DEFAULT_CLIENT_FROM, replyTo: env.EMAIL_REPLY_TO || adminEmail(env) };

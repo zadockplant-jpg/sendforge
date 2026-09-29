@@ -450,6 +450,29 @@ test("admin code goes to mb@myhomebuilderllc.com from billing@ and unlocks the a
   assert.equal((await request("/clients/admin", { headers: { Cookie: clientCookie } })).status, 303);
 });
 
+test("with MHB_ADMIN_CODE_EMAIL set, admin codes go only to that inbox, shown masked, and notices stay with the admin email", async () => {
+  const env = portal({ ADMIN_CODE_EMAIL: "owner.private@example.com" });
+  const requested = await request("/clients/admin/request", { method: "POST", headers: { "CF-Connecting-IP": "203.0.113.251" } }, env);
+  const page = await requested.text();
+  assert.equal(requested.status, 200);
+  assert.match(page, /sent to <strong>o\u2022{8}e@example\.com<\/strong>/u);
+  assert.doesNotMatch(page, /owner\.private@example\.com|mb@myhomebuilderllc\.com/u);
+  const codeEmail = email.delivered.at(-1);
+  assert.deepEqual(codeEmail.to, ["owner.private@example.com"]);
+  const code = codeEmail.text.match(/Verification code: (\d{6})/u)[1];
+  const verify = await request("/clients/admin/verify", form({ code }), env);
+  assert.equal(verify.headers.get("Location"), "/clients/admin");
+  assert.match(await (await request("/clients/admin/code", {}, env)).text(), /emailed to <strong>o\u2022{8}e@example\.com<\/strong>/u);
+
+  // Quotes and invoices still take replies at the builder's address.
+  const adminCookie = cookieValue(verify);
+  await setClientEmail(adminCookie);
+  const sent = await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "invoice", title: "Deposit", amount: "500", sendNow: "yes" }, adminCookie), env);
+  assert.match(sent.headers.get("Location"), /notice=billing-sent/u);
+  const invoiceEmail = deliveredTo("client@example.com").at(-1);
+  assert.deepEqual(invoiceEmail.reply_to, { email: "mb@myhomebuilderllc.com" });
+});
+
 test("an admin sign-in lasts 24 hours: the cookie and its signed expiry agree", async () => {
   assert.equal(ADMIN_SESSION_TTL_SECONDS, 24 * 60 * 60, "one admin sign-in a day, as the owner asked");
   assert.match(await createAdminSession("mhb-test-session-secret-that-is-long-and-unique"), /Max-Age=86400;/u);
