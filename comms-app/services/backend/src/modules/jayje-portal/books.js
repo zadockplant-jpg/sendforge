@@ -168,8 +168,8 @@ export function createBooks({db}) {
   async function insertActivity(trx,event) {
     const id=randomUUID();
     await trx('jayje_activity').insert({id,...(event.at?{at:event.at}:{}),actor:event.actor||'system',action:String(event.action).slice(0,48),
-      user_id:event.userId??null,email:event.email??null,client_id:event.clientId??null,document_id:event.documentId??null,
-      document_reference:event.reference??null,amount_cents:Number.isInteger(event.amountCents)?event.amountCents:null,
+      user_id:event.userId??null,email:event.email?String(event.email).slice(0,254):null,client_id:event.clientId??null,document_id:event.documentId??null,
+      document_reference:event.reference?String(event.reference).slice(0,40):null,amount_cents:Number.isInteger(event.amountCents)?event.amountCents:null,
       summary:String(event.summary||event.action).slice(0,500),ip:event.ip?String(event.ip).slice(0,64):null,data:JSON.stringify(event.data||{})});
     return id;
   }
@@ -212,6 +212,7 @@ export function createBooks({db}) {
   // ---------- Opening ----------
 
   let opened=false;
+  const isUuid=value=>/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value||''));
   const AUDIT_WORDS={client_created:'Added a client',document_created:'Created a document',quote_converted:'Made an invoice from a quote',document_issue:'Issued a document',
     document_void:'Voided a document',template_created:'Created a template',template_updated:'Changed a template',template_removed:'Deleted a template'};
 
@@ -230,9 +231,10 @@ export function createBooks({db}) {
       const audited=await trx('admin_audit_log').where('action','like','jayje.%').modify(q=>{if(live)q.where('created_at','<',live);}).orderBy('created_at');
       for(const row of audited) {
         const action=row.action.slice(6);
-        const doc=['document_created','quote_converted','document_issue','document_void'].includes(action)?await trx('jayje_documents').where({id:row.resource_id}).first():null;
+        // Only a well-formed id is looked up: one odd row must not stop the books from opening.
+        const doc=['document_created','quote_converted','document_issue','document_void'].includes(action)&&isUuid(row.resource_id)?await trx('jayje_documents').where({id:row.resource_id}).first():null;
         await insertActivity(trx,{at:row.created_at,actor:'admin',action:`audit.${action}`.slice(0,48),userId:row.admin_user_id,email:row.admin_email,
-          clientId:doc?.client_id??(action==='client_created'?row.resource_id:null),documentId:doc?.id??null,reference:doc?.reference??null,
+          clientId:doc?.client_id??(action==='client_created'&&isUuid(row.resource_id)?row.resource_id:null),documentId:doc?.id??null,reference:doc?.reference??null,
           summary:`${AUDIT_WORDS[action]||action}${doc?` · ${doc.reference} · ${doc.title}`:action==='client_created'&&clients.get(row.resource_id)?` · ${clients.get(row.resource_id)}`:''}`,data:{fromRecords:true}});
       }
       const documents=await trx('jayje_documents').orderBy('created_at').orderBy('id');

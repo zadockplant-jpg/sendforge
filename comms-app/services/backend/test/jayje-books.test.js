@@ -87,10 +87,13 @@ test('the books open from what the portal already holds, once',async()=>{
   await legacyBilling.reconcile(sessions.get(session.id),{fee:610,chargedAt:new Date('2026-09-15T15:00:00Z')});
   assert.equal(await db('jayje_activity').count({n:'*'}).first().then(r=>Number(r.n)),0);
 
+  // A malformed row cannot stop the books from opening.
+  await db('admin_audit_log').insert({id:randomUUID(),admin_user_id:admin.sub,admin_email:'owner@example.com',action:'jayje.document_issue',resource_type:'jayje',resource_id:'not-a-uuid',metadata:{}});
   await books.ensureOpened();await books.ensureOpened();
   const copied=await db('jayje_activity').where('action','like','audit.%').orderBy('at');
   assert.deepEqual(copied.map(row=>row.action).slice(0,2),['audit.client_created','audit.client_created']);
   assert.ok(copied.some(row=>row.action==='audit.document_issue' && row.document_id===paid.id && row.email==='owner@example.com'));
+  assert.ok(copied.some(row=>row.action==='audit.document_issue' && row.document_id===null),'the malformed row is copied without a document');
   assert.equal((await activity('stripe.paid',paid.id)).length,1);
   assert.deepEqual((await entries(issued.id)).map(e=>[e.part,e.source]),[['issue','opening']]);
   assert.deepEqual((await entries(paid.id)).map(e=>e.part),['issue','payment','fee']);
