@@ -140,7 +140,11 @@ export function pageShell(content, { authenticated = false, admin = false, crew 
     </div>
   </header>
   <main class="portal-main" id="main">
+    <!-- Cloudflare leaves addresses in these private pages as they are: its email obfuscation needs a
+         script the portal's Content Security Policy does not allow. -->
+    <!--email_off-->
     ${content}
+    <!--/email_off-->
   </main>
   <footer class="site-footer">
     <div class="site-width portal-footer-inner">
