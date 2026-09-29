@@ -214,6 +214,25 @@ function documentStatus(document, viewer) {
   return ["neutral", "On file"];
 }
 
+const TRASH_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 5.5h13"/><path d="M8 5.5V3.8h4v1.7"/><path d="M5.2 5.5l.8 11h8l.8-11"/><path d="M8.4 8.6v5.2M11.6 8.6v5.2"/></g></svg>`;
+
+// Under an invoice's status in the admin list: how it was paid, or when it is due.
+function statusDetail(item) {
+  if (item.kind !== "invoice") return "";
+  if (item.status === "paid") return [item.payment?.label || (item.payment?.source === "stripe" ? "Stripe" : "Payment"), dateText(item.paidAt)].filter(Boolean).join(" · ");
+  if (item.status === "processing") return "Bank payment processing";
+  if (item.status !== "open") return "";
+  if (!item.dueDate) return "No due date";
+  return `${item.dueDate < todayInMichigan() ? "Past due" : "Due"} ${dateText(item.dueDate)}`;
+}
+
+// What deleting takes with it, for the confirmation popup (the delete page says it in full).
+function deleteNote(item) {
+  if (item.status === "processing") return "A bank payment for this invoice is still processing, so it can be deleted once it finishes.";
+  if (item.kind === "quote") return "Its link stops working and its number is not used again. This can't be undone.";
+  return `${item.status === "paid" ? "Its payment record is deleted with it. " : ""}Its link stops working, and later invoices move up a number. This can't be undone.`;
+}
+
 function billingRows(items, { basePath, viewer }) {
   if (!items.length) {
     return `<p class="portal-empty">${viewer === "client" ? "No quotes or invoices have been posted yet." : "No quotes or invoices for this client yet."}</p>`;
@@ -221,15 +240,27 @@ function billingRows(items, { basePath, viewer }) {
   const rows = items.map((item) => {
     const [tone, label] = billingStatus(item);
     const href = `${basePath}/${encodeURIComponent(item.id)}`;
-    const action = viewer === "client"
-      ? `<a class="portal-secondary-link" href="${href}">${item.kind === "invoice" && item.status === "open" ? "View and pay" : "View"}</a>`
-      : `<a class="portal-secondary-link" href="${href}">Open</a>`;
-    const note = viewer === "admin" && item.invoiceNumber ? `<small>Invoiced as Invoice ${escapeHtml(item.invoiceNumber)}</small>` : "";
+    const admin = viewer === "admin";
+    const name = `${billingLabel(item)} · ${item.title}`;
+    // Without scripts, the status opens the invoice and the trash button its delete page.
+    const action = admin
+      ? `<div class="billing-row-actions">
+            <a class="portal-secondary-link" href="${href}">Open</a>
+            <a class="billing-trash" href="${href}/delete" data-delete-menu data-label="${escapeAttribute(name)}" data-kind="${item.kind}" data-note="${escapeAttribute(deleteNote(item))}"${item.status === "processing" ? " data-blocked" : ""} aria-label="Delete ${escapeAttribute(billingLabel(item))}" title="Delete">${TRASH_ICON}</a>
+          </div>`
+      : `<a class="portal-secondary-link" href="${href}">${item.kind === "invoice" && item.status === "open" ? "View and pay" : "View"}</a>`;
+    const note = admin && item.invoiceNumber ? `<small>Invoiced as Invoice ${escapeHtml(item.invoiceNumber)}</small>` : "";
+    const dueLine = item.dueDate && !(admin && item.kind === "invoice") ? `<small>${item.kind === "invoice" ? "Due" : "Valid until"} ${dateText(item.dueDate)}</small>` : "";
+    const badge = `<span class="portal-status portal-status-${tone}">${label}</span>`;
+    const detail = admin ? statusDetail(item) : "";
+    const status = admin && item.kind === "invoice" && ["open", "paid"].includes(item.status)
+      ? `<a class="status-change" href="${href}" data-status-menu data-label="${escapeAttribute(name)}" data-state="${item.status === "paid" ? "paid" : "due"}" data-source="${escapeAttribute(item.payment?.source || "")}" data-method="${escapeAttribute(item.payment?.label || "")}" data-detail="${escapeAttribute(detail)}" aria-label="${label}: change the status of ${escapeAttribute(billingLabel(item))}" title="Change status">${badge}</a>`
+      : badge;
     return `<tr>
           <td><span class="portal-number">${escapeHtml(item.number)}</span></td>
-          <td>${escapeHtml(item.title)}${item.dueDate ? `<small>${item.kind === "invoice" ? "Due" : "Valid until"} ${dateText(item.dueDate)}</small>` : ""}${note}</td>
+          <td>${escapeHtml(item.title)}${dueLine}${note}</td>
           <td>${money(item.amountCents, item.currency)}</td>
-          <td><span class="portal-status portal-status-${tone}">${label}</span></td>
+          <td>${status}${detail ? `<small class="status-detail">${escapeHtml(detail)}</small>` : ""}</td>
           <td>${action}</td>
         </tr>`;
   });
@@ -621,6 +652,54 @@ function templatePicker(templates, action) {
           </form>`;
 }
 
+// The popups the admin list opens (billing.js): change an invoice's status, and confirm a
+// delete. Due to paid asks how it was paid; paid to due removes a payment recorded by hand.
+function statusDialogs(client, readiness) {
+  const emails = clientEmails(client);
+  const receipt = readiness.email && emails.length
+    ? `<label class="portal-check" for="list-payment-receipt">
+              <input id="list-payment-receipt" name="sendReceipt" type="checkbox" value="yes" checked>
+              <span>Email a receipt to ${escapeHtml(addressesText(emails))}</span>
+            </label>`
+    : "";
+  return `<dialog class="admin-dialog" id="status-dialog" aria-labelledby="status-dialog-title">
+          <div class="admin-dialog-head">
+            <h2 id="status-dialog-title" data-status-title>Change status</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          <p class="admin-meta" data-status-current></p>
+          <div class="status-choice" role="group" aria-label="Status">
+            <button type="button" class="status-option" data-status-option="due" aria-pressed="false">Due</button>
+            <button type="button" class="status-option" data-status-option="paid" aria-pressed="false">Paid</button>
+          </div>
+          <form class="admin-stack-form" method="post" data-status-paid hidden>
+            <input type="hidden" name="return" value="list">
+            <p class="admin-meta">How was it paid?</p>
+            ${paymentFields("list-payment", { date: todayInMichigan() })}
+            ${receipt}
+            <button class="button button-solid" type="submit">Mark as paid</button>
+          </form>
+          <form class="admin-stack-form" method="post" data-status-due hidden>
+            <input type="hidden" name="return" value="list">
+            <p class="admin-meta" data-status-due-text></p>
+            <button class="button button-solid" type="submit">Mark as due</button>
+          </form>
+          <p class="portal-security-note" data-status-stripe hidden>Paid online through Stripe. Stripe payments keep the details Stripe recorded, so this one stays paid.</p>
+        </dialog>
+        <dialog class="admin-dialog" id="delete-dialog" aria-labelledby="delete-dialog-title">
+          <div class="admin-dialog-head">
+            <h2 id="delete-dialog-title" data-delete-title>Delete?</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          <p class="admin-meta" data-delete-note></p>
+          <form class="admin-dialog-actions" method="post" data-delete-form>
+            <button class="button button-danger" type="submit" data-delete-submit>Delete</button>
+            <button class="portal-logout-button" type="button" data-dialog-close>Cancel</button>
+          </form>
+          <p><a class="portal-secondary-link" href="#" data-delete-details>What goes with it</a></p>
+        </dialog>`;
+}
+
 export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null }) {
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
@@ -677,6 +756,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           </label>
           <button class="button button-solid" type="submit">Share with client</button>
         </form>
+        ${statusDialogs(selected, readiness)}
       </section>`;
     })()
     : `<section class="admin-panel"><p class="portal-empty">Choose a client portal to manage its quotes, invoices and documents.</p></section>`;

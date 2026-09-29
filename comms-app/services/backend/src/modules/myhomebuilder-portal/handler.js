@@ -1257,11 +1257,14 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     return redirectResponse(`${itemPath}?notice=voided`);
   }
 
+  // Marked paid from the invoice page, or from the admin list's status popup (return=list),
+  // which goes back to the list.
   if (action === "record-payment") {
-    if (item.kind !== "invoice" || item.status !== "open") return redirectResponse(`${itemPath}?notice=not-payable`);
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+    const back = (notice) => redirectResponse(form?.get("return") === "list" ? `/clients/admin?client=${encodeURIComponent(slug)}&notice=${notice}` : `${itemPath}?notice=${notice}`);
+    if (item.kind !== "invoice" || item.status !== "open") return back("not-payable");
     const entered = parseManualPayment(form);
-    if (entered.error) return redirectResponse(`${itemPath}?notice=${entered.error}`);
+    if (entered.error) return back(entered.error);
     if (item.checkoutSessionId) await expireCheckoutSession(env, item.checkoutSessionId);
     const { paidOn, ...details } = entered;
     const updated = await withShareToken(store, {
@@ -1281,7 +1284,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
         await note({ action: "receipt.emailed", item: updated, summary: `Emailed the receipt for ${billingLabel(updated)} to ${receiptTo.join(", ")}` });
       }
     }
-    return redirectResponse(`${itemPath}?notice=${notice}`);
+    return back(notice);
   }
 
   // Corrects a payment recorded by hand (method, reference or date; the amount is the invoice
@@ -1304,14 +1307,16 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   // Undoes a payment recorded by mistake. The invoice is open (payable) again, and its receipt
   // and payment notice are forgotten so a later payment sends fresh ones.
   if (action === "reopen") {
-    if (item.kind !== "invoice" || item.status !== "paid") return redirectResponse(itemPath);
-    if (item.payment?.source !== "manual") return redirectResponse(`${itemPath}?notice=payment-from-stripe`);
+    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+    const back = (notice) => redirectResponse(form?.get("return") === "list" ? `/clients/admin?client=${encodeURIComponent(slug)}&notice=${notice}` : `${itemPath}?notice=${notice}`);
+    if (item.kind !== "invoice" || item.status !== "paid") return back("not-payable");
+    if (item.payment?.source !== "manual") return back("payment-from-stripe");
     const { payment: _payment, paidAt: _paidAt, ...unpaid } = item;
     const reopened = { ...unpaid, status: "open", reopenedAt: new Date().toISOString() };
     await putBilling(store, reopened);
     await note({ action: "payment.removed", item: reopened, reason: "payment-removed", amountCents: item.payment?.amountCents ?? item.amountCents, summary: `Marked ${billingLabel(item)} unpaid, removing its ${item.payment?.label || ""} payment of ${money(item.payment?.amountCents ?? item.amountCents, item.currency)}`.replace("its  payment", "its payment") });
     await deleteSentEmails(store, [sentKey(item, "receipt"), sentKey(item, "paid-notice")]);
-    return redirectResponse(`${itemPath}?notice=payment-removed`);
+    return back("payment-removed");
   }
 
   // Sends the receipt again on request, to any addresses, and records the latest send.

@@ -1023,6 +1023,48 @@ test("an invoice emailed after it is paid says paid and has no pay link, and so 
   assert.doesNotMatch(processing.html, /\/clients\/pay\/|Pay \$/u);
 });
 
+test("the admin list says how each invoice was paid or when it is due, and changes status or deletes from popups", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item: due } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000", dueDate: "2099-10-01" });
+  const { item: open } = await postInvoice(adminCookie, { title: "Permits", amount: "250" });
+  const { item: paid } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  await request(`/clients/admin/clients/muskegon-addition/billing/${paid.id}/record-payment`, form({ method: "zelle", paidOn: "2026-09-28" }, adminCookie));
+  const list = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  const page = await list();
+  const base = "/clients/admin/clients/muskegon-addition/billing";
+  assert.match(page, /<small class="status-detail">Due Oct 1, 2099<\/small>/u);
+  assert.match(page, /<small class="status-detail">No due date<\/small>/u);
+  assert.match(page, /<small class="status-detail">Zelle · Sep 28, 2026<\/small>/u);
+  assert.ok(page.includes(`<a class="status-change" href="${base}/${paid.id}" data-status-menu data-label="Invoice 3 · Deposit" data-state="paid" data-source="manual" data-method="Zelle"`), "the status opens its popup, or the invoice without scripts");
+  assert.ok(page.includes(`<a class="billing-trash" href="${base}/${due.id}/delete" data-delete-menu data-label="Invoice 1 · Framing" data-kind="invoice"`));
+  assert.match(page, /aria-label="Delete Invoice 1" title="Delete"><svg/u);
+  assert.match(page, /<dialog class="admin-dialog" id="status-dialog"/u);
+  assert.match(page, /<button class="button button-solid" type="submit">Mark as paid<\/button>/u);
+  assert.match(page, /Email a receipt to pat@example\.com/u);
+  assert.match(page, /<dialog class="admin-dialog" id="delete-dialog"/u);
+
+  // Due to paid from the popup: how it was paid, then back to the list.
+  const marked = await request(`${base}/${open.id}/record-payment`, form({ method: "check", reference: "#88", paidOn: "2026-09-29", return: "list" }, adminCookie));
+  assert.equal(marked.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-recorded");
+  assert.equal((await stored(open)).payment.label, "Check #88");
+  assert.match(await list(), /<small class="status-detail">Check #88 · Sep 29, 2026<\/small>/u);
+  const missing = await request(`${base}/${due.id}/record-payment`, form({ method: "other", methodName: "", paidOn: "2026-09-29", return: "list" }, adminCookie));
+  assert.equal(missing.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-other-required");
+
+  // Paid to due: the payment recorded by hand is removed, then back to the list.
+  const reopened = await request(`${base}/${paid.id}/reopen`, form({ return: "list" }, adminCookie));
+  assert.equal(reopened.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-removed");
+  assert.equal((await stored(paid)).status, "open");
+  // From the invoice page the same actions still return there.
+  assert.match((await request(`${base}/${open.id}/reopen`, form({}, adminCookie))).headers.get("Location"), new RegExp(`${base}/${open.id}\\?notice=payment-removed`, "u"));
+
+  // The trash button's form deletes and returns to the list.
+  const deleted = await request(`${base}/${due.id}/delete`, form({}, adminCookie));
+  assert.match(deleted.headers.get("Location"), /^\/clients\/admin\?client=muskegon-addition&notice=invoice-deleted/u);
+  assert.equal(await db("mhb_billing").where({ id: due.id }).first(), undefined);
+});
+
 test("a project's quotes and invoices end with invoiced, paid and outstanding totals", async () => {
   const adminCookie = await loginAsAdmin();
   const dashboard = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
