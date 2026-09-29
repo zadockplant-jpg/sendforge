@@ -1,6 +1,7 @@
 import { billingLabel, billingLineItems, isEditable, issuedDate, moneyInput, PAYMENT_METHODS, quantityText, todayInMichigan } from "./billing.js";
 import { addressesText, clientEmails, MAX_RECIPIENTS } from "./email.js";
 import { escapeHtml, formatDate, money } from "./format.js";
+import { DOCUMENT_SECTIONS, awaitingSignature, groupBySection, sectionName, sectionOf } from "./documents.js";
 
 export { escapeHtml, money };
 export const escapeAttribute = escapeHtml;
@@ -77,6 +78,7 @@ export function pageShell(content, { authenticated = false, admin = false, bodyC
     if (admin) {
       nav.push('<a href="/clients/admin">Admin panel</a>');
       nav.push('<a href="/clients/admin/templates">Templates</a>');
+      nav.push('<a href="/clients/admin/documents">Documents</a>');
       nav.push('<a href="/clients/admin/books">Books</a>');
       nav.push('<form action="/clients/admin/logout" method="post"><button class="portal-logout-button" type="submit">Exit admin</button></form>');
     } else {
@@ -307,10 +309,17 @@ function documentRows(documents, { basePath, viewer }) {
           </td>
         </tr>`;
   });
-  return `<table class="portal-table">
+  return `<table class="portal-table portal-table-documents">
         <thead><tr><th scope="col">Document</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
         <tbody>${rows.join("")}</tbody>
       </table>`;
+}
+
+// A portal's documents under their section headings (documents.js), for the client and the admin.
+function documentSections(documents, { basePath, viewer }) {
+  if (!documents.length) return documentRows(documents, { basePath, viewer });
+  return groupBySection(documents).map(([key, group]) => `<h3 class="document-section-heading">${escapeHtml(sectionName(key, viewer))}</h3>
+        ${documentRows(group, { basePath, viewer })}`).join("\n        ");
 }
 
 function noticeMarkup(notice) {
@@ -357,7 +366,7 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
       </section>
       <section class="portal-section" aria-labelledby="documents-heading">
         <h2 id="documents-heading">Documents</h2>
-        ${documentRows(documents, { basePath: "/clients/documents", viewer: "client" })}
+        ${documentSections(documents, { basePath: "/clients/documents", viewer: "client" })}
         ${storeReady ? `<form class="portal-form portal-upload" action="/clients/documents/upload" method="post" enctype="multipart/form-data">
           <h3>Upload a document</h3>
           <p>Share plans, photos, permits or signed paperwork with My Home Builder. PDF, images and common office files up to 20 MB.</p>
@@ -700,6 +709,74 @@ function statusDialogs(client, readiness) {
         </dialog>`;
 }
 
+// Admin Documents page: share a document into any client portal's section and ask for
+// signatures, with everything still awaiting a signature listed first.
+export function adminDocumentsPage({ clients, documents, notice = null }) {
+  const names = new Map(clients.map((client) => [client.slug, client.name]));
+  const row = (document) => {
+    const [tone, label] = documentStatus(document, "admin");
+    const path = `/clients/admin/clients/${encodeURIComponent(document.clientSlug)}/documents/${encodeURIComponent(document.id)}`;
+    const mine = document.requiresAdminSignature && !document.signatures?.some((entry) => entry.party === "admin") && document.contentType === "application/pdf";
+    return `<tr>
+          <td>${escapeHtml(document.name)}<small>${escapeHtml(names.get(document.clientSlug) || document.clientSlug)} · ${escapeHtml(sectionName(sectionOf(document), "admin"))} · ${dateText(document.createdAt)}</small></td>
+          <td><span class="portal-status portal-status-${tone}">${label}</span></td>
+          <td class="portal-actions">
+            <a class="portal-secondary-link" href="${path}">Download</a>
+            ${mine ? `<a class="portal-secondary-link" href="${path}/sign">Sign</a>` : ""}
+          </td>
+        </tr>`;
+  };
+  const table = (rows, empty) => rows.length
+    ? `<table class="portal-table portal-table-documents">
+        <thead><tr><th scope="col">Document</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+        <tbody>${rows.map(row).join("")}</tbody>
+      </table>`
+    : `<p class="portal-empty">${empty}</p>`;
+  const waiting = documents.filter(awaitingSignature);
+  const shared = documents.filter((document) => !awaitingSignature(document)).slice(0, 50);
+  const portals = clients.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.name)}</option>`).join("");
+  return adminShell(`<div class="site-width portal-shell">
+      <section class="admin-intro">
+        <p class="portal-kicker">Admin panel</p>
+        <h1 class="portal-heading">Documents.</h1>
+        <p class="portal-lead">Share contracts, change orders, plans and other files into any client portal, in the section the client will find them, and ask for signatures.</p>
+        ${noticeMarkup(notice)}
+      </section>
+      <div class="admin-layout">
+        <aside class="admin-sidebar">
+          <form class="portal-form admin-form" action="/clients/admin/documents" method="post" enctype="multipart/form-data">
+            <h3>Upload a document</h3>
+            <label for="documents-client">Client portal
+              <select id="documents-client" name="client" required>${portals}</select>
+            </label>
+            <label for="documents-section">Section
+              <select id="documents-section" name="section">${DOCUMENT_SECTIONS.map(([key, label]) => `<option value="${key}"${key === "contracts" ? " selected" : ""}>${label}</option>`).join("")}</select>
+            </label>
+            <label for="documents-file">File
+              <input id="documents-file" name="file" type="file" required>
+            </label>
+            <label class="portal-check" for="documents-client-sign">
+              <input id="documents-client-sign" name="requiresClientSignature" type="checkbox" value="yes">
+              <span>Client must sign (PDF only)</span>
+            </label>
+            <label class="portal-check" for="documents-admin-sign">
+              <input id="documents-admin-sign" name="requiresAdminSignature" type="checkbox" value="yes">
+              <span>I will sign on my end (PDF only)</span>
+            </label>
+            <button class="button button-solid" type="submit">Share with client</button>
+            <p class="portal-security-note">PDF, images and common office files up to 20 MB. Only a PDF can be signed in the portal.</p>
+          </form>
+        </aside>
+        <section class="admin-panel" aria-labelledby="documents-waiting">
+          <h2 id="documents-waiting">Awaiting signatures</h2>
+          ${table(waiting, "Nothing is waiting for a signature.")}
+          <h2 class="admin-panel-subheading">Shared recently</h2>
+          ${table(shared, "No documents have been shared yet.")}
+        </section>
+      </div>
+    </div>`, { title: "Documents" });
+}
+
 export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null }) {
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
@@ -740,11 +817,14 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
         ${billingRows(billing, { basePath: `${base}/billing`, viewer: "admin" })}
 
         <h3>Documents</h3>
-        ${documentRows(documents, { basePath: `${base}/documents`, viewer: "admin" })}
+        ${documentSections(documents, { basePath: `${base}/documents`, viewer: "admin" })}
         <form class="portal-form admin-form" action="${base}/documents" method="post" enctype="multipart/form-data">
           <h3>Upload a contract or document</h3>
           <label for="admin-upload">File
             <input id="admin-upload" name="file" type="file" required>
+          </label>
+          <label for="admin-upload-section">Section in the client portal
+            <select id="admin-upload-section" name="section">${DOCUMENT_SECTIONS.map(([key, label]) => `<option value="${key}"${key === "contracts" ? " selected" : ""}>${label}</option>`).join("")}</select>
           </label>
           <label class="portal-check" for="needs-client-signature">
             <input id="needs-client-signature" name="requiresClientSignature" type="checkbox" value="yes">

@@ -40,6 +40,7 @@ import {
   getSentEmail,
   getShareLink,
   getTemplate,
+  listAllDocuments,
   listBilling,
   listClients,
   listDocuments,
@@ -105,10 +106,12 @@ import {
 import { formatDate, money } from "./format.js";
 import { isPdf, signDocument } from "./pdf.js";
 import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record } from "./books.js";
+import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
 import {
   adminBillingPage,
   adminBooksPage,
   adminDashboardPage,
+  adminDocumentsPage,
   adminRequestPage,
   adminTemplatesPage,
   billingDeletePage,
@@ -233,6 +236,7 @@ function requestedProjectDestination(url, pathname) {
 
 const NOTICES = {
   uploaded: { text: "Your document was uploaded and shared with My Home Builder." },
+  "document-shared": { text: "Document shared. The client finds it in their portal under the section you chose." },
   signed: { text: "Your signature was applied. A signed copy is now on file." },
   paid: { text: "Payment received. Thank you." },
   "payment-pending": { text: "Your payment is still processing. This page will update once Stripe confirms it.", tone: "info" },
@@ -971,11 +975,12 @@ async function storeUpload(store, slug, file, uploadedBy, flags) {
     createdAt: new Date().toISOString(),
     requiresClientSignature: Boolean(flags.requiresClientSignature),
     requiresAdminSignature: Boolean(flags.requiresAdminSignature),
+    section: uploadedBy === "admin" ? parseSection(flags.section) : CLIENT_UPLOADS,
     signatures: [],
     signedKey: null
   };
   await putDocument(store, document);
-  await record(store, { actor: uploadedBy === "admin" ? "admin" : "client", action: "document.uploaded", clientSlug: slug, summary: uploadedBy === "admin" ? `Shared ${name} with the client` : `The client uploaded ${name}`, data: { documentId: id } });
+  await record(store, { actor: uploadedBy === "admin" ? "admin" : "client", action: "document.uploaded", clientSlug: slug, summary: uploadedBy === "admin" ? `Shared ${name} with the client in ${sectionName(document.section, "admin")}${document.requiresClientSignature ? ", to sign" : ""}` : `The client uploaded ${name}`, data: { documentId: id } });
   return { document };
 }
 
@@ -1610,6 +1615,26 @@ export async function handlePortalRequest(context) {
 
       if (pathname === "/clients/admin/books" || pathname.startsWith("/clients/admin/books/")) return handleBooks(context, store, pathname, url);
 
+      // Share a document into any client portal's section, and see what awaits a signature.
+      if (pathname === "/clients/admin/documents") {
+        const clients = await listClients(store);
+        if (isRead) {
+          const known = new Set(clients.map((entry) => entry.slug));
+          const documents = (await listAllDocuments(store)).filter((document) => known.has(document.clientSlug));
+          return htmlResponse(adminDocumentsPage({ clients, documents, notice: noticeFromQuery(url) }));
+        }
+        if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
+        const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 4096);
+        const target = clients.find((entry) => entry.slug === String(form?.get("client") || ""));
+        if (!form || !target) return redirectResponse("/clients/admin/documents?notice=invalid");
+        const result = await storeUpload(store, target.slug, form.get("file"), "admin", {
+          section: form.get("section"),
+          requiresClientSignature: form.get("requiresClientSignature") === "yes",
+          requiresAdminSignature: form.get("requiresAdminSignature") === "yes"
+        });
+        return redirectResponse(`/clients/admin/documents?notice=${result.error || "document-shared"}`);
+      }
+
       const templateMatch = pathname.match(/^\/clients\/admin\/templates(?:\/([^/]+))?(?:\/(delete))?$/u);
       if (templateMatch) return handleAdminTemplates(context, store, templateMatch[1] ? decodeSegment(templateMatch[1]) : "", templateMatch[2] || "");
 
@@ -1675,11 +1700,12 @@ export async function handlePortalRequest(context) {
           const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 4096);
           const result = form
             ? await storeUpload(store, slug, form.get("file"), "admin", {
+              section: form.get("section"),
               requiresClientSignature: form.get("requiresClientSignature") === "yes",
               requiresAdminSignature: form.get("requiresAdminSignature") === "yes"
             })
             : { error: "upload-failed" };
-          return redirectResponse(`${back}&notice=${result.error || "uploaded"}`);
+          return redirectResponse(`${back}&notice=${result.error || "document-shared"}`);
         }
 
         if (area === "documents" && id && (!action || action === "sign")) {

@@ -1378,7 +1378,7 @@ test("the activity log records sign-ins, client portals, templates, documents an
   assert.equal(find("client.created").ip, "198.51.100.77", "admin actions are logged with the address they came from");
   assert.equal(find("client.emails-saved").summary, "Saved the emails for Muskegon Addition: pat@example.com");
   assert.equal(find("template.saved").summary, "Created the template Deck package");
-  assert.equal(find("document.uploaded").summary, "Shared contract.pdf with the client");
+  assert.equal(find("document.uploaded").summary, "Shared contract.pdf with the client in Other documents");
   assert.deepEqual({ actor: find("quote.accepted").actor, summary: find("quote.accepted").summary }, { actor: "client", summary: "Quote 1 accepted by Pat Hayes" });
 
   await request("/clients/admin/verify", form({ code: "000000" }));
@@ -1865,12 +1865,49 @@ test("the Stripe webhook accepts only a valid signature", async () => {
 
 // ---------- Documents and e-signing ----------
 
+test("documents go into the section the admin chooses, from the client's portal or the Documents page", async () => {
+  const clientCookie = await loginAsClient();
+  const adminCookie = await loginAsAdmin(portal(), clientCookie);
+  const pdf = await samplePdf();
+  const shared = await request("/clients/admin/clients/muskegon-addition/documents",
+    multipart({ section: "change-orders", requiresClientSignature: "yes" }, { bytes: pdf, name: "Change Order 1.pdf", type: "application/pdf" }, adminCookie));
+  assert.equal(shared.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=document-shared");
+  const fromPage = await request("/clients/admin/documents",
+    multipart({ client: "muskegon-addition", section: "permits" }, { bytes: pdf, name: "Building Permit.pdf", type: "application/pdf" }, adminCookie));
+  assert.equal(fromPage.headers.get("Location"), "/clients/admin/documents?notice=document-shared");
+  const odd = await request("/clients/admin/documents",
+    multipart({ client: "muskegon-addition", section: "not-a-section" }, { bytes: pdf, name: "Notes.pdf", type: "application/pdf" }, adminCookie));
+  assert.match(odd.headers.get("Location"), /notice=document-shared/u);
+  assert.match((await request("/clients/admin/documents", multipart({ client: "no-such-portal", section: "plans" }, { bytes: pdf, name: "x.pdf", type: "application/pdf" }, adminCookie))).headers.get("Location"), /notice=invalid/u);
+  await request("/clients/documents/upload", multipart({}, { bytes: pdf, name: "Survey.pdf", type: "application/pdf" }, clientCookie));
+
+  const sections = Object.fromEntries((await db("mhb_documents").select("data")).map((row) => json(row.data)).map((document) => [document.name, document.section]));
+  assert.deepEqual(sections, { "Change Order 1.pdf": "change-orders", "Building Permit.pdf": "permits", "Notes.pdf": "other", "Survey.pdf": "uploads" });
+
+  const home = await (await request("/clients", { headers: { Cookie: clientCookie } })).text();
+  const headings = [...home.matchAll(/<h3 class="document-section-heading">([^<]+)<\/h3>/gu)].map((match) => match[1]);
+  assert.deepEqual(headings, ["Change orders", "Permits and inspections", "Other documents", "Uploaded by you"]);
+  assert.match(home, /Change Order 1\.pdf[\s\S]*?Awaiting your signature/u);
+
+  const admin = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(admin, /<h3 class="document-section-heading">Uploaded by the client<\/h3>/u);
+  assert.match(admin, /<select id="admin-upload-section" name="section"><option value="contracts" selected>Contracts and agreements<\/option>/u);
+
+  const page = await (await request("/clients/admin/documents", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /<h1 class="portal-heading">Documents\.<\/h1>/u);
+  assert.match(page, /<option value="muskegon-addition">Muskegon Addition<\/option>/u);
+  assert.match(page, /Awaiting signatures[\s\S]*Change Order 1\.pdf<small>Muskegon Addition · Change orders ·/u);
+  assert.match(page, /Shared recently[\s\S]*Building Permit\.pdf<small>Muskegon Addition · Permits and inspections ·/u);
+  assert.match(page, /<a href="\/clients\/admin\/documents">Documents<\/a>/u);
+  assert.equal((await request("/clients/admin/documents")).headers.get("Location"), "/clients", "admin only");
+});
+
 test("admin shares a contract, signs it, and the client countersigns into a signed PDF", async () => {
   const clientCookie = await loginAsClient();
   const adminCookie = await loginAsAdmin(portal(), clientCookie);
   const upload = await request("/clients/admin/clients/muskegon-addition/documents",
     multipart({ requiresClientSignature: "yes", requiresAdminSignature: "yes" }, { bytes: await samplePdf(), name: "Build Contract.pdf", type: "application/pdf" }, adminCookie));
-  assert.match(upload.headers.get("Location"), /notice=uploaded/u);
+  assert.match(upload.headers.get("Location"), /notice=document-shared/u);
   const document = json((await db("mhb_documents").first()).data);
 
   const adminSigned = await request(`/clients/admin/clients/muskegon-addition/documents/${document.id}/sign`, form({ name: "Builder Owner", consent: "yes", signature: "" }, adminCookie));

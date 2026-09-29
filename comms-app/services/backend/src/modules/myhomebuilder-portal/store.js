@@ -236,6 +236,12 @@ export async function listDocuments(store, slug) {
   return rows.map(data);
 }
 
+// Every portal's documents, newest first, for the admin Documents page.
+export async function listAllDocuments(store, limit = 300) {
+  const rows = await store.db("mhb_documents").orderBy("created_at", "desc").limit(limit).select("data").timeout(QUERY_TIMEOUT_MS);
+  return rows.map(data);
+}
+
 export async function getDocument(store, slug, id) {
   return data(await store.db("mhb_documents").where({ id: String(id), client_slug: slug }).first().timeout(QUERY_TIMEOUT_MS));
 }
