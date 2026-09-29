@@ -14,6 +14,7 @@ import { adminEmail, clientSender, crewBillMessage, crewLinkMessage, isValidEmai
 import { MAX_TOTAL_CENTS, addDays, isValidDate, moneyInput, parseMoney, todayInMichigan } from "./billing.js";
 import { money } from "./format.js";
 import { record } from "./books.js";
+import { unfileLaborPayment } from "./bank.js";
 import { signPage } from "./pages.js";
 import { FORMS, PAPERWORK, fillOfficialForm, readAnswers, typesetDeposit } from "./forms.js";
 import { WAIVERS, typesetWaiver } from "./waivers.js";
@@ -866,13 +867,20 @@ async function handleEntry(context, store, entry, action) {
     if (entry.status !== "approved") return kit.redirectResponse(`${back}?notice=not-waiting`);
     const payment = parseLaborPayment(form);
     if (payment.error) return kit.redirectResponse(`${back}?notice=${payment.error}`);
-    const updated = { ...entry, status: "paid", payment: { ...payment, recordedAt: new Date().toISOString() } };
+    const updated = { ...entry, status: "paid", payment: { ...payment, source: "manual", recordedAt: new Date().toISOString() } };
     await save(updated, { action: "labor.paid", amountCents: entry.amountCents, summary: `Paid ${name} · ${money(entry.amountCents)} by ${payment.label}` });
     return kit.redirectResponse(`${back}?notice=labor-paid`);
   }
 
   if (action === "unpaid") {
     if (entry.status !== "paid") return kit.redirectResponse(`${back}?notice=not-waiting`);
+    // Paid by a bank transaction: unfiling it puts the work back to how it was.
+    if (entry.payment?.source === "bank" && (await unfileLaborPayment(store, entry, { ip }))) {
+      const now = await getLabor(store, entry.id);
+      if (now.status !== "paid") return kit.redirectResponse(`${back}?notice=labor-unpaid`);
+      await save({ ...now, status: "approved", payment: null }, { action: "labor.unpaid", reason: "payment-removed", summary: `Marked ${name} unpaid` });
+      return kit.redirectResponse(`${back}?notice=labor-unpaid`);
+    }
     await save({ ...entry, status: "approved", payment: null }, { action: "labor.unpaid", reason: "payment-removed", summary: `Marked ${name} unpaid` });
     return kit.redirectResponse(`${back}?notice=labor-unpaid`);
   }

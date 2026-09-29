@@ -29,6 +29,8 @@ const { up: projectEmails } = await import("../src/db/migrations/20260927_myhome
 const { up: booksTables } = await import("../src/db/migrations/20260930_myhomebuilder_portal_books.js");
 const { up: stripeEvents } = await import("../src/db/migrations/20261003_myhomebuilder_portal_stripe_events.js");
 const { up: laborTables } = await import("../src/db/migrations/20261004_myhomebuilder_portal_labor.js");
+const { up: bankTables } = await import("../src/db/migrations/20261005_myhomebuilder_portal_banking.js");
+const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
 const { ADMIN_SESSION_TTL_SECONDS, createAdminSession, hmacHex, isValidSlug, slugify } = await import(
@@ -46,7 +48,7 @@ const { PDFDocument } = await import("../src/modules/myhomebuilder-portal/vendor
 const email = { delivered: [], failures: [] };
 // charges, refunds (by charge), disputes and intents (their metadata) serve refund and dispute
 // events; unavailable makes every Stripe request fail.
-const stripe = { created: [], expired: [], versions: new Set(), sessions: new Map(), charges: new Map(), refunds: new Map(), disputes: new Map(), intents: new Map(), unavailable: false };
+const stripe = { created: [], expired: [], versions: new Set(), sessions: new Map(), charges: new Map(), refunds: new Map(), disputes: new Map(), intents: new Map(), unavailable: false, bank: { transactions: [], refreshes: 0, refreshBlocked: false, subscribed: [], disconnected: [], linkError: "" } };
 const realFetch = globalThis.fetch;
 
 globalThis.fetch = async (input, init = {}) => {
@@ -81,6 +83,28 @@ globalThis.fetch = async (input, init = {}) => {
     if (path.startsWith("/refunds?")) return Response.json({ object: "list", data: stripe.refunds.get(new URLSearchParams(path.split("?")[1]).get("charge")) || [] });
     const dispute = path.match(/^\/disputes\/([^/?]+)$/u);
     if (dispute) return stripe.disputes.has(dispute[1]) ? Response.json(stripe.disputes.get(dispute[1])) : Response.json({ error: { message: "No such dispute" } }, { status: 404 });
+    if (path === "/customers" && init.method === "POST") return Response.json({ id: "cus_books_1" });
+    if (path === "/checkout/sessions" && init.method === "POST" && new URLSearchParams(init.body).get("mode") === "setup") {
+      if (stripe.bank.linkError) return Response.json({ error: { message: stripe.bank.linkError } }, { status: 400 });
+      const params = Object.fromEntries(new URLSearchParams(init.body));
+      const id = `cs_test_setup_${stripe.created.length + 1}`;
+      stripe.created.push(params);
+      const session = { id, url: `https://checkout.stripe.com/c/setup/${id}`, mode: "setup", status: "open", setup_intent: "seti_test_1", metadata: { purpose: params["metadata[purpose]"] } };
+      stripe.sessions.set(id, session);
+      return Response.json(session);
+    }
+    if (path.startsWith("/setup_intents/seti_test_1")) return Response.json({ id: "seti_test_1", payment_method: { id: "pm_1", us_bank_account: { financial_connections_account: "fca_test_1" } } });
+    const fca = path.match(/^\/financial_connections\/accounts\/(fca_[^/?]+)(?:\/(subscribe|refresh|disconnect))?$/u);
+    if (fca) {
+      if (fca[2] === "subscribe") stripe.bank.subscribed.push(fca[1]);
+      if (fca[2] === "disconnect") stripe.bank.disconnected.push(fca[1]);
+      if (fca[2] === "refresh") {
+        if (stripe.bank.refreshBlocked) return Response.json({ error: { message: "A refresh is already in progress." } }, { status: 400 });
+        stripe.bank.refreshes += 1;
+      }
+      return Response.json({ id: fca[1], display_name: "Business Checking", institution_name: "Chase", last4: "6789", category: "cash", subcategory: "checking" });
+    }
+    if (path.startsWith("/financial_connections/transactions?")) return Response.json({ object: "list", data: stripe.bank.transactions, has_more: false });
     if (path === "/checkout/sessions" && init.method === "POST") {
       const params = Object.fromEntries(new URLSearchParams(init.body));
       const id = `cs_test_${stripe.created.length + 1}`;
@@ -144,7 +168,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts"];
 let server;
 let base;
 let renumbered = [];
@@ -203,6 +227,7 @@ before(async () => {
   await booksTables(db);
   await stripeEvents(db);
   await laborTables(db);
+  await bankTables(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -220,6 +245,7 @@ beforeEach(async () => {
   stripe.expired.length = 0;
   stripe.sessions.clear();
   for (const map of [stripe.charges, stripe.refunds, stripe.disputes, stripe.intents]) map.clear();
+  stripe.bank = { transactions: [], refreshes: 0, refreshBlocked: false, subscribed: [], disconnected: [], linkError: "" };
   stripe.unavailable = false;
   process.env.MHB_PORTAL_ENABLED = "true";
   delete process.env.ADMIN_WRITES_ENABLED;
@@ -2346,4 +2372,206 @@ test("invoice numbers follow their dates, the same date in the order entered, an
   assert.match(page, /Invoice numbers were updated to keep them in date order\./u);
   assert.equal((await stored(early)).number, "1");
   assert.doesNotMatch(await list(), /Invoice numbers were updated/u, "nothing to fix the second time");
+});
+
+// ---------- Banking ----------
+
+const CHASE_CSV = [
+  "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #",
+  'DEBIT,09/20/2026,"HOME DEPOT #2718 MUSKEGON MI",-412.37,DEBIT_CARD,5000.00,',
+  'DEBIT,09/21/2026,"SHELL OIL 57444 MUSKEGON MI",-61.20,DEBIT_CARD,4938.80,',
+  'CREDIT,09/22/2026,"STRIPE TRANSFER ST-A1B2C3",1250.00,ACH_CREDIT,6188.80,',
+  'DEBIT,09/23/2026,"VERIZON WIRELESS PAYMENTS",-89.99,ACH_DEBIT,6098.81,'
+].join("\r\n");
+
+function statement(text, fields, cookie, name = "statement.csv") {
+  return crewForm(fields, { bytes: new TextEncoder().encode(text), name, type: "text/csv" }, cookie);
+}
+
+async function bankRecords() {
+  return (await db("mhb_bank_transactions").select("id", "data", "target", "amount_cents")).map((row) => ({ ...json(row.data), id: row.id, target: row.target, amountCents: Number(row.amount_cents) }));
+}
+
+async function bankId(description) {
+  return (await bankRecords()).find((txn) => txn.description.startsWith(description)).id;
+}
+
+const fileTo = (id, target, cookie) => request(`/clients/admin/bank/transactions/${id}/file`, form({ target }, cookie));
+
+test("statements read from CSV (signed or debit and credit columns) and OFX, with ids that repeat on a second upload", () => {
+  const chase = parseStatement(CHASE_CSV);
+  assert.equal(chase.rows.length, 4);
+  assert.deepEqual(chase.rows.map((row) => row.amountCents), [-41237, -6120, 125000, -8999]);
+  assert.equal(chase.rows[0].postedOn, "2026-09-20");
+  assert.deepEqual(parseStatement(CHASE_CSV).rows.map((row) => row.externalId), chase.rows.map((row) => row.externalId));
+
+  const split = parseStatement("Transaction Date,Posted Date,Card No.,Description,Category,Debit,Credit\n2026-09-18,2026-09-19,1234,LOWES #01234,Merchandise,98.10,\n2026-09-20,2026-09-21,1234,PAYMENT THANK YOU,Payment,,500.00\n");
+  assert.deepEqual(split.rows.map((row) => [row.postedOn, row.amountCents]), [["2026-09-19", -9810], ["2026-09-21", 50000]]);
+  const card = parseStatement("Date,Description,Amount\n09/15/26,ADOBE *CREATIVE CLD,54.99\n", { outPositive: true });
+  assert.equal(card.rows[0].amountCents, -5499);
+
+  const ofx = parseStatement("OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><BANKACCTFROM><ACCTID>000123456789</BANKACCTFROM><BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260924120000[-4:EDT]<TRNAMT>-45.67<FITID>2026092401<NAME>MENARDS MUSKEGON<MEMO>POS PURCHASE</STMTTRN><STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260925<TRNAMT>800.00<FITID>2026092502<NAME>MOBILE DEPOSIT</STMTTRN></BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>");
+  assert.equal(ofx.last4, "6789");
+  assert.deepEqual(ofx.rows.map((row) => [row.externalId, row.postedOn, row.amountCents, row.description]), [["2026092401", "2026-09-24", -4567, "MENARDS MUSKEGON · POS PURCHASE"], ["2026092502", "2026-09-25", 80000, "MOBILE DEPOSIT"]]);
+  assert.match(parseStatement("hello,world\n1,2\n").error, /date and an amount/u);
+});
+
+test("a statement upload is filed with one click to a job, overhead or a Stripe payout, and the books follow each filing", async () => {
+  const adminCookie = await loginAsAdmin();
+  const uploaded = await request("/clients/admin/bank/upload", statement(CHASE_CSV, { account: "new", name: "Chase checking", kind: "cash", sign: "out-negative" }, adminCookie));
+  assert.equal(uploaded.headers.get("Location"), "/clients/admin/bank?notice=statement-imported&n=4&skipped=0");
+  const [account] = (await db("mhb_bank_accounts").select("data")).map((row) => json(row.data));
+  assert.equal(account.ledger, "1000");
+  const again = await request("/clients/admin/bank/upload", statement(CHASE_CSV, { account: account.id, sign: "out-negative" }, adminCookie));
+  assert.equal(again.headers.get("Location"), "/clients/admin/bank?notice=statement-imported&n=0&skipped=4");
+
+  const page = await (await request("/clients/admin/bank", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /Banking\./u);
+  assert.match(page, /To file \(4\)/u);
+  assert.match(page, /<button class="bank-suggest" type="submit" title="File to Overhead · Vehicles and fuel">/u);
+  assert.match(page, /title="File to Stripe payout"/u);
+  assert.match(page, /title="File to Overhead · Phone and internet"/u);
+  assert.match(page, /<optgroup label="Muskegon Addition"><option value="job:muskegon-addition:5200">Materials<\/option>/u);
+  assert.match(page, /<a href="\/clients\/admin\/bank">Banking<\/a>/u);
+
+  // A job's materials, then refiled to overhead: the books reverse and post again.
+  const depot = await bankId("HOME DEPOT");
+  assert.equal((await fileTo(depot, "job:muskegon-addition:5200", adminCookie)).headers.get("Location"), "/clients/admin/bank?notice=filed");
+  assert.deepEqual(await ledgerBalances(), { 1000: -41237, 5200: 41237 });
+  const line = await db("mhb_journal_lines").where({ account: "5200" }).first();
+  assert.equal(line.client_slug, "muskegon-addition");
+  await fileTo(depot, "overhead:6380", adminCookie);
+  assert.deepEqual(await ledgerBalances(), { 1000: -41237, 6380: 41237 });
+
+  // Money in cannot be an owner draw; the Stripe payout clears the Stripe balance.
+  const payout = await bankId("STRIPE");
+  assert.equal((await fileTo(payout, "owner-draw", adminCookie)).headers.get("Location"), "/clients/admin/bank?notice=target-invalid");
+  await fileTo(payout, "stripe-payout", adminCookie);
+  assert.deepEqual(await ledgerBalances(), { 1000: 83763, 1200: -125000, 6380: 41237 });
+
+  // Several at once.
+  const bulk = await request("/clients/admin/bank/file", form({ ids: [await bankId("SHELL"), await bankId("VERIZON")], target: "overhead:6310" }, adminCookie));
+  assert.equal(bulk.headers.get("Location"), "/clients/admin/bank?notice=filed-many&n=2");
+  assert.equal((await ledgerBalances())["6310"], 6120 + 8999);
+
+  // Unfiling takes it back out of the books.
+  assert.equal((await fileTo(depot, "", adminCookie)).headers.get("Location"), "/clients/admin/bank?notice=unfiled");
+  assert.equal((await ledgerBalances())["6380"], undefined);
+  await fileTo(depot, "job:muskegon-addition:5200", adminCookie);
+
+  // The same merchant is suggested the way it was filed last time.
+  await request("/clients/admin/bank/upload", statement("Posting Date,Description,Amount\n09/28/2026,HOME DEPOT #9910 GRAND HAVEN,-120.00\n", { account: account.id, sign: "out-negative" }, adminCookie));
+  assert.match(await (await request("/clients/admin/bank", { headers: { Cookie: adminCookie } })).text(), /title="File to Muskegon Addition · Materials"/u);
+
+  const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(books, /The books balance\./u);
+  assert.match(books, /<dt>Overhead<\/dt><dd>\$151\.19<\/dd>/u);
+  assert.match(books, /Materials and other/u);
+});
+
+test("crew work is paid from the bank, a payment recorded by hand is matched to its withdrawal, and Mark unpaid puts it back", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { cookie } = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com" });
+  const today = todayInMichigan();
+  await request("/clients/crew/bills", crewForm({ job: "", invoiceNumber: "S-9", invoiceDate: today, amount: "300", through: today, description: "Shop shelving" }, null, cookie));
+  const [entry] = await laborRecords();
+  await request(`/clients/admin/labor/entries/${entry.id}/approve`, form({ job: "muskegon-addition" }, adminCookie));
+  await request("/clients/admin/bank/upload", statement(`Posting Date,Description,Amount\n${today.slice(5, 7)}/${today.slice(8)}/${today.slice(0, 4)},ONLINE TRANSFER TO REYES DRYWALL,-300.00\n`, { account: "new", name: "Checking", sign: "out-negative" }, adminCookie));
+  const txn = await bankId("ONLINE TRANSFER");
+  const page = await (await request("/clients/admin/bank", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, new RegExp(`<input type="hidden" name="target" value="labor:${entry.id}">`, "u"), "the matching crew invoice is suggested");
+
+  await fileTo(txn, `labor:${entry.id}`, adminCookie);
+  let paid = (await laborRecords())[0];
+  assert.equal(paid.status, "paid");
+  assert.equal(paid.payment.source, "bank");
+  assert.deepEqual(await ledgerBalances(), { 1000: -30000, 5100: 30000 });
+  await fileTo(txn, "", adminCookie);
+  assert.equal((await laborRecords())[0].status, "approved");
+  assert.deepEqual(await ledgerBalances(), { 2000: -30000, 5100: 30000 });
+
+  // Paid by hand first, then matched to the withdrawal: the cash leaves once.
+  await request(`/clients/admin/labor/entries/${entry.id}/paid`, form({ method: "check", reference: "#2051", paidOn: today }, adminCookie));
+  assert.deepEqual(await ledgerBalances(), { 1000: -30000, 5100: 30000 });
+  await fileTo(txn, `labor:${entry.id}`, adminCookie);
+  paid = (await laborRecords())[0];
+  assert.equal(paid.payment.source, "bank");
+  assert.equal(paid.payment.reference, "#2051");
+  assert.deepEqual(await ledgerBalances(), { 1000: -30000, 5100: 30000 });
+
+  // Mark unpaid on the Labor page unfiles the withdrawal and leaves the work owed.
+  assert.equal((await request(`/clients/admin/labor/entries/${entry.id}/unpaid`, form({}, adminCookie))).headers.get("Location"), "/clients/admin/labor?notice=labor-unpaid");
+  assert.equal((await laborRecords())[0].status, "approved");
+  assert.equal((await bankRecords())[0].target, null);
+  assert.deepEqual(await ledgerBalances(), { 2000: -30000, 5100: 30000 });
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+});
+
+test("hours paid through payroll post no cash; the payroll run's withdrawal clears wages payable", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { cookie } = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com", rate: "25" });
+  const today = todayInMichigan();
+  await request("/clients/crew/hours", form({ workDate: today, job: "muskegon-addition", hours: "8" }, cookie));
+  const [entry] = await laborRecords();
+  await request(`/clients/admin/labor/entries/${entry.id}/approve`, form({ job: "muskegon-addition", amount: "200" }, adminCookie));
+  await request(`/clients/admin/labor/entries/${entry.id}/paid`, form({ method: "payroll", paidOn: today }, adminCookie));
+  assert.deepEqual(await ledgerBalances(), { 2300: -20000, 5000: 20000 });
+  await request("/clients/admin/bank/upload", statement("Posting Date,Description,Amount\n09/30/2026,GUSTO PAYROLL NET PAY,-200.00\n", { account: "new", name: "Checking", sign: "out-negative" }, adminCookie));
+  await fileTo(await bankId("GUSTO"), "payroll", adminCookie);
+  assert.deepEqual(await ledgerBalances(), { 1000: -20000, 5000: 20000 });
+});
+
+test("a bank account links through Stripe's hosted page, its transactions arrive, and pending ones post once the bank posts them", async () => {
+  const adminCookie = await loginAsAdmin();
+  const now = Math.floor(Date.parse("2026-09-26T16:00:00Z") / 1000);
+  stripe.bank.transactions = [
+    { id: "fctxn_1", amount: -2500, description: "ADOBE *CREATIVE CLD", status: "posted", transacted_at: now, status_transitions: { posted_at: now } },
+    { id: "fctxn_2", amount: 50000, description: "MOBILE DEPOSIT", status: "pending", transacted_at: now, status_transitions: {} }
+  ];
+  const started = await request("/clients/admin/bank/link", form({}, adminCookie));
+  assert.equal(started.status, 303);
+  assert.match(started.headers.get("Location"), /^https:\/\/checkout\.stripe\.com\/c\/setup\//u);
+  const params = stripe.created.at(-1);
+  assert.equal(params.mode, "setup");
+  assert.equal(params.customer, "cus_books_1");
+  assert.equal(params["payment_method_types[0]"], "us_bank_account");
+  assert.equal(params["payment_method_options[us_bank_account][financial_connections][permissions][1]"], "transactions");
+  assert.equal(params["payment_method_options[us_bank_account][verification_method]"], "instant");
+  assert.equal(params.success_url, "https://myhomebuilderllc.com/clients/admin/bank/linked?session_id={CHECKOUT_SESSION_ID}");
+
+  // Coming back before finishing changes nothing.
+  const sessionId = [...stripe.sessions.keys()].at(-1);
+  assert.equal((await request(`/clients/admin/bank/linked?session_id=${sessionId}`, { headers: { Cookie: adminCookie } })).headers.get("Location"), "/clients/admin/bank?notice=bank-link-incomplete");
+  stripe.sessions.get(sessionId).status = "complete";
+  const linked = await request(`/clients/admin/bank/linked?session_id=${sessionId}`, { headers: { Cookie: adminCookie } });
+  assert.equal(linked.headers.get("Location"), "/clients/admin/bank?notice=bank-linked");
+  assert.deepEqual(stripe.bank.subscribed, ["fca_test_1"]);
+  const page = await (await request("/clients/admin/bank", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /Business Checking ••6789/u);
+  assert.match(page, /Chase · Linked through Stripe · books account 1000/u);
+  assert.match(page, /ADOBE \*CREATIVE CLD/u);
+  assert.match(page, /title="File to Overhead · Office supplies and software"/u);
+  assert.match(page, /MOBILE DEPOSIT<small>Business Checking ••6789<\/small>/u);
+
+  // A pending deposit can be filed; it posts once the bank posts it (on Refresh).
+  await fileTo(await bankId("MOBILE DEPOSIT"), "client-deposit", adminCookie);
+  assert.deepEqual(await ledgerBalances(), {});
+  stripe.bank.transactions[1] = { ...stripe.bank.transactions[1], status: "posted", status_transitions: { posted_at: now + 86400 } };
+  const [account] = (await db("mhb_bank_accounts").select("data")).map((row) => json(row.data));
+  assert.equal((await request(`/clients/admin/bank/accounts/${account.id}/refresh`, form({}, adminCookie))).headers.get("Location"), "/clients/admin/bank?notice=refreshed");
+  assert.deepEqual(await ledgerBalances(), { 1000: 50000, 1300: -50000 });
+  stripe.bank.refreshBlocked = true;
+  assert.equal((await request(`/clients/admin/bank/accounts/${account.id}/refresh`, form({}, adminCookie))).headers.get("Location"), "/clients/admin/bank?notice=refresh-waiting");
+
+  // Stripe's own refusal is shown with the settings link.
+  stripe.bank.linkError = "Your account must be registered for Financial Connections to access transactions.";
+  const refused = await request("/clients/admin/bank/link", form({}, adminCookie));
+  assert.equal(refused.status, 502);
+  const refusedPage = await refused.text();
+  assert.match(refusedPage, /Stripe did not open the bank link: Your account must be registered/u);
+  assert.match(refusedPage, /href="https:\/\/dashboard\.stripe\.com\/settings\/financial-connections"/u);
+
+  assert.equal((await request(`/clients/admin/bank/accounts/${account.id}/disconnect`, form({}, adminCookie))).headers.get("Location"), "/clients/admin/bank?notice=disconnected");
+  assert.deepEqual(stripe.bank.disconnected, ["fca_test_1"]);
+  assert.equal((await request("/clients/admin/bank", { headers: { Cookie: await loginAsClient() } })).headers.get("Location"), "/clients");
 });

@@ -29,7 +29,15 @@
 //   cost     approved: Dr Job labor (hours) or Subcontractors (invoices), or Shop and overhead
 //            labor when not on a job, Cr Wages payable or Accounts payable, on the work or
 //            invoice date, tagged with the job
-//   paid     paid by hand: Dr Wages payable or Accounts payable, Cr Business checking
+//   paid     paid by hand: Dr Wages payable or Accounts payable, Cr Business checking. Hours
+//            paid through payroll post nothing here: the payroll run's bank withdrawal, filed as
+//            Payroll run, clears Wages payable. Work paid by a bank transaction filed to it posts
+//            there instead (source bank).
+//
+// A bank transaction filed on the Banking page (bank.js) posts one part:
+//   bank     money out: Dr what it was filed to (a job cost tagged with the job, overhead, a
+//            payable, owner draws...), Cr the bank account's books account; money in: the
+//            reverse. Posted transactions only; refiling reverses and posts again.
 //
 // Entries carry a source, an external id and labels, so bank transactions can join the journal
 // later (the business account) and be labeled and categorized against new accounts.
@@ -56,8 +64,8 @@ const QUERY_TIMEOUT_MS = 5000;
 
 // A part's kind: every "refund:<id>" part is a refund.
 export const partKind = (part) => (String(part).startsWith("refund:") ? "refund" : part);
-const PART_ORDER = ["issue", "payment", "fee", "refund", "dispute", "dispute-close", "cost", "paid"];
-const PART_WORDS = { issue: "invoice", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment" };
+const PART_ORDER = ["issue", "payment", "fee", "refund", "dispute", "dispute-close", "cost", "paid", "bank"];
+const PART_WORDS = { issue: "invoice", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment", bank: "bank transaction" };
 const disputeWon = (dispute) => ["won", "warning_closed"].includes(dispute?.status);
 
 function data(row) {
@@ -126,10 +134,27 @@ export function laborParts(entry) {
   const cost = !entry.clientSlug ? SHOP_LABOR : hours ? JOB_LABOR : SUBCONTRACTORS;
   const owed = hours ? WAGES : PAYABLE;
   parts.cost = { date: entry.workDate, lines: [[cost, amount, 0], [owed, 0, amount]] };
-  if (entry.status === "paid" && entry.payment && entry.payment.source !== "bank") {
+  if (entry.status === "paid" && entry.payment && entry.payment.source !== "bank" && entry.payment.method !== "payroll") {
     parts.paid = { date: calendarDate(entry.payment.paidOn || entry.paidAt), lines: [[owed, amount, 0], [CHECKING, 0, amount]] };
   }
   return parts;
+}
+
+// ---------- What a bank transaction's books should hold ----------
+
+export function bankParts(txn) {
+  const amount = Math.abs(Number(txn?.amountCents || 0));
+  const filed = txn?.filed;
+  if (!txn || txn.status !== "posted" || !filed?.account || !txn.ledger || !amount) return {};
+  const lines = txn.amountCents < 0
+    ? [[filed.account, amount, 0], [txn.ledger, 0, amount]]
+    : [[txn.ledger, amount, 0], [filed.account, 0, amount]];
+  return { bank: { date: txn.postedOn, lines, clientSlug: filed.clientSlug || null } };
+}
+
+function bankMemo(txn, part, { reversal = false } = {}) {
+  const what = `${txn.description || "Bank transaction"}${txn.filed?.name ? ` · ${txn.filed.name}` : ""}`;
+  return reversal ? `${txn.description || "Bank transaction"} · filing changed` : what;
 }
 
 export function laborName(entry) {
@@ -169,7 +194,8 @@ function offParts(held, wanted) {
     .filter((part) => {
       const have = held[part] || [];
       const want = wanted[part] || null;
-      return !(have.length === (want ? 1 : 0) && (!want || signature(have[0]) === signature(want)));
+      const sameJob = !want || want.clientSlug === undefined || (have[0]?.clientSlug ?? null) === want.clientSlug;
+      return !(have.length === (want ? 1 : 0) && (!want || (signature(have[0]) === signature(want) && sameJob)));
     })
     .sort((left, right) => rank(left) - rank(right) || left.localeCompare(right));
 }
@@ -266,7 +292,8 @@ async function syncParts(trx, { itemId, subject, wanted, memo, reason, source, a
       posted += 1;
     }
     if (want[part]) {
-      await post(trx, { kind: partKind(part), part, date: want[part].date, item: subject, memo: memo(part, {}), lines: want[part].lines, source, activityId });
+      const item = want[part].clientSlug === undefined ? subject : { ...subject, clientSlug: want[part].clientSlug };
+      await post(trx, { kind: partKind(part), part, date: want[part].date, item, memo: memo(part, {}), lines: want[part].lines, source, activityId });
       posted += 1;
     }
   }
@@ -290,6 +317,15 @@ export async function syncLaborBooks(trx, entry, { reason = "changed", source = 
     itemId: entry.id, subject: { id: entry.id, number: null, clientSlug: entry.clientSlug || null }, reason, source, activityId,
     wanted: () => laborParts(entry),
     memo: (part, options) => laborMemo(entry, part, options)
+  });
+}
+
+// Brings a bank transaction's journal in line with how it is filed.
+export async function syncBankBooks(trx, txn, { reason = "changed", activityId = null } = {}) {
+  return syncParts(trx, {
+    itemId: txn.id, subject: { id: txn.id, number: null, clientSlug: txn.filed?.clientSlug || null }, reason, source: "bank", activityId,
+    wanted: () => bankParts(txn),
+    memo: (part, options) => bankMemo(txn, part, options)
   });
 }
 
@@ -362,7 +398,8 @@ async function ensureBooksOpened(store) {
 //   event: { action, summary, actor (admin|client|crew|stripe|system), ip, item, clientSlug,
 //            amountCents, data, deleted, reason, unapplied: { externalId, amountCents, date,
 //            item, clientSlug, memo }, unappliedRefund: { the same, for a refund of money
-//            not on an invoice }, moved: true, labor: an hours entry or subcontractor invoice }
+//            not on an invoice }, moved: true, labor: an hours entry or subcontractor invoice,
+//            bank: a bank transaction (bank.js) }
 export async function record(store, event) {
   if (!store) return;
   try {
@@ -380,6 +417,7 @@ export async function record(store, event) {
         await syncInvoiceBooks(trx, { item: event.item, deleted: Boolean(event.deleted), reason: event.reason || "changed", source: event.actor === "stripe" ? "stripe" : "portal", activityId });
       }
       if (event.labor) await syncLaborBooks(trx, event.labor, { reason: event.reason || "changed", activityId });
+      if (event.bank) await syncBankBooks(trx, event.bank, { reason: event.reason || "changed", activityId });
       if (event.unapplied) {
         const { externalId, amountCents, date, item, clientSlug, memo } = event.unapplied;
         await post(trx, {
@@ -425,6 +463,12 @@ export async function checkBooks(store) {
     const off = offParts(await heldParts(store.db, entry.id), laborParts(entry));
     if (off.length) problems.push({ itemId: entry.id, labor: true, clientSlug: entry.clientSlug || null, label: laborName(entry), parts: [...new Set(off.map(partKind))] });
   }
+  // Bank transactions: those filed, and any that still hold entries.
+  for (const txn of await bankTransactionsWithBooks(store.db)) {
+    known.add(txn.id);
+    const off = offParts(await heldParts(store.db, txn.id), bankParts(txn));
+    if (off.length) problems.push({ itemId: txn.id, bank: true, clientSlug: txn.filed?.clientSlug || null, label: `${txn.description} (${txn.postedOn})`, parts: [...new Set(off.map(partKind))] });
+  }
   const orphans = await store.db.raw(
     `SELECT item_id, max(item_number) AS item_number, max(client_slug) AS client_slug
      FROM mhb_journal_entries WHERE item_id IS NOT NULL AND part IS NOT NULL
@@ -439,12 +483,22 @@ export async function checkBooks(store) {
   return { balanced: debits === credits && problems.length === 0, debits, credits, problems };
 }
 
+async function bankTransactionsWithBooks(db) {
+  const rows = await db("mhb_bank_transactions")
+    .whereNotNull("target")
+    .orWhereIn("id", db("mhb_journal_entries").where({ source: "bank" }).whereNotNull("item_id").distinct("item_id"))
+    .select("id", "data", db.raw("to_char(posted_on, 'YYYY-MM-DD') AS posted_on"), "amount_cents", "status")
+    .timeout(QUERY_TIMEOUT_MS);
+  return rows.map((row) => ({ ...data(row), id: row.id, postedOn: row.posted_on, amountCents: Number(row.amount_cents), status: row.status }));
+}
+
 // Posts what the journal is missing (or holds wrongly) so it matches every invoice again.
 export async function correctBooks(store, { ip = null } = {}) {
   const { problems } = await checkBooks(store);
   if (!problems.length) return 0;
   const items = new Map((await store.db("mhb_billing").where({ kind: "invoice" }).select("data").timeout(QUERY_TIMEOUT_MS)).map(data).map((item) => [item.id, item]));
   const labor = new Map((await store.db("mhb_labor").select("data").timeout(QUERY_TIMEOUT_MS)).map(data).map((entry) => [entry.id, entry]));
+  const bank = new Map((await bankTransactionsWithBooks(store.db)).map((txn) => [txn.id, txn]));
   let posted = 0;
   await store.db.transaction(async (trx) => {
     const activityId = await insertActivity(trx, {
@@ -454,6 +508,10 @@ export async function correctBooks(store, { ip = null } = {}) {
     for (const problem of problems) {
       if (problem.labor) {
         posted += await syncLaborBooks(trx, labor.get(problem.itemId), { activityId });
+        continue;
+      }
+      if (problem.bank) {
+        posted += await syncBankBooks(trx, bank.get(problem.itemId), { activityId });
         continue;
       }
       const item = items.get(problem.itemId);
@@ -470,7 +528,7 @@ export async function correctBooks(store, { ip = null } = {}) {
 export async function booksReport(store, { slug = "", from = "", to = "" } = {}) {
   await ensureBooksOpened(store);
   const [accountRows, entryRows, lineRows, itemRows, activityRows] = await Promise.all([
-    store.db("mhb_accounts").orderBy("sort").select("code", "name", "type").timeout(QUERY_TIMEOUT_MS),
+    store.db("mhb_accounts").orderBy([{ column: "sort" }, { column: "code" }]).select("code", "name", "type").timeout(QUERY_TIMEOUT_MS),
     store.db("mhb_journal_entries").select("id", store.db.raw("to_char(entry_date, 'YYYY-MM-DD') AS entry_date"), "recorded_at", "kind", "part", "memo", "client_slug", "item_id", "item_number", "source", "external_id").orderBy([{ column: "entry_date" }, { column: "id" }]).timeout(QUERY_TIMEOUT_MS),
     store.db("mhb_journal_lines").select("entry_id", "account", "debit_cents", "credit_cents", "client_slug").orderBy("id").timeout(QUERY_TIMEOUT_MS),
     store.db("mhb_billing").select("id", "data").timeout(QUERY_TIMEOUT_MS),
@@ -491,7 +549,8 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
   const net = (lines, accounts) => lines.filter((line) => accounts.includes(line.account)).reduce((sum, line) => sum + line.debit - line.credit, 0);
   const balances = new Map(accountRows.map((account) => [account.code, { debit: 0, credit: 0 }]));
   const opening = { receivable: 0 };
-  const period = { invoiced: 0, received: 0, fees: 0, refunds: 0 };
+  const period = { invoiced: 0, received: 0, fees: 0, refunds: 0, overhead: 0 };
+  const overheadAccount = (code) => /^6[34]\d\d$/u.test(code);
   const entries = [];
   for (const row of entryRows) {
     const lines = linesByEntry.get(Number(row.id));
@@ -511,6 +570,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
       fees: net(lines, [STRIPE_FEES]),
       refunds: net(lines, [REFUNDS]) + (row.kind === "unapplied-refund" ? net(lines, [UNAPPLIED]) : 0),
       cash: net(lines, [STRIPE, RECEIVED]),
+      overhead: lines.filter((line) => overheadAccount(line.account)).reduce((sum, line) => sum + line.debit - line.credit, 0),
       receivable: net(lines, [RECEIVABLE])
     };
     if (from && row.entry_date < from) {
@@ -521,6 +581,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
     period.received += change.received;
     period.fees += change.fees;
     period.refunds += change.refunds;
+    period.overhead += change.overhead;
     const item = row.item_id ? items.get(row.item_id) : null;
     entries.push({
       id: Number(row.id),

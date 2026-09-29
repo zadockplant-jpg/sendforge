@@ -84,6 +84,7 @@ export function pageShell(content, { authenticated = false, admin = false, crew 
       nav.push('<a href="/clients/admin/templates">Templates</a>');
       nav.push('<a href="/clients/admin/documents">Documents</a>');
       nav.push('<a href="/clients/admin/labor">Labor</a>');
+      nav.push('<a href="/clients/admin/bank">Banking</a>');
       nav.push('<a href="/clients/admin/books">Books</a>');
       nav.push('<form action="/clients/admin/logout" method="post"><button class="portal-logout-button" type="submit">Exit admin</button></form>');
     } else {
@@ -1342,6 +1343,7 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
     ["Outstanding", summary.outstanding, report.to ? `owed on ${dateText(report.to)}` : "owed now", true],
     ["Unapplied payments", summary.unapplied, "received, not tied to an invoice"],
     ...(summary.owedToCrew ? [["Owed to crew", summary.owedToCrew, "approved labor not paid yet"]] : []),
+    ...(summary.overhead ? [["Overhead", summary.overhead, `in ${range}`]] : []),
     ...(summary.disputed ? [["Held in disputes", summary.disputed, "until Stripe decides"]] : [])
   ];
 
@@ -1351,12 +1353,12 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
           <td class="books-money" data-label="Invoiced">${money(job.invoiced)}</td>
           <td class="books-money" data-label="Labor">${moneyCell(job.labor)}</td>
           <td class="books-money" data-label="Subcontractors">${moneyCell(job.subcontractors)}</td>
-          <td class="books-money" data-label="Other costs">${moneyCell(job.otherCosts)}</td>
+          <td class="books-money" data-label="Materials and other">${moneyCell(job.otherCosts)}</td>
           <td class="books-money${job.profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(job.profit)}</td>
         </tr>`).join("");
   const jobs = report.jobs.length
     ? `<table class="portal-table books-table books-jobs">
-          <thead><tr><th scope="col">Job</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Labor</th><th scope="col" class="books-money">Subcontractors</th><th scope="col" class="books-money">Other costs</th><th scope="col" class="books-money">Profit</th></tr></thead>
+          <thead><tr><th scope="col">Job</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Labor</th><th scope="col" class="books-money">Subcontractors</th><th scope="col" class="books-money">Materials and other</th><th scope="col" class="books-money">Profit</th></tr></thead>
           <tbody>${jobRows}</tbody>
         </table>`
     : '<p class="portal-empty">No invoices or job costs in this period.</p>';
@@ -1439,7 +1441,7 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
           <h2 id="books-jobs-heading">Jobs</h2>
           <a class="portal-secondary-link" href="/clients/admin/labor">Labor</a>
         </div>
-        <p class="admin-meta">What each job invoiced and cost ${escapeHtml(range)}. Costs are hours and subcontractor invoices approved to the job in Labor.</p>
+        <p class="admin-meta">What each job invoiced and cost ${escapeHtml(range)}: hours and subcontractor invoices approved to it in Labor, and bank transactions filed to it in Banking.</p>
         ${jobs}
       </section>
 

@@ -316,6 +316,52 @@ crew sessions), `forms.js` (paperwork), `waivers.js` (lien waivers) and `secure.
   member's page, can be signed like client documents, and live under the portal id
   `crew:<worker id>`, apart from the client portals.
 
+## Banking
+
+The admin panel's **Banking** page (`/clients/admin/bank`, `bank.js` and `bank-pages.js`).
+Migration `20261005_myhomebuilder_portal_banking.js` creates `mhb_bank_accounts` and
+`mhb_bank_transactions`, and adds the job cost, overhead, equity, other income and transfer
+accounts.
+
+- **Linking through Stripe.** **Link with Stripe** opens Stripe's hosted Checkout page in setup
+  mode, asking for transactions access (Financial Connections, instant verification only), so
+  the portal needs no Stripe.js or publishable key. The customer standing for My Home Builder is
+  kept in `mhb_settings` (`bank`). On return the account is subscribed to transactions; Stripe
+  refreshes them about once a day, up to 180 days back. The page fetches them when it opens (at
+  most every 6 hours), and **Refresh** asks Stripe for a new refresh. A negative amount is money
+  out. Live mode needs Stripe's Financial Connections approval
+  (https://dashboard.stripe.com/settings/financial-connections); until then Stripe's error is
+  shown with that link. The setup Checkout session carries no invoice, so the payment webhook
+  ignores it.
+- **Statements.** A CSV (a date column and an amount, or debit and credit, column), OFX or QFX
+  file. Rows keep the same id when uploaded again (the bank's FITID, or a hash of the row and its
+  repeat count), so overlapping statements add only what is new. Some credit card CSVs show
+  money out as positive; the upload form asks.
+- **Books accounts.** The first bank account posts to 1000 Business checking; later ones get
+  1010, 1020... (credit cards 2010, 2020...), added to the chart with the account's name.
+- **Filing.** Each transaction is filed to one of:
+  - a job: Materials, Equipment rental, Permits and fees or Other job costs (5200 to 5900),
+    tagged with the job, for the Books page's Jobs table
+  - overhead: 6300 to 6490 (advertising, vehicles and fuel, insurance, office and software,
+    phone and internet, rent and utilities, legal and accounting, licenses and dues, tools,
+    bank fees, meals, travel, payroll taxes, training, repairs, other)
+  - Stripe payout (1200), client payment deposited (1300, a check or cash payment recorded on
+    an invoice), other income (4300), owner contribution (3000) or draw (3100), payroll run
+    (2300), transfer between accounts (1900), or already in the books (posts nothing)
+  - crew work of the same amount (Pay crew): approved work is marked paid from the bank; work
+    already marked paid by hand is matched to the withdrawal instead. Unfiling, or Mark unpaid
+    on the Labor page, puts it back.
+
+  Money out debits what it is filed to and credits the bank's books account; money in the
+  reverse. Pending transactions can be filed and post once the bank posts them; a voided one
+  comes back out. Hours marked paid through payroll post no cash entry: the payroll run's
+  withdrawal, filed as Payroll run, clears Wages payable.
+- **Suggestions** (one click): crew work of the same amount, how the same merchant was filed
+  last time, or common merchants (fuel, phone, insurance, software, advertising, bank fees,
+  payroll taxes, meals, travel, Stripe payouts, check deposits). **File checked** files several
+  at once (crew work is paid one at a time).
+- The balance check and **Post corrections** cover filed transactions like invoices and labor.
+
 ## PDF signing library
 
 `vendor/pdf-lib.js` is pdf-lib 1.17.1 bundled into one ES module, so the module adds no npm

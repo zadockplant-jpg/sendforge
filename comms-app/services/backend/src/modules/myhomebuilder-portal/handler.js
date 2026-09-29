@@ -111,6 +111,7 @@ import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record }
 import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
 import { CREW_SECTIONS } from "./labor.js";
 import { handleAdminLabor, handleCrew } from "./crew.js";
+import { handleAdminBank } from "./bank.js";
 import {
   adminBillingPage,
   adminBooksPage,
@@ -1664,6 +1665,7 @@ export async function handlePortalRequest(context) {
 
       if (pathname === "/clients/admin/books" || pathname.startsWith("/clients/admin/books/")) return handleBooks(context, store, pathname, url);
       if (pathname === "/clients/admin/labor" || pathname.startsWith("/clients/admin/labor/")) return handleAdminLabor({ ...context, kit: KIT }, store, pathname, url);
+      if (pathname === "/clients/admin/bank" || pathname.startsWith("/clients/admin/bank/")) return handleAdminBank({ ...context, kit: KIT }, store, pathname, url);
 
       // Share a document into any client portal's section, and see what awaits a signature.
       if (pathname === "/clients/admin/documents") {

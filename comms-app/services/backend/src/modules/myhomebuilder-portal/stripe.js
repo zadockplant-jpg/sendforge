@@ -99,6 +99,80 @@ export async function expireCheckoutSession(env, sessionId) {
   }
 }
 
+// ---------- The business bank account (Financial Connections) ----------
+// The admin links the account on Stripe's hosted Checkout page in setup mode, which asks for
+// transactions access, so the portal needs no Stripe.js. The account is then subscribed to
+// transactions, which Stripe refreshes about once a day (up to 180 days of history).
+
+// The Stripe customer that stands for My Home Builder itself, as the account holder.
+export async function createBooksCustomer(env) {
+  return stripeRequest(env, "POST", "/customers", {
+    name: "My Home Builder LLC (books)",
+    description: "The business's own bank account, linked for bookkeeping in the client portal",
+    "metadata[purpose]": "mhb-books"
+  });
+}
+
+// successUrl must contain {CHECKOUT_SESSION_ID}.
+export async function createBankLinkSession(env, { customerId, successUrl, cancelUrl }) {
+  return stripeRequest(env, "POST", "/checkout/sessions", {
+    mode: "setup",
+    customer: customerId,
+    "payment_method_types[0]": "us_bank_account",
+    "payment_method_options[us_bank_account][verification_method]": "instant",
+    "payment_method_options[us_bank_account][financial_connections][permissions][0]": "payment_method",
+    "payment_method_options[us_bank_account][financial_connections][permissions][1]": "transactions",
+    "payment_method_options[us_bank_account][financial_connections][prefetch][0]": "transactions",
+    "metadata[purpose]": "mhb-books-bank-link",
+    success_url: successUrl,
+    cancel_url: cancelUrl
+  });
+}
+
+// The Financial Connections account a completed bank link session set up, or null.
+export async function linkedBankAccount(env, sessionId) {
+  const session = await stripeRequest(env, "GET", `/checkout/sessions/${encodeURIComponent(sessionId)}`);
+  if (session.mode !== "setup" || session.metadata?.purpose !== "mhb-books-bank-link" || session.status !== "complete") return null;
+  const setupIntentId = typeof session.setup_intent === "string" ? session.setup_intent : session.setup_intent?.id;
+  if (!setupIntentId) return null;
+  const intent = await stripeRequest(env, "GET", `/setup_intents/${encodeURIComponent(setupIntentId)}?expand[]=payment_method`);
+  const accountId = intent.payment_method?.us_bank_account?.financial_connections_account;
+  if (typeof accountId !== "string" || !accountId.startsWith("fca_")) return null;
+  return stripeRequest(env, "GET", `/financial_connections/accounts/${encodeURIComponent(accountId)}`);
+}
+
+export async function subscribeBankTransactions(env, accountId) {
+  return stripeRequest(env, "POST", `/financial_connections/accounts/${encodeURIComponent(accountId)}/subscribe`, { "features[0]": "transactions" });
+}
+
+// Asks Stripe for fresh transactions. Stripe allows it only once the last refresh has finished.
+export async function refreshBankTransactions(env, accountId) {
+  return stripeRequest(env, "POST", `/financial_connections/accounts/${encodeURIComponent(accountId)}/refresh`, { "features[0]": "transactions" });
+}
+
+export async function disconnectBankAccount(env, accountId) {
+  return stripeRequest(env, "POST", `/financial_connections/accounts/${encodeURIComponent(accountId)}/disconnect`);
+}
+
+export async function retrieveBankAccount(env, accountId) {
+  return stripeRequest(env, "GET", `/financial_connections/accounts/${encodeURIComponent(accountId)}`);
+}
+
+// Every transaction Stripe holds for the account, newest first, a page of 100 at a time.
+export async function listBankTransactions(env, accountId, { maxPages = 30 } = {}) {
+  const found = [];
+  let after = "";
+  for (let page = 0; page < maxPages; page += 1) {
+    const query = new URLSearchParams({ account: accountId, limit: "100", ...(after ? { starting_after: after } : {}) });
+    const result = await stripeRequest(env, "GET", `/financial_connections/transactions?${query}`);
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    found.push(...rows);
+    if (!result?.has_more || !rows.length) break;
+    after = rows.at(-1).id;
+  }
+  return found;
+}
+
 function paymentLabel(details) {
   if (!details) return "";
   if (details.type === "card" && details.card) {
