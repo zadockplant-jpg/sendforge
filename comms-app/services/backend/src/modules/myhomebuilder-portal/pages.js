@@ -269,11 +269,17 @@ function billingRows(items, { basePath, viewer }) {
     const status = admin && item.kind === "invoice" && ["open", "paid"].includes(item.status)
       ? `<a class="status-change" href="${href}" data-status-menu data-label="${escapeAttribute(name)}" data-state="${item.status === "paid" ? "paid" : "due"}" data-source="${escapeAttribute(item.payment?.source || "")}" data-method="${escapeAttribute(item.payment?.label || "")}" data-detail="${escapeAttribute(detail)}" aria-label="${label}: change the status of ${escapeAttribute(billingLabel(item))}" title="Change status">${badge}</a>`
       : badge;
+    // How a payment recorded by hand was paid opens a popup to change it (method, reference or
+    // date). A Stripe payment keeps what Stripe recorded.
+    const payment = item.payment || {};
+    const detailText = admin && item.status === "paid" && payment.source === "manual"
+      ? `<a class="payment-change" href="${href}" data-payment-menu data-label="${escapeAttribute(name)}" data-method="${escapeAttribute(payment.method || "")}" data-method-name="${escapeAttribute(payment.methodName || "")}" data-reference="${escapeAttribute(payment.reference || "")}" data-paid-on="${escapeAttribute(String(item.paidAt || "").slice(0, 10))}" title="Change how it was paid">${escapeHtml(detail)}</a>`
+      : escapeHtml(detail);
     return `<tr>
           <td><span class="portal-number">${escapeHtml(item.number)}</span></td>
           <td>${escapeHtml(item.title)}${dueLine}${note}</td>
           <td>${money(item.amountCents, item.currency)}</td>
-          <td>${status}${detail ? `<small class="status-detail">${escapeHtml(detail)}</small>` : ""}</td>
+          <td>${status}${detail ? `<small class="status-detail">${detailText}</small>` : ""}</td>
           <td>${action}</td>
         </tr>`;
   });
@@ -707,6 +713,18 @@ function statusDialogs(client, readiness) {
             <button class="button button-solid" type="submit">Mark as due</button>
           </form>
           <p class="portal-security-note" data-status-stripe hidden>Paid online through Stripe. Stripe payments keep the details Stripe recorded, so this one stays paid.</p>
+        </dialog>
+        <dialog class="admin-dialog" id="payment-dialog" aria-labelledby="payment-dialog-title">
+          <div class="admin-dialog-head">
+            <h2 id="payment-dialog-title" data-payment-title>How it was paid</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          <form class="admin-stack-form" method="post" data-payment-form>
+            <input type="hidden" name="return" value="list">
+            ${paymentFields("list-edit-payment", { date: todayInMichigan() })}
+            <button class="button button-solid" type="submit">Save payment</button>
+            <p class="portal-security-note">The receipt is not sent again. Resend receipt on the invoice's page sends the corrected one.</p>
+          </form>
         </dialog>
         <dialog class="admin-dialog" id="delete-dialog" aria-labelledby="delete-dialog-title">
           <div class="admin-dialog-head">

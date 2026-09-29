@@ -1061,7 +1061,7 @@ test("the admin list says how each invoice was paid or when it is due, and chang
   const base = "/clients/admin/clients/muskegon-addition/billing";
   assert.match(page, /<small class="status-detail">Due Oct 1, 2099<\/small>/u);
   assert.match(page, /<small class="status-detail">No due date<\/small>/u);
-  assert.match(page, /<small class="status-detail">Zelle · Sep 28, 2026<\/small>/u);
+  assert.match(page, /<small class="status-detail"><a class="payment-change" href="[^"]+" data-payment-menu data-label="Invoice 3 · Deposit" data-method="zelle" data-method-name="" data-reference="" data-paid-on="2026-09-28" title="Change how it was paid">Zelle · Sep 28, 2026<\/a><\/small>/u);
   assert.ok(page.includes(`<a class="status-change" href="${base}/${paid.id}" data-status-menu data-label="Invoice 3 · Deposit" data-state="paid" data-source="manual" data-method="Zelle"`), "the status opens its popup, or the invoice without scripts");
   assert.ok(page.includes(`<a class="billing-trash" href="${base}/${due.id}/delete" data-delete-menu data-label="Invoice 1 · Framing" data-kind="invoice"`));
   assert.match(page, /aria-label="Delete Invoice 1" title="Delete"><svg/u);
@@ -1074,7 +1074,17 @@ test("the admin list says how each invoice was paid or when it is due, and chang
   const marked = await request(`${base}/${open.id}/record-payment`, form({ method: "check", reference: "#88", paidOn: "2026-09-29", return: "list" }, adminCookie));
   assert.equal(marked.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-recorded");
   assert.equal((await stored(open)).payment.label, "Check #88");
-  assert.match(await list(), /<small class="status-detail">Check #88 · Sep 29, 2026<\/small>/u);
+  assert.match(await list(), /data-reference="#88" data-paid-on="2026-09-29" title="Change how it was paid">Check #88 · Sep 29, 2026<\/a><\/small>/u);
+
+  // How it was paid, changed from the list's popup.
+  assert.match(page, /<dialog class="admin-dialog" id="payment-dialog"/u);
+  const changed = await request(`${base}/${open.id}/payment`, form({ method: "cashapp", reference: "", paidOn: "2026-09-30", return: "list" }, adminCookie));
+  assert.equal(changed.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-updated");
+  assert.equal((await stored(open)).payment.label, "Cash App");
+  assert.equal((await stored(open)).paidAt, "2026-09-30");
+  assert.match(await list(), />Cash App · Sep 30, 2026<\/a><\/small>/u);
+  const unnamed = await request(`${base}/${open.id}/payment`, form({ method: "other", methodName: "", paidOn: "2026-09-30", return: "list" }, adminCookie));
+  assert.equal(unnamed.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-other-required");
   const missing = await request(`${base}/${due.id}/record-payment`, form({ method: "other", methodName: "", paidOn: "2026-09-29", return: "list" }, adminCookie));
   assert.equal(missing.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-other-required");
 
@@ -2316,4 +2326,24 @@ test("the admin cannot add the same email twice, and employer details must be co
   const saved = json((await db("mhb_settings").where({ key: "employer" }).first()).data);
   assert.equal(saved.ein, "12-3456789");
   assert.equal(saved.state, "MI");
+});
+
+test("invoice numbers follow their dates, the same date in the order entered, and the admin panel puts any out of order back", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item: late } = await postInvoice(adminCookie, { title: "Late", amount: "300", issuedOn: "2026-09-20" });
+  const { item: early } = await postInvoice(adminCookie, { title: "Early", amount: "100", issuedOn: "2026-09-01" });
+  const { item: sameFirst } = await postInvoice(adminCookie, { title: "Same day, entered first", amount: "200", issuedOn: "2026-09-10" });
+  const { item: sameSecond } = await postInvoice(adminCookie, { title: "Same day, entered second", amount: "250", issuedOn: "2026-09-10" });
+  const numbers = async () => Object.fromEntries(await Promise.all([late, early, sameFirst, sameSecond].map(async (item) => [(await stored(item)).title, (await stored(item)).number])));
+  assert.deepEqual(await numbers(), { Early: "1", "Same day, entered first": "2", "Same day, entered second": "3", Late: "4" });
+  const list = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  const order = (page) => [...page.matchAll(/<td><span class="portal-number">(\d+)<\/span><\/td>/gu)].map((match) => match[1]);
+  assert.deepEqual(order(await list()), ["4", "3", "2", "1"], "newest first; on the same date, the later entry first");
+
+  // Numbers changed outside the portal are put back when the admin panel opens.
+  await db("mhb_billing").where({ id: early.id }).update({ number: "9", data: db.raw("jsonb_set(data, '{number}', '\"9\"')") });
+  const page = await list();
+  assert.match(page, /Invoice numbers were updated to keep them in date order\./u);
+  assert.equal((await stored(early)).number, "1");
+  assert.doesNotMatch(await list(), /Invoice numbers were updated/u, "nothing to fix the second time");
 });

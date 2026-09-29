@@ -1312,18 +1312,21 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   // Corrects a payment recorded by hand (method, reference or date; the amount is the invoice
   // total). Stripe payments keep what Stripe recorded. The receipt is not re-sent; "Resend
   // receipt" sends the corrected one.
+  // Saved from the invoice page, or from the admin list's How it was paid popup (return=list).
   if (action === "payment") {
-    if (item.kind !== "invoice" || item.status !== "paid") return redirectResponse(itemPath);
-    if (item.payment?.source !== "manual") return redirectResponse(`${itemPath}?notice=payment-from-stripe`);
-    const entered = parseManualPayment(await readBoundedForm(context.request, MAX_FORM_BYTES));
-    if (entered.error) return redirectResponse(`${itemPath}?notice=${entered.error}`);
+    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+    const back = (notice) => redirectResponse(form?.get("return") === "list" ? `/clients/admin?client=${encodeURIComponent(slug)}&notice=${notice}` : `${itemPath}?notice=${notice}`);
+    if (item.kind !== "invoice" || item.status !== "paid") return back("not-payable");
+    if (item.payment?.source !== "manual") return back("payment-from-stripe");
+    const entered = parseManualPayment(form);
+    if (entered.error) return back(entered.error);
     const { paidOn, ...details } = entered;
     const corrected = { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, amountCents: item.amountCents, updatedAt: new Date().toISOString() } };
     await putBilling(store, corrected);
     const was = `${item.payment?.label || "payment"}, ${formatDate(item.paidAt)}`;
     const now = `${corrected.payment.label}, ${formatDate(corrected.paidAt)}`;
     await note({ action: "payment.corrected", item: corrected, amountCents: corrected.payment.amountCents, summary: `Changed the payment for ${billingLabel(item)}${was === now ? "" : `: ${was} → ${now}`}` });
-    return redirectResponse(`${itemPath}?notice=payment-updated`);
+    return back("payment-updated");
   }
 
   // Undoes a payment recorded by mistake. The invoice is open (payable) again, and its receipt
@@ -1635,6 +1638,13 @@ export async function handlePortalRequest(context) {
       if (!admin) return redirectResponse("/clients");
 
       const dashboard = async ({ requested, notice = noticeFromQuery(url), newClient = null, clientError = "", typedEmails = null, status = 200 }) => {
+        // Invoice numbers follow the invoice dates (the same date: the order they were entered).
+        // Anything saved before that rule, or changed outside the portal, is put in order here.
+        const moved = store ? await renumberInvoices(store) : [];
+        if (moved.length) {
+          await noteRenumbered(store, moved.length);
+          notice = { text: [notice?.text, NOTICES.renumbered.text].filter(Boolean).join(" "), tone: notice?.tone };
+        }
         const clients = await listClients(store);
         const selected = clients.find((entry) => entry.slug === requested) || null;
         const [billing, documents, templates, recipients] = await Promise.all([
