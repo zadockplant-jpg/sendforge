@@ -61,6 +61,21 @@ export const DOWNLOADS = Object.freeze({
       "https://github.com/zadockplant-jpg/sendforge-downloads/releases/download/tuneforge/Install.TuneForge.exe",
     entitlement: "tuneforge",
   }),
+  // DropForge for Android, for DropForge's buyers only: "no downloading app
+  // without completing a stripe purchase" (the owner, 2026-09-29). It lives on
+  // the private DropForgeMobile repository's fixed "android" release, which no
+  // public link reaches: this route fetches it with GITHUB_DOWNLOADS_TOKEN,
+  // which must be able to read that repository too. Without the token it
+  // answers download_unavailable rather than hand out anything.
+  "forgedrop-android": Object.freeze({
+    filename: "DropForge.apk",
+    contentType: "application/vnd.android.package-archive",
+    source:
+      process.env.DOWNLOAD_SOURCE_FORGEDROP_ANDROID ||
+      "https://github.com/zadockplant-jpg/DropForgeMobile/releases/download/android/DropForge.apk",
+    entitlement: "forgedrop",
+    page: "/products/dropforge/index.html#download",
+  }),
   // DropForge's release notice (forgedrop/core/update.py in the ForgeDrop
   // repo): the app asks here first and GitHub second. The notice is signed
   // with a key this server never holds, so relaying it gives the server no
@@ -286,7 +301,7 @@ export function createDownloadsRouter({
     if (entry.entitlement && !holder) {
       // Bought on the site first: a browser lands where Download opens the purchase.
       if (req.accepts(["json", "html"]) === "html") {
-        return res.redirect(302, `${siteUrl}/products/${slug}/index.html#download`);
+        return res.redirect(302, `${siteUrl}${entry.page || `/products/${slug}/index.html#download`}`);
       }
       return res.status(403).json({ error: "purchase_required" });
     }
@@ -329,7 +344,8 @@ export function createDownloadsRouter({
     }
 
     res.status(upstream.status);
-    res.setHeader("Content-Type", "application/octet-stream");
+    // An app is named as one, so the phone offers to install it.
+    res.setHeader("Content-Type", entry.contentType || "application/octet-stream");
     res.setHeader("Content-Disposition", contentDisposition(filename));
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");

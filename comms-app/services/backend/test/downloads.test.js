@@ -31,6 +31,7 @@ before(async () => {
   const stand = `http://127.0.0.1:${upstream.address().port}`;
   process.env.DOWNLOAD_SOURCE_ROSE_COLORED_GLASSES = `${stand}/asset`;
   process.env.DOWNLOAD_SOURCE_FORGEDROP = `${stand}/forgedrop`;
+  process.env.DOWNLOAD_SOURCE_FORGEDROP_ANDROID = `${stand}/android`;
   process.env.DOWNLOAD_SOURCE_FORGEDROP_UPDATE = `${stand}/notice`;
   process.env.DOWNLOAD_SOURCE_KEYFROGGER = `${stand}/keyfrogger`;
   process.env.JWT_SECRET ||= "downloads-test-secret-at-least-32-bytes-long";
@@ -77,6 +78,37 @@ test("the installer downloads under its real name, spaces and all", async () => 
   assert.equal(res.headers.get("content-type"), "application/octet-stream");
   assert.equal(Number(res.headers.get("content-length")), FILE.length);
   assert.deepEqual(Buffer.from(await res.arrayBuffer()), FILE);
+});
+
+test("DropForge for Android is for buyers only, and downloads as an app", async () => {
+  // "no downloading app without completing a stripe purchase" (the owner, 2026-09-29).
+  const browser = await fetch(`${base}/v1/downloads/forgedrop-android`, {
+    redirect: "manual", headers: { Accept: "text/html" } });
+  assert.equal(browser.status, 302);
+  assert.equal(browser.headers.get("location"), "https://sendforge.app/products/dropforge/index.html#download");
+  const api = await fetch(`${base}/v1/downloads/forgedrop-android`, { headers: { Accept: "application/json" } });
+  assert.equal(api.status, 403);
+  assert.deepEqual(await api.json(), { error: "purchase_required" });
+
+  const stranger = await fetch(`${base}/v1/downloads/forgedrop-android/ticket`, {
+    method: "POST", headers: { Authorization: "Bearer someone-else" } });
+  assert.equal(stranger.status, 403, "no purchase, no ticket");
+  const desktop = await fetch(`${base}/v1/downloads/forgedrop-android?ticket=${ticketFor("forgedrop")}`, {
+    headers: { Accept: "application/json" } });
+  assert.equal(desktop.status, 403, "the installer's ticket doesn't open the app");
+
+  const pass = await fetch(`${base}/v1/downloads/forgedrop-android/ticket`, {
+    method: "POST", headers: { Authorization: `Bearer ${OWNER}` } });
+  assert.equal(pass.status, 200);
+  const { ticket } = await pass.json();
+  const res = await fetch(`${base}/v1/downloads/forgedrop-android?ticket=${ticket}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/vnd.android.package-archive");
+  assert.equal(res.headers.get("content-disposition"),
+    `attachment; filename="DropForge.apk"; filename*=UTF-8''DropForge.apk`);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(Buffer.from(await res.arrayBuffer()), FILE);
+  assert.equal(routes.DOWNLOADS["forgedrop-android"].entitlement, "forgedrop");
 });
 
 test("an interrupted download can resume", async () => {
