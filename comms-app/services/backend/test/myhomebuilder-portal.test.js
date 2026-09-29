@@ -1,5 +1,6 @@
 // My Home Builder client portal: logins, the Muskegon project files, quotes, invoices,
-// templates, Stripe pay links and receipts, documents and e-signing, and the admin panel.
+// templates, Stripe pay links and receipts, documents and e-signing, the admin panel, and labor
+// (the crew portal, paperwork, lien waivers and job costs).
 //
 // The handler tests call the portal code with Web Requests, as the router does. The HTTP
 // tests run the real Express router. Both use the real migration on an in-process Postgres
@@ -27,6 +28,7 @@ const { up: recipientsTable } = await import("../src/db/migrations/20260925_myho
 const { up: projectEmails } = await import("../src/db/migrations/20260927_myhomebuilder_portal_project_emails.js");
 const { up: booksTables } = await import("../src/db/migrations/20260930_myhomebuilder_portal_books.js");
 const { up: stripeEvents } = await import("../src/db/migrations/20261003_myhomebuilder_portal_stripe_events.js");
+const { up: laborTables } = await import("../src/db/migrations/20261004_myhomebuilder_portal_labor.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
 const { ADMIN_SESSION_TTL_SECONDS, createAdminSession, hmacHex, isValidSlug, slugify } = await import(
@@ -142,7 +144,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings"];
 let server;
 let base;
 let renumbered = [];
@@ -200,6 +202,7 @@ before(async () => {
   await projectEmails(db);
   await booksTables(db);
   await stripeEvents(db);
+  await laborTables(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -1996,4 +1999,298 @@ test("sign-in attempts are limited per visitor, and the admin write switch pause
   const paused = await proxied("/clients/admin/clients", form({ name: "Paused", slug: "paused-client", password: "paused-login-2026" }));
   assert.equal(paused.status, 423);
   assert.match(await paused.text(), /Admin changes are paused/u);
+});
+
+// ---------- Labor: the crew portal and the admin Labor pages ----------
+
+function crewForm(fields, file = null, cookies = "") {
+  const body = new FormData();
+  for (const [name, value] of Object.entries(fields)) body.append(name, value);
+  if (file) body.append("file", new File([file.bytes], file.name, { type: file.type }));
+  return { method: "POST", headers: cookies ? { Cookie: cookies } : {}, body };
+}
+
+async function workerRecord(email) {
+  const row = await db("mhb_workers").where({ email }).first();
+  return row ? json(row.data) : null;
+}
+
+async function laborRecords() {
+  return (await db("mhb_labor").select("data")).map((row) => json(row.data));
+}
+
+// Adds an employee or subcontractor, follows the emailed invite and chooses a password.
+// Returns the worker and their crew session cookie.
+async function addCrew(adminCookie, fields) {
+  const added = await request("/clients/admin/labor/workers", form(fields, adminCookie));
+  assert.equal(added.status, 303, await added.clone().text());
+  assert.match(added.headers.get("Location"), /notice=worker-added$/u);
+  const invite = deliveredTo(fields.email.toLowerCase()).at(-1);
+  assert.equal(invite.subject, "Set up your My Home Builder crew portal");
+  const link = invite.text.match(/https:\/\/myhomebuilderllc\.com(\/clients\/crew\/welcome\/[A-Za-z0-9_-]+)/u)[1];
+  const page = await request(link);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Choose a password/u);
+  const set = await request(link, form({ password: "crew-password-2026", confirm: "crew-password-2026" }));
+  assert.equal(set.status, 303);
+  assert.equal(set.headers.get("Location"), "/clients/crew?notice=password-set");
+  assert.equal((await request(link)).status, 410, "an invite link works once");
+  return { worker: await workerRecord(fields.email.toLowerCase()), cookie: cookieValue(set) };
+}
+
+async function withSite(adminCookie, slug = "muskegon-addition", siteAddress = "5899 1/2 White Rd, Muskegon, MI 49442") {
+  const saved = await request(`/clients/admin/clients/${slug}/site`, form({ siteAddress }, adminCookie));
+  assert.equal(saved.status, 303);
+}
+
+test("a subcontractor is invited, chooses a password, and signs in to the crew portal", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { worker, cookie } = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "Dana@Example.com", company: "Reyes Drywall LLC", trade: "Drywall" });
+  assert.equal(worker.email, "dana@example.com");
+  assert.equal(worker.kind, "subcontractor");
+  assert.match(worker.passwordHash, /^pbkdf2\$/u);
+  assert.equal(worker.invite, null);
+
+  const home = await (await request("/clients/crew", { headers: { Cookie: cookie } })).text();
+  assert.match(home, /Hi, Dana\./u);
+  assert.match(home, /Form W-9/u);
+  assert.match(home, /Certificate of insurance/u);
+  assert.match(home, /Send an invoice/u);
+  assert.doesNotMatch(home, /Send your hours/u);
+
+  const wrong = await request("/clients/crew/login", form({ email: "dana@example.com", password: "not-the-password" }));
+  assert.equal(wrong.status, 401);
+  assert.match(await wrong.text(), /did not match/u);
+  const right = await request("/clients/crew/login", form({ email: "DANA@example.com", password: "crew-password-2026" }));
+  assert.equal(right.status, 303);
+  assert.match(right.headers.get("Set-Cookie"), /__Secure-mhb_crew_session=.+; Max-Age=43200; Path=\/clients; HttpOnly; Secure; SameSite=Lax/u);
+
+  // A crew session opens nothing else, and a client session is not a crew session.
+  assert.equal((await request("/clients/admin/labor", { headers: { Cookie: cookie } })).headers.get("Location"), "/clients");
+  assert.match(await (await request("/clients/crew", { headers: { Cookie: await loginAsClient() } })).text(), /Crew and subcontractors\./u);
+  const activity = await db("mhb_activity").where({ actor: "crew" }).select("action");
+  assert.ok(activity.some((row) => row.action === "crew.signed-in"));
+});
+
+test("forgot password answers the same for anyone, and emails a 2-hour link only to the crew", async () => {
+  const adminCookie = await loginAsAdmin();
+  await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com" });
+  const before = email.delivered.length;
+  const unknown = await (await request("/clients/crew/forgot", form({ email: "nobody@example.com" }))).text();
+  const known = await (await request("/clients/crew/forgot", form({ email: "sam@example.com" }))).text();
+  assert.equal(unknown, known);
+  assert.equal(email.delivered.length, before + 1);
+  const reset = email.delivered.at(-1);
+  assert.equal(reset.subject, "Reset your My Home Builder crew portal password");
+  assert.match(reset.text, /works for 2 hours/u);
+  const link = reset.text.match(/(\/clients\/crew\/welcome\/[A-Za-z0-9_-]+)/u)[1];
+  const set = await request(link, form({ password: "short", confirm: "short" }));
+  assert.equal(set.status, 400);
+  assert.match(await set.text(), /at least 10 characters/u);
+  assert.equal((await request(link, form({ password: "a-new-password-1", confirm: "a-new-password-1" }))).status, 303);
+  assert.equal((await request("/clients/crew/login", form({ email: "sam@example.com", password: "a-new-password-1" }))).status, 303);
+});
+
+test("a subcontractor's invoice on a job comes with a signed Michigan conditional lien waiver", async () => {
+  const adminCookie = await loginAsAdmin();
+  await withSite(adminCookie);
+  const { worker, cookie } = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com", company: "Reyes Drywall LLC", phone: "231-555-0101" });
+  const today = todayInMichigan();
+  const sent = await request("/clients/crew/bills", crewForm({ job: "muskegon-addition", invoiceNumber: "R-101", invoiceDate: today, amount: "4,250.00", through: today, description: "Drywall hang and finish" }, { bytes: await samplePdf(), name: "R-101.pdf", type: "application/pdf" }, cookie));
+  assert.equal(sent.status, 303, await sent.clone().text());
+  const [entry] = await laborRecords();
+  assert.equal(entry.status, "waiver");
+  assert.equal(entry.amountCents, 425000);
+  assert.equal(sent.headers.get("Location"), `/clients/crew/bills/${entry.id}/waiver`);
+
+  const page = await (await request(sent.headers.get("Location"), { headers: { Cookie: cookie } })).text();
+  assert.match(page, /PARTIAL CONDITIONAL WAIVER/u);
+  assert.match(page, /value="5899 1\/2 White Rd, Muskegon, MI 49442"/u);
+  assert.match(page, /This waiver is conditioned on actual payment of the amount shown above\./u);
+  assert.match(page, /\$4,250\.00/u);
+
+  const fields = { property: "5899 1/2 White Rd, Muskegon, MI 49442", provided: "Drywall hang and finish", claimant: "Reyes Drywall LLC", address: "12 Pine St, Muskegon, MI 49441", phone: "231-555-0101", name: "Dana Reyes", consent: "yes" };
+  const missing = await request(sent.headers.get("Location"), form(fields, cookie));
+  assert.equal(missing.status, 400);
+  assert.match(await missing.text(), /covers all amounts/u);
+  const signed = await request(sent.headers.get("Location"), form({ ...fields, coversAll: "yes" }, cookie));
+  assert.equal(signed.headers.get("Location"), "/clients/crew?notice=bill-sent");
+
+  const [saved] = await laborRecords();
+  assert.equal(saved.status, "submitted");
+  assert.equal(saved.waiver.kind, "partial-conditional");
+  assert.equal(saved.waiver.coversAll, true);
+  const waiver = await request(`/clients/admin/labor/entries/${saved.id}/waiver`, { headers: { Cookie: adminCookie } });
+  assert.equal(waiver.status, 200);
+  const pdf = await PDFDocument.load(new Uint8Array(await waiver.arrayBuffer()));
+  assert.equal(pdf.getTitle(), "Partial conditional waiver");
+  assert.equal((await workerRecord("dana@example.com")).address, "12 Pine St, Muskegon, MI 49441", "the address is remembered for the next waiver");
+  const notice = deliveredTo("mb@myhomebuilderllc.com").at(-1);
+  assert.equal(notice.subject, "Invoice from Reyes Drywall LLC: $4,250.00");
+  assert.match(notice.text, /partial conditional waiver/u);
+
+  // The same invoice number cannot be sent twice; a final invoice gets the full waiver.
+  const again = await request("/clients/crew/bills", crewForm({ job: "muskegon-addition", invoiceNumber: "r-101", invoiceDate: today, amount: "10", through: today, description: "More" }, null, cookie));
+  assert.equal(again.status, 400);
+  assert.match(await again.text(), /already sent invoice r-101/u);
+  const final = await request("/clients/crew/bills", crewForm({ job: "muskegon-addition", invoiceNumber: "R-102", invoiceDate: today, amount: "750", through: today, description: "Punch list", final: "yes" }, null, cookie));
+  assert.match(await (await request(final.headers.get("Location"), { headers: { Cookie: cookie } })).text(), /FULL CONDITIONAL WAIVER/u);
+  assert.equal(worker.kind, "subcontractor");
+});
+
+test("approving labor to a job books its cost, paying clears what is owed, and the books balance", async () => {
+  const adminCookie = await loginAsAdmin();
+  await withSite(adminCookie);
+  const { cookie } = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com", company: "Reyes Drywall LLC" });
+  const today = todayInMichigan();
+  const sent = await request("/clients/crew/bills", crewForm({ job: "muskegon-addition", invoiceNumber: "R-7", invoiceDate: today, amount: "1000", through: today, description: "Drywall" }, null, cookie));
+  await request(sent.headers.get("Location"), form({ property: "Site", provided: "Drywall", claimant: "Reyes Drywall LLC", address: "12 Pine St", phone: "231-555-0101", coversAll: "no", name: "Dana Reyes", consent: "yes" }, cookie));
+  const [entry] = await laborRecords();
+
+  const labor = await (await request("/clients/admin/labor", { headers: { Cookie: adminCookie } })).text();
+  assert.match(labor, /Waiting for approval/u);
+  assert.match(labor, /Invoice R-7/u);
+  const approved = await request(`/clients/admin/labor/entries/${entry.id}/approve`, form({ job: "muskegon-addition" }, adminCookie));
+  assert.equal(approved.headers.get("Location"), "/clients/admin/labor?notice=approved");
+  assert.deepEqual(await ledgerBalances(), { 2000: -100000, 5100: 100000 });
+  const cost = await db("mhb_journal_entries").where({ item_id: entry.id, part: "cost" }).first();
+  assert.equal(cost.client_slug, "muskegon-addition");
+
+  const paid = await request(`/clients/admin/labor/entries/${entry.id}/paid`, form({ method: "check", reference: "#2044", paidOn: today }, adminCookie));
+  assert.equal(paid.headers.get("Location"), "/clients/admin/labor?notice=labor-paid");
+  assert.deepEqual(await ledgerBalances(), { 1000: -100000, 5100: 100000 });
+  const unpaid = await request(`/clients/admin/labor/entries/${entry.id}/unpaid`, form({}, adminCookie));
+  assert.equal(unpaid.headers.get("Location"), "/clients/admin/labor?notice=labor-unpaid");
+  assert.deepEqual(await ledgerBalances(), { 2000: -100000, 5100: 100000 });
+
+  const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(books, /The books balance\./u);
+  assert.match(books, /Owed to crew/u);
+  assert.match(books, /books-jobs/u);
+  assert.match(books, /Subcontractors/u);
+  // Paying twice, or approving what is already approved, is refused.
+  assert.equal((await request(`/clients/admin/labor/entries/${entry.id}/approve`, form({ job: "" }, adminCookie))).headers.get("Location"), "/clients/admin/labor?notice=not-waiting");
+});
+
+test("an employee's hours are costed at their rate on approval, and returned hours show the note", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { worker, cookie } = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com", rate: "28.50", startDate: todayInMichigan() });
+  assert.equal(worker.hourlyRateCents, 2850);
+  const today = todayInMichigan();
+  for (const hours of ["8", "7:30"]) {
+    const sent = await request("/clients/crew/hours", form({ workDate: today, job: "muskegon-addition", hours, description: "Framing" }, cookie));
+    assert.equal(sent.headers.get("Location"), "/clients/crew?notice=hours-sent");
+  }
+  const bad = await request("/clients/crew/hours", form({ workDate: today, job: "", hours: "25" }, cookie));
+  assert.equal(bad.status, 400);
+  assert.equal((await request("/clients/crew/bills", crewForm({ job: "" }, null, cookie))).headers.get("Location"), "/clients/crew", "employees send hours, not invoices");
+
+  const entries = await laborRecords();
+  const eight = entries.find((entry) => entry.hours === 800);
+  const half = entries.find((entry) => entry.hours === 750);
+  assert.ok(eight && half);
+  const labor = await (await request("/clients/admin/labor", { headers: { Cookie: adminCookie } })).text();
+  assert.match(labor, /value="228\.00"/u, "8 hours at $28.50");
+  assert.match(labor, /value="213\.75"/u, "7.5 hours at $28.50");
+
+  assert.equal((await request(`/clients/admin/labor/entries/${eight.id}/approve`, form({ job: "muskegon-addition", amount: "" }, adminCookie))).headers.get("Location"), "/clients/admin/labor?notice=amount-required");
+  await request(`/clients/admin/labor/entries/${eight.id}/approve`, form({ job: "muskegon-addition", amount: "228.00" }, adminCookie));
+  assert.deepEqual(await ledgerBalances(), { 2300: -22800, 5000: 22800 });
+  await request(`/clients/admin/labor/entries/${half.id}/return`, form({ note: "That day was 6 hours" }, adminCookie));
+  const home = await (await request("/clients/crew", { headers: { Cookie: cookie } })).text();
+  assert.match(home, /Returned/u);
+  assert.match(home, /That day was 6 hours/u);
+
+  // Undoing an approval takes its cost back out.
+  await request(`/clients/admin/labor/entries/${eight.id}/unapprove`, form({}, adminCookie));
+  assert.deepEqual(await ledgerBalances(), {});
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+});
+
+test("paperwork is filled out and signed on the site, stored encrypted, and the I-9 is completed by the admin", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { worker, cookie } = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com", startDate: todayInMichigan() });
+  const w4 = await (await request("/clients/crew/forms/w4", { headers: { Cookie: cookie } })).text();
+  assert.match(w4, /Employee&#39;s Withholding Certificate/u);
+  assert.match(w4, /name="firstName"[^>]*value="Sam"/u);
+
+  const answers = { firstName: "Sam", lastName: "Ortiz", address: "44 Oak Ave", cityStateZip: "Muskegon, MI 49441", ssn: "123-45-6789", filingStatus: "single", children: "1", name: "Sam Ortiz", consent: "yes" };
+  const noSsn = await request("/clients/crew/forms/w4", form({ ...answers, ssn: "12345" }, cookie));
+  assert.equal(noSsn.status, 400);
+  assert.match(await noSsn.text(), /9-digit Social Security number/u);
+  const signed = await request("/clients/crew/forms/w4", form(answers, cookie));
+  assert.equal(signed.headers.get("Location"), "/clients/crew?notice=form-signed");
+
+  const secure = await db("mhb_secure").where({ key: `crew/${worker.id}/w4.json` }).first();
+  assert.equal(secure.key_id, "session");
+  assert.ok(!Buffer.from(secure.ciphertext).toString("latin1").includes("123-45-6789"), "the answers are encrypted");
+  const download = await request("/clients/crew/forms/w4/pdf", { headers: { Cookie: cookie } });
+  assert.equal(download.status, 200);
+  const bytes = new Uint8Array(await download.arrayBuffer());
+  assert.equal(Buffer.from(bytes.slice(0, 5)).toString(), "%PDF-");
+  assert.equal((await PDFDocument.load(bytes)).getForm().getFields().length, 0, "the signed form is flat");
+  assert.ok((await workerRecord("sam@example.com")).paperwork.w4.signedAt);
+  // Filling it out again starts without the Social Security number.
+  assert.doesNotMatch(await (await request("/clients/crew/forms/w4", { headers: { Cookie: cookie } })).text(), /123-45-6789/u);
+
+  // The admin's download is logged.
+  assert.equal((await request(`/clients/admin/labor/workers/${worker.id}/forms/w4/pdf`, { headers: { Cookie: adminCookie } })).status, 200);
+  assert.ok(await db("mhb_activity").where({ action: "crew.paperwork-opened" }).first());
+
+  // I-9: the employee signs Section 1, the admin Section 2.
+  const i9 = { lastName: "Ortiz", firstName: "Sam", address: "44 Oak Ave", city: "Muskegon", state: "mi", zip: "49441", birthDate: "1990-04-02", status: "citizen", name: "Sam Ortiz", consent: "yes" };
+  assert.equal((await request("/clients/crew/forms/i9", form(i9, cookie))).headers.get("Location"), "/clients/crew?notice=form-signed");
+  assert.equal((await request("/clients/crew/forms/i9", { headers: { Cookie: cookie } })).headers.get("Location"), "/clients/crew?notice=not-open", "Section 1 is signed once");
+  const workerPage = await (await request(`/clients/admin/labor/workers/${worker.id}`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(workerPage, /Complete Section 2/u);
+  assert.match(workerPage, /mi-newhire\.com/u);
+  const section2 = `/clients/admin/labor/workers/${worker.id}/forms/i9/section2`;
+  const noDocs = await request(section2, form({ firstDay: todayInMichigan(), employerSigner: "Plant, Zadock, Owner", name: "Zadock Plant", consent: "yes" }, adminCookie));
+  assert.equal(noDocs.status, 400);
+  assert.match(await noDocs.text(), /one List A document/u);
+  const done = await request(section2, form({ listA1Title: "U.S. Passport", listA1Authority: "U.S. Department of State", listA1Number: "X1234567", listA1Expires: "2031-05-01", firstDay: todayInMichigan(), employerSigner: "Plant, Zadock, Owner", name: "Zadock Plant", consent: "yes" }, adminCookie));
+  assert.equal(done.headers.get("Location"), `/clients/admin/labor/workers/${worker.id}?notice=section2-signed`);
+  assert.equal((await workerRecord("sam@example.com")).paperwork.i9.status, "complete");
+});
+
+test("deactivating ends a crew member's session, and crew see only their own work and documents", async () => {
+  const adminCookie = await loginAsAdmin();
+  const first = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com" });
+  const second = await addCrew(adminCookie, { kind: "subcontractor", name: "Lee Park", email: "lee@example.com" });
+  const today = todayInMichigan();
+  await request("/clients/crew/bills", crewForm({ job: "", invoiceNumber: "S-1", invoiceDate: today, amount: "300", through: today, description: "Shop shelving" }, { bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]), name: "s-1.png", type: "image/png" }, first.cookie));
+  const [entry] = await laborRecords();
+  assert.equal(entry.status, "submitted", "shop work has no lien waiver");
+  assert.equal((await request(`/clients/crew/bills/${entry.id}/file`, { headers: { Cookie: first.cookie } })).status, 200);
+  assert.equal((await request(`/clients/crew/bills/${entry.id}/file`, { headers: { Cookie: second.cookie } })).status, 404);
+
+  const shared = await request(`/clients/admin/labor/workers/${first.worker.id}/documents`, multipart({ section: "agreements", requiresClientSignature: "yes" }, { bytes: await samplePdf(), name: "Subcontract.pdf", type: "application/pdf" }, adminCookie));
+  assert.match(shared.headers.get("Location"), /notice=document-shared$/u);
+  const [document] = await db("mhb_documents").where({ client_slug: `crew:${first.worker.id}` }).select("data");
+  const documentId = json(document.data).id;
+  assert.equal(json(document.data).section, "agreements");
+  assert.equal((await request(`/clients/crew/documents/${documentId}`, { headers: { Cookie: second.cookie } })).status, 404);
+  const sign = await request(`/clients/crew/documents/${documentId}/sign`, form({ name: "Dana Reyes", consent: "yes" }, first.cookie));
+  assert.equal(sign.headers.get("Location"), "/clients/crew?notice=signed");
+  assert.ok(await db("mhb_activity").where({ actor: "crew", action: "document.signed" }).first());
+  assert.doesNotMatch(await (await request("/clients/admin/documents", { headers: { Cookie: adminCookie } })).text(), /Subcontract\.pdf/u, "crew documents stay off the client Documents page");
+
+  await request(`/clients/admin/labor/workers/${first.worker.id}/active`, form({ active: "no" }, adminCookie));
+  assert.match(await (await request("/clients/crew", { headers: { Cookie: first.cookie } })).text(), /Crew and subcontractors\./u, "signed out");
+  assert.equal((await request("/clients/crew/login", form({ email: "dana@example.com", password: "crew-password-2026" }))).status, 401);
+  assert.match(await (await request("/clients/crew", { headers: { Cookie: second.cookie } })).text(), /Hi, Lee\./u);
+});
+
+test("the admin cannot add the same email twice, and employer details must be complete", async () => {
+  const adminCookie = await loginAsAdmin();
+  await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com" });
+  const again = await request("/clients/admin/labor/workers", form({ kind: "subcontractor", name: "Sam O", email: "SAM@example.com" }, adminCookie));
+  assert.equal(again.status, 400);
+  assert.match(await again.text(), /sam@example\.com is already in Labor/u);
+  const employer = { legalName: "My Home Builder LLC", ein: "123456789", street: "6749 Fulton St E, Ste A #2333", city: "Ada", state: "mi", zip: "49301", contactName: "Zadock Plant", contactPhone: "616-555-0100" };
+  assert.equal((await request("/clients/admin/labor/employer", form({ ...employer, ein: "1234" }, adminCookie))).status, 400);
+  assert.equal((await request("/clients/admin/labor/employer", form(employer, adminCookie))).headers.get("Location"), "/clients/admin/labor?notice=employer-saved");
+  const saved = json((await db("mhb_settings").where({ key: "employer" }).first()).data);
+  assert.equal(saved.ein, "12-3456789");
+  assert.equal(saved.state, "MI");
 });

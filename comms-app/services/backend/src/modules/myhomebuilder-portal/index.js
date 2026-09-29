@@ -17,7 +17,7 @@ const MAX_WEBHOOK_BYTES = 256 * 1024;
 // Per visitor address, per minute. Logins and admin codes get the tighter limit.
 const POST_LIMIT = 120;
 const SIGN_IN_LIMIT = 20;
-const SIGN_IN_PATHS = new Set(["/clients/login", "/clients/admin/verify"]);
+const SIGN_IN_PATHS = new Set(["/clients/login", "/clients/admin/verify", "/clients/crew/login", "/clients/crew/forgot"]);
 const ADMIN_SESSION_PATHS = new Set(["/clients/admin/request", "/clients/admin/verify", "/clients/admin/logout"]);
 const DROPPED_HEADERS = new Set(["connection", "content-length", "expect", "host", "keep-alive", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"]);
 
@@ -49,7 +49,9 @@ export function portalEnv(env = process.env) {
     EMAIL_FROM: env.MHB_EMAIL_FROM || "",
     EMAIL_CLIENT_FROM: env.MHB_EMAIL_CLIENT_FROM || "",
     EMAIL_REPLY_TO: env.MHB_EMAIL_REPLY_TO || "",
-    ADMIN_EMAIL: env.MHB_ADMIN_EMAIL || ""
+    ADMIN_EMAIL: env.MHB_ADMIN_EMAIL || "",
+    // Encrypts crew paperwork (secure.js): 32 random bytes, base64. Optional; see secure.js.
+    DATA_KEY: String(env.MHB_DATA_KEY || "").trim()
   };
 }
 

@@ -71,14 +71,19 @@ const MB_MARK = `<svg class="billing-doc-mark" viewBox="170 95 1250 665" role="i
             </g>
           </svg>`;
 
-export function pageShell(content, { authenticated = false, admin = false, bodyClass = "portal-page", scripts = [], title = "Client Portal", navCurrent = "login" } = {}) {
+// `crew`: signed in to the crew portal; `crewSignedOut`: its sign-in pages.
+export function pageShell(content, { authenticated = false, admin = false, crew = false, crewSignedOut = false, bodyClass = "portal-page", scripts = [], title = "Client Portal", navCurrent = "login" } = {}) {
   const nav = [];
-  if (authenticated || admin) {
+  if (crew) {
+    nav.push('<a href="/clients/crew">Crew home</a>');
+    nav.push('<form action="/clients/crew/logout" method="post"><button class="portal-logout-button" type="submit">Log out</button></form>');
+  } else if (authenticated || admin) {
     nav.push('<a href="/clients">Home</a>');
     if (admin) {
       nav.push('<a href="/clients/admin">Admin panel</a>');
       nav.push('<a href="/clients/admin/templates">Templates</a>');
       nav.push('<a href="/clients/admin/documents">Documents</a>');
+      nav.push('<a href="/clients/admin/labor">Labor</a>');
       nav.push('<a href="/clients/admin/books">Books</a>');
       nav.push('<form action="/clients/admin/logout" method="post"><button class="portal-logout-button" type="submit">Exit admin</button></form>');
     } else {
@@ -89,9 +94,11 @@ export function pageShell(content, { authenticated = false, admin = false, bodyC
     }
   } else {
     nav.push('<a href="/">Home</a>');
-    nav.push(`<a href="/clients"${navCurrent === "login" ? ' aria-current="page"' : ""}>Client login</a>`);
+    nav.push(`<a href="/clients"${navCurrent === "login" && !crewSignedOut ? ' aria-current="page"' : ""}>Client login</a>`);
+    nav.push(`<a href="/clients/crew"${crewSignedOut ? ' aria-current="page"' : ""}>Crew login</a>`);
     nav.push('<form action="/clients/admin/request" method="post"><button class="portal-logout-button" type="submit">Admin</button></form>');
   }
+  const crewPages = crew || crewSignedOut;
   const scriptTags = scripts.map((source) => `<script src="${escapeAttribute(source)}" defer></script>`).join("\n  ");
 
   return `<!doctype html>
@@ -114,7 +121,7 @@ export function pageShell(content, { authenticated = false, admin = false, bodyC
   <div class="topline">
     <div class="site-width topline-inner">
       <span>Muskegon, Michigan</span>
-      <span>${admin ? "Administrator access" : "Private project access"}</span>
+      <span>${admin ? "Administrator access" : crewPages ? "Private crew access" : "Private project access"}</span>
       <a href="/">Return to website</a>
     </div>
   </div>
@@ -124,7 +131,7 @@ export function pageShell(content, { authenticated = false, admin = false, bodyC
         <img class="brand-mark" src="/assets/mb-logo.svg" alt="" width="1250" height="665">
         <span class="brand-copy">
           <strong>MY HOME BUILDER</strong>
-          <small>${admin ? "Admin panel" : "Client portal"}</small>
+          <small>${admin ? "Admin panel" : crewPages ? "Crew portal" : "Client portal"}</small>
         </span>
       </a>
       <nav class="portal-nav" aria-label="Client portal navigation">
@@ -551,7 +558,7 @@ export function sharedBillingPage({ client, item, stripeReady, token, notice = n
     </div>`, { title: `${kindLabel(item)} ${item.number}`, scripts: [BILLING_SCRIPT], navCurrent: null });
 }
 
-export function signPage({ document, party, actionPath, backPath, error = "", admin = false, authenticated = true }) {
+export function signPage({ document, party, actionPath, backPath, error = "", admin = false, authenticated = true, crew = false }) {
   const heading = party === "admin" ? "Sign as My Home Builder LLC." : "Sign this document.";
   return pageShell(`<div class="site-width portal-shell portal-detail">
       <p class="portal-kicker">Electronic signature</p>
@@ -578,7 +585,7 @@ export function signPage({ document, party, actionPath, backPath, error = "", ad
         </label>
         <button class="button button-solid" type="submit">Apply signature</button>
       </form>
-    </div>`, { authenticated, admin, scripts: ["/clients/portal/sign.js"], title: `Sign ${document.name}` });
+    </div>`, { authenticated, admin, crew, scripts: ["/clients/portal/sign.js"], title: `Sign ${document.name}` });
 }
 
 // Admin sign-in. "sent" follows a code request; "code" is the page any device can open to enter a
@@ -803,6 +810,12 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
               hint: "Every quote, invoice and receipt for this project is addressed to all of them. Addresses you email from this project are added here."
             })}
             <button class="portal-logout-button" type="submit">Save emails</button>
+          </form>
+          <form class="admin-inline-form" action="${base}/site" method="post">
+            <label for="client-site">Job site address (printed on subcontractors' lien waivers)
+              <input id="client-site" name="siteAddress" type="text" maxlength="200" value="${escapeAttribute(selected.siteAddress || "")}" placeholder="1234 Lakeshore Dr, Muskegon, MI 49441">
+            </label>
+            <button class="portal-logout-button" type="submit">Save address</button>
           </form>
         </div>
 
@@ -1231,7 +1244,7 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
 
 // ---------- Books ----------
 
-const WHO = { admin: "Admin", client: "Client", stripe: "Stripe", system: "Portal", visitor: "Visitor" };
+const WHO = { admin: "Admin", client: "Client", crew: "Crew", stripe: "Stripe", system: "Portal", visitor: "Visitor" };
 const dateTimeFormat = new Intl.DateTimeFormat("en-US", { timeZone: "America/Detroit", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 
 function dateTimeText(value) {
@@ -1289,7 +1302,7 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
     : `<section class="books-check books-check-off" aria-labelledby="books-check-heading">
           <h2 id="books-check-heading">The books do not balance.</h2>
           ${check.debits !== check.credits ? `<p>Debits are ${money(check.debits)} and credits are ${money(check.credits)}.</p>` : ""}
-          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome" })[part] || part).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
+          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment" })[part] || part).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
           <form action="/clients/admin/books/correct" method="post">
             <button class="button button-solid" type="submit">Post corrections</button>
           </form>
@@ -1304,8 +1317,25 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
     ["Refunds", summary.refunds, `in ${range}`],
     ["Outstanding", summary.outstanding, report.to ? `owed on ${dateText(report.to)}` : "owed now", true],
     ["Unapplied payments", summary.unapplied, "received, not tied to an invoice"],
+    ...(summary.owedToCrew ? [["Owed to crew", summary.owedToCrew, "approved labor not paid yet"]] : []),
     ...(summary.disputed ? [["Held in disputes", summary.disputed, "until Stripe decides"]] : [])
   ];
+
+  // Each job's sales and costs in the period: labor and subcontractors approved to it.
+  const jobRows = report.jobs.map((job) => `<tr>
+          <td>${escapeHtml(names.get(job.slug) || job.slug)}</td>
+          <td class="books-money" data-label="Invoiced">${money(job.invoiced)}</td>
+          <td class="books-money" data-label="Labor">${moneyCell(job.labor)}</td>
+          <td class="books-money" data-label="Subcontractors">${moneyCell(job.subcontractors)}</td>
+          <td class="books-money" data-label="Other costs">${moneyCell(job.otherCosts)}</td>
+          <td class="books-money${job.profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(job.profit)}</td>
+        </tr>`).join("");
+  const jobs = report.jobs.length
+    ? `<table class="portal-table books-table books-jobs">
+          <thead><tr><th scope="col">Job</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Labor</th><th scope="col" class="books-money">Subcontractors</th><th scope="col" class="books-money">Other costs</th><th scope="col" class="books-money">Profit</th></tr></thead>
+          <tbody>${jobRows}</tbody>
+        </table>`
+    : '<p class="portal-empty">No invoices or job costs in this period.</p>';
 
   const ledgerRows = report.entries.slice().reverse().map((entry) => {
     const text = entry.itemExists ? [entry.itemLabel, ...entry.memo.split(" · ").slice(1)].join(" · ") : entry.memo;
@@ -1380,6 +1410,15 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
         ${figures.map(([label, cents, note, due]) => `<div${due ? ' class="billing-totals-due"' : ""}><dt>${label}</dt><dd>${money(cents)}</dd><dd class="books-summary-note">${escapeHtml(note)}</dd></div>`).join("\n        ")}
       </dl>
 
+      <section class="books-section" aria-labelledby="books-jobs-heading">
+        <div class="books-section-head">
+          <h2 id="books-jobs-heading">Jobs</h2>
+          <a class="portal-secondary-link" href="/clients/admin/labor">Labor</a>
+        </div>
+        <p class="admin-meta">What each job invoiced and cost ${escapeHtml(range)}. Costs are hours and subcontractor invoices approved to the job in Labor.</p>
+        ${jobs}
+      </section>
+
       <section class="books-section" aria-labelledby="books-ledger-heading">
         <div class="books-section-head">
           <h2 id="books-ledger-heading">Ledger</h2>
@@ -1406,7 +1445,7 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
           <h2 id="books-activity-heading">Activity</h2>
           <a class="portal-secondary-link" href="/clients/admin/books/activity.csv${query()}">Download the activity (CSV)</a>
         </div>
-        <p class="admin-meta">Everything done by the admin, clients and Stripe, newest first.</p>
+        <p class="admin-meta">Everything done by the admin, clients, crew and Stripe, newest first.</p>
         ${activity}
       </section>
     </div>`, { title: "Books" });

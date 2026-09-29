@@ -67,6 +67,8 @@ the same way jayje.com forwards its account pages. Everything else lives here:
   - `MHB_ALLOWED_ORIGINS` (default the apex and `www` origins)
   - `MHB_ADMIN_EMAIL` (default `mb@myhomebuilderllc.com`)
   - `MHB_EMAIL_FROM`, `MHB_EMAIL_CLIENT_FROM` and `MHB_EMAIL_REPLY_TO`
+  - `MHB_DATA_KEY` (32 random bytes, base64): the key for crew paperwork (see Labor). Without
+    it, a key derived from `MHB_SESSION_SECRET` is used.
 
 `ADMIN_WRITES_ENABLED=false` pauses admin changes here too; sign-in and viewing keep working.
 
@@ -214,6 +216,8 @@ bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tabl
   - 4200 Refunds
   - 6100 Stripe fees
   - 6200 Dispute losses and fees
+  - 1000 Business checking, 2000 Accounts payable, 2300 Wages payable, 5000 Job labor,
+    5100 Subcontractors and 6450 Shop and overhead labor (added for Labor)
 
   Migration `20261003_myhomebuilder_portal_stripe_events.js` added 1250, 4200 and 6200, the
   `mhb_stripe_events` table, and room for one journal part per refund.
@@ -245,7 +249,9 @@ bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tabl
 - **The page** has these parts:
   - Filters: one client portal or all, and a date range, with quick periods.
   - Totals: invoiced, received, Stripe fees, refunds, outstanding and unapplied, and money
-    held in disputes when there is any.
+    held in disputes and approved labor not paid yet (owed to crew) when there is any.
+  - Jobs: each client portal's invoiced amount, labor, subcontractors, other job costs and
+    profit in the period.
   - The ledger, newest first, with a running amount owed.
   - Account balances (a trial balance).
   - The activity log.
@@ -260,6 +266,51 @@ bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tabl
   the chart takes new accounts. Bank transactions can join the journal (source `bank`, their
   transaction id as the external id, posted once), then be labeled and categorized against
   expense accounts and matched to Stripe payouts.
+
+## Labor
+
+The admin panel's **Labor** page (`/clients/admin/labor`) and the **crew portal**
+(`/clients/crew`), in `crew.js` (routes), `labor-pages.js` (pages), `labor.js` (records and
+crew sessions), `forms.js` (paperwork), `waivers.js` (lien waivers) and `secure.js`
+(encryption). Migration `20261004_myhomebuilder_portal_labor.js` creates `mhb_workers`,
+`mhb_labor`, `mhb_secure` and `mhb_settings`.
+
+- **Employees and subcontractors.** The admin adds each one as an employee (W-2) or a
+  subcontractor (1099), with an email, and an hourly rate and start date for employees. They get
+  an emailed link to choose a password (it works once, for 7 days); **Send the invite again** or
+  **Forgot your password?** sends a new one (2 hours once a password is set). They sign in at
+  `/clients/crew` with their email and password: their own session cookie
+  (`__Secure-mhb_crew_session`, 12 hours), which opens nothing else. **Deactivate** signs them
+  out everywhere and stops sign-ins; a password change also ends older sessions.
+- **Hours and invoices.** Employees send hours (a date, a job or shop, and hours like 8, 7.5 or
+  7:30). Subcontractors send invoices (number, date, amount, the work's last day, what they
+  provided, and the invoice file if they have one). An invoice on a job then asks for Michigan's
+  **conditional lien waiver** (Construction Lien Act, MCL 570.1115(9), word for word): partial,
+  or full when they mark it their final invoice for the job. It takes effect only when the
+  amount is paid. The signed waiver is a PDF kept with the invoice, and the builder is emailed.
+  The waiver prints the job site address saved on the client's panel (**Job site address**).
+- **Approving.** The Labor page lists what is waiting. The admin picks the job (or shop) and, for
+  hours, the cost (filled in at the employee's rate), then **Approve**, or **Return** with a note
+  the crew member sees. Approved work is owed until **Mark paid** (a popup: how it was paid,
+  reference and date); **Undo approval** and **Mark unpaid** step back.
+- **Books.** Each approved entry posts **cost** on its work or invoice date: Job labor (hours) or
+  Subcontractors (invoices), or Shop and overhead labor without a job, owed to Wages payable or
+  Accounts payable, tagged with the job. **paid** clears it from Business checking. Both follow
+  the entry's state like an invoice's parts, and the balance check covers them.
+- **Paperwork**, filled out and signed in the crew portal on the official forms:
+  - employees: Form W-4 (2026), Form MI-W4, Form I-9 Section 1 and an optional direct deposit
+    authorization
+  - subcontractors: Form W-9, plus an uploaded certificate of insurance
+  The admin completes **Section 2 of the I-9** after examining the documents, and marks the
+  Michigan new hire report done (within 20 days of the start date, www.mi-newhire.com).
+  Answers, signatures and signed PDFs are encrypted (AES-256-GCM) in `mhb_secure`; each blob
+  names the key that sealed it (`data` for `MHB_DATA_KEY`, `session` for the key derived from
+  `MHB_SESSION_SECRET`). Do not change or remove either once paperwork is stored. Filling a
+  form out again starts without Social Security, tax id or bank numbers. The admin's downloads
+  are logged. The employer details printed on the forms are saved on the Labor page.
+- **Documents for crew** (agreements, onboarding, insurance, other) are shared from the crew
+  member's page, can be signed like client documents, and live under the portal id
+  `crew:<worker id>`, apart from the client portals.
 
 ## PDF signing library
 

@@ -25,10 +25,17 @@
 // A refund of money not on an invoice (a second payment, a deleted invoice's) posts
 // Dr Unapplied payments, Cr Stripe balance, once per refund.
 //
+// Labor (labor.js) follows the same way, for each hours entry or subcontractor invoice:
+//   cost     approved: Dr Job labor (hours) or Subcontractors (invoices), or Shop and overhead
+//            labor when not on a job, Cr Wages payable or Accounts payable, on the work or
+//            invoice date, tagged with the job
+//   paid     paid by hand: Dr Wages payable or Accounts payable, Cr Business checking
+//
 // Entries carry a source, an external id and labels, so bank transactions can join the journal
 // later (the business account) and be labeled and categorized against new accounts.
 import { billingLabel, issuedDate, todayInMichigan } from "./billing.js";
 import { money } from "./format.js";
+import { LABOR_PAYMENT_METHODS, hoursText } from "./labor.js";
 
 const RECEIVABLE = "1100";
 const STRIPE = "1200";
@@ -39,12 +46,18 @@ const SALES = "4000";
 const REFUNDS = "4200";
 const STRIPE_FEES = "6100";
 const DISPUTE_LOSSES = "6200";
+const CHECKING = "1000";
+const PAYABLE = "2000";
+const WAGES = "2300";
+const JOB_LABOR = "5000";
+const SUBCONTRACTORS = "5100";
+const SHOP_LABOR = "6450";
 const QUERY_TIMEOUT_MS = 5000;
 
 // A part's kind: every "refund:<id>" part is a refund.
 export const partKind = (part) => (String(part).startsWith("refund:") ? "refund" : part);
-const PART_ORDER = ["issue", "payment", "fee", "refund", "dispute", "dispute-close"];
-const PART_WORDS = { issue: "invoice", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome" };
+const PART_ORDER = ["issue", "payment", "fee", "refund", "dispute", "dispute-close", "cost", "paid"];
+const PART_WORDS = { issue: "invoice", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment" };
 const disputeWon = (dispute) => ["won", "warning_closed"].includes(dispute?.status);
 
 function data(row) {
@@ -101,6 +114,34 @@ export function bookParts(item, { deleted = false } = {}) {
     }
   }
   return parts;
+}
+
+// ---------- What labor's books should hold ----------
+
+export function laborParts(entry) {
+  const parts = {};
+  const amount = Number(entry?.amountCents || 0);
+  if (!entry || !["approved", "paid"].includes(entry.status) || amount <= 0) return parts;
+  const hours = entry.kind === "hours";
+  const cost = !entry.clientSlug ? SHOP_LABOR : hours ? JOB_LABOR : SUBCONTRACTORS;
+  const owed = hours ? WAGES : PAYABLE;
+  parts.cost = { date: entry.workDate, lines: [[cost, amount, 0], [owed, 0, amount]] };
+  if (entry.status === "paid" && entry.payment && entry.payment.source !== "bank") {
+    parts.paid = { date: calendarDate(entry.payment.paidOn || entry.paidAt), lines: [[owed, amount, 0], [CHECKING, 0, amount]] };
+  }
+  return parts;
+}
+
+export function laborName(entry) {
+  const who = entry.workerName || "A worker";
+  return entry.kind === "hours" ? `${who} · ${hoursText(entry.hours)} on ${entry.workDate}` : `${who} · invoice ${entry.invoiceNumber || ""}`.trim();
+}
+
+function laborMemo(entry, part, { reversal = false, reason = "" } = {}) {
+  const name = laborName(entry);
+  if (reversal) return `${name} · ${PART_WORDS[partKind(part)] || "entry"} ${({ returned: "returned", unapproved: "approval undone", "payment-removed": "marked unpaid" })[reason] || "changed"}`;
+  if (part === "paid") return `${name} · paid by ${LABOR_PAYMENT_METHODS[entry.payment?.method] || entry.payment?.label || "hand"}`;
+  return name;
 }
 
 // For an invoice deleted without its last state at hand: what its held parts become. Its sale
@@ -190,7 +231,7 @@ async function post(trx, { kind, part = null, reverses = null, date, memo, item 
 // The parts the journal holds now for an invoice: postings not yet reversed, by part.
 async function heldParts(trx, itemId) {
   const rows = await trx.raw(
-    `SELECT e.id, e.part, to_char(e.entry_date, 'YYYY-MM-DD') AS entry_date, l.account, l.debit_cents, l.credit_cents
+    `SELECT e.id, e.part, e.client_slug, to_char(e.entry_date, 'YYYY-MM-DD') AS entry_date, l.account, l.debit_cents, l.credit_cents
      FROM mhb_journal_entries e JOIN mhb_journal_lines l ON l.entry_id = e.id
      WHERE e.item_id = ? AND e.part IS NOT NULL AND e.reverses IS NULL
        AND NOT EXISTS (SELECT 1 FROM mhb_journal_entries r WHERE r.reverses = e.id)
@@ -200,7 +241,7 @@ async function heldParts(trx, itemId) {
   const entries = new Map();
   for (const row of rows.rows) {
     const id = Number(row.id);
-    if (!entries.has(id)) entries.set(id, { id, part: row.part, date: row.entry_date, lines: [] });
+    if (!entries.has(id)) entries.set(id, { id, part: row.part, date: row.entry_date, clientSlug: row.client_slug, lines: [] });
     entries.get(id).lines.push([row.account, Number(row.debit_cents), Number(row.credit_cents)]);
   }
   const held = {};
@@ -208,30 +249,48 @@ async function heldParts(trx, itemId) {
   return held;
 }
 
-// Brings an invoice's journal in line with its state (see the top of this file). `item` is the
-// invoice as it is now, or as it was when deleted; with deleted and no item, the held parts decide.
-async function syncInvoiceBooks(trx, { item = null, itemId = item?.id, itemNumber = null, clientSlug = null, deleted = false, reason = "changed", source = "portal", activityId = null }) {
+// Brings one item's journal in line with what it should hold: `wanted(held)` returns the parts,
+// and each part that no longer matches is reversed (on its own date, under the job it was posted
+// to) and posted as it is now.
+async function syncParts(trx, { itemId, subject, wanted, memo, reason, source, activityId }) {
   await trx.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`mhb-books:${itemId}`]).timeout(QUERY_TIMEOUT_MS);
   const held = await heldParts(trx, itemId);
-  const wanted = item ? bookParts(item, { deleted }) : deletedParts(held);
-  const subject = item || { id: itemId, number: itemNumber, clientSlug };
+  const want = wanted(held);
   let posted = 0;
-  for (const part of offParts(held, wanted)) {
-    const have = held[part] || [];
-    const want = wanted[part] || null;
-    for (const entry of have) {
+  for (const part of offParts(held, want)) {
+    for (const entry of held[part] || []) {
       await post(trx, {
-        kind: "reversal", part, reverses: entry.id, date: entry.date, item: subject, clientSlug: subject.clientSlug,
-        memo: memoFor(subject, part, { reversal: true, reason }), lines: entry.lines.map(([account, debit, credit]) => [account, credit, debit]), source, activityId
+        kind: "reversal", part, reverses: entry.id, date: entry.date, item: { ...subject, clientSlug: entry.clientSlug ?? subject.clientSlug },
+        memo: memo(part, { reversal: true, reason }), lines: entry.lines.map(([account, debit, credit]) => [account, credit, debit]), source, activityId
       });
       posted += 1;
     }
-    if (want) {
-      await post(trx, { kind: partKind(part), part, date: want.date, item: subject, memo: memoFor(subject, part, { deleted }), lines: want.lines, source, activityId });
+    if (want[part]) {
+      await post(trx, { kind: partKind(part), part, date: want[part].date, item: subject, memo: memo(part, {}), lines: want[part].lines, source, activityId });
       posted += 1;
     }
   }
   return posted;
+}
+
+// Brings an invoice's journal in line with its state (see the top of this file). `item` is the
+// invoice as it is now, or as it was when deleted; with deleted and no item, the held parts decide.
+async function syncInvoiceBooks(trx, { item = null, itemId = item?.id, itemNumber = null, clientSlug = null, deleted = false, reason = "changed", source = "portal", activityId = null }) {
+  const subject = item || { id: itemId, number: itemNumber, clientSlug };
+  return syncParts(trx, {
+    itemId, subject, reason, source, activityId,
+    wanted: (held) => (item ? bookParts(item, { deleted }) : deletedParts(held)),
+    memo: (part, options) => memoFor(subject, part, { ...options, deleted })
+  });
+}
+
+// Brings an hours entry's or a subcontractor invoice's journal in line with its state.
+export async function syncLaborBooks(trx, entry, { reason = "changed", source = "portal", activityId = null } = {}) {
+  return syncParts(trx, {
+    itemId: entry.id, subject: { id: entry.id, number: null, clientSlug: entry.clientSlug || null }, reason, source, activityId,
+    wanted: () => laborParts(entry),
+    memo: (part, options) => laborMemo(entry, part, options)
+  });
 }
 
 // ---------- Activity ----------
@@ -300,10 +359,10 @@ async function ensureBooksOpened(store) {
 
 // Logs what happened and keeps the journal in step, in one transaction. It never fails the action
 // it follows: an error is logged, and the Books page's balance check shows anything missed.
-//   event: { action, summary, actor (admin|client|stripe|system), ip, item, clientSlug,
+//   event: { action, summary, actor (admin|client|crew|stripe|system), ip, item, clientSlug,
 //            amountCents, data, deleted, reason, unapplied: { externalId, amountCents, date,
 //            item, clientSlug, memo }, unappliedRefund: { the same, for a refund of money
-//            not on an invoice }, moved: true }
+//            not on an invoice }, moved: true, labor: an hours entry or subcontractor invoice }
 export async function record(store, event) {
   if (!store) return;
   try {
@@ -320,6 +379,7 @@ export async function record(store, event) {
       if (event.item?.kind === "invoice") {
         await syncInvoiceBooks(trx, { item: event.item, deleted: Boolean(event.deleted), reason: event.reason || "changed", source: event.actor === "stripe" ? "stripe" : "portal", activityId });
       }
+      if (event.labor) await syncLaborBooks(trx, event.labor, { reason: event.reason || "changed", activityId });
       if (event.unapplied) {
         const { externalId, amountCents, date, item, clientSlug, memo } = event.unapplied;
         await post(trx, {
@@ -358,6 +418,13 @@ export async function checkBooks(store) {
     const off = offParts(held, bookParts(item));
     if (off.length) problems.push({ itemId: item.id, clientSlug: item.clientSlug, label: billingLabel(item), parts: [...new Set(off.map(partKind))] });
   }
+  // Hours and subcontractor invoices.
+  const labor = (await store.db("mhb_labor").select("data").timeout(QUERY_TIMEOUT_MS)).map(data);
+  for (const entry of labor) {
+    known.add(entry.id);
+    const off = offParts(await heldParts(store.db, entry.id), laborParts(entry));
+    if (off.length) problems.push({ itemId: entry.id, labor: true, clientSlug: entry.clientSlug || null, label: laborName(entry), parts: [...new Set(off.map(partKind))] });
+  }
   const orphans = await store.db.raw(
     `SELECT item_id, max(item_number) AS item_number, max(client_slug) AS client_slug
      FROM mhb_journal_entries WHERE item_id IS NOT NULL AND part IS NOT NULL
@@ -377,6 +444,7 @@ export async function correctBooks(store, { ip = null } = {}) {
   const { problems } = await checkBooks(store);
   if (!problems.length) return 0;
   const items = new Map((await store.db("mhb_billing").where({ kind: "invoice" }).select("data").timeout(QUERY_TIMEOUT_MS)).map(data).map((item) => [item.id, item]));
+  const labor = new Map((await store.db("mhb_labor").select("data").timeout(QUERY_TIMEOUT_MS)).map(data).map((entry) => [entry.id, entry]));
   let posted = 0;
   await store.db.transaction(async (trx) => {
     const activityId = await insertActivity(trx, {
@@ -384,6 +452,10 @@ export async function correctBooks(store, { ip = null } = {}) {
       summary: `Posted corrections for ${problems.map((problem) => problem.label).join(", ")} to balance the books`
     });
     for (const problem of problems) {
+      if (problem.labor) {
+        posted += await syncLaborBooks(trx, labor.get(problem.itemId), { activityId });
+        continue;
+      }
       const item = items.get(problem.itemId);
       posted += await syncInvoiceBooks(trx, item ? { item, reason: "changed", activityId } : { itemId: problem.itemId, itemNumber: problem.number, clientSlug: problem.clientSlug, deleted: true, reason: "deleted", activityId });
     }
@@ -471,6 +543,25 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
     running += entry.receivable;
     entry.owed = running;
   }
+  // Each job's (client portal's) sales and costs in the period, for the job profit table.
+  const entryDates = new Map(entryRows.map((row) => [Number(row.id), row.entry_date]));
+  const jobs = new Map();
+  for (const line of lineRows) {
+    if (!line.client_slug || line.client_slug.startsWith("crew:") || (slug && line.client_slug !== slug)) continue;
+    const day = entryDates.get(Number(line.entry_id));
+    if (!day || (from && day < from) || (to && day > to)) continue;
+    const job = jobs.get(line.client_slug) || { slug: line.client_slug, invoiced: 0, labor: 0, subcontractors: 0, otherCosts: 0 };
+    const amount = Number(line.debit_cents) - Number(line.credit_cents);
+    if (line.account === SALES || line.account === REFUNDS) job.invoiced -= amount;
+    else if (line.account === JOB_LABOR) job.labor += amount;
+    else if (line.account === SUBCONTRACTORS) job.subcontractors += amount;
+    else if (String(line.account).startsWith("5")) job.otherCosts += amount;
+    jobs.set(line.client_slug, job);
+  }
+  const jobList = [...jobs.values()]
+    .map((job) => ({ ...job, costs: job.labor + job.subcontractors + job.otherCosts, profit: job.invoiced - job.labor - job.subcontractors - job.otherCosts }))
+    .filter((job) => job.invoiced || job.costs);
+
   const accounts = accountRows.map((account) => ({ ...account, ...balances.get(account.code) }));
   const debits = accounts.reduce((sum, account) => sum + account.debit, 0);
   const credits = accounts.reduce((sum, account) => sum + account.credit, 0);
@@ -489,10 +580,12 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
       outstanding: balanceOf(RECEIVABLE),
       unapplied: -balanceOf(UNAPPLIED),
       disputed: balanceOf(DISPUTED),
+      owedToCrew: -(balanceOf(PAYABLE) + balanceOf(WAGES)),
       stripeBalance: balanceOf(STRIPE),
       receivedOutsideStripe: balanceOf(RECEIVED)
     },
     items,
+    jobs: jobList,
     activity: activityRows.filter((row) => {
       const day = calendarDate(row.at instanceof Date ? row.at.toISOString() : row.at);
       return (!from || day >= from) && (!to || day <= to);

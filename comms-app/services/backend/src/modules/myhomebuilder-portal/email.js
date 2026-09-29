@@ -529,3 +529,40 @@ export function paymentFailedMessage({ item, client, adminUrl }) {
     ])
   };
 }
+
+// ---------- Crew portal (crew.js) ----------
+
+// An invite to the crew portal, or a link to choose a new password.
+export function crewLinkMessage({ worker, link, reset = false }) {
+  const first = String(worker.name || "").trim().split(/\s+/u)[0] || "there";
+  const lead = reset
+    ? "A link to choose a new password for the My Home Builder crew portal was requested."
+    : "My Home Builder LLC added you to its crew portal, where you send your hours and invoices and fill out and sign your paperwork.";
+  const action = reset
+    ? "Choose a new password with the button below. The link works for 2 hours. If you did not ask for it, you can ignore this email."
+    : "Choose a password to get started. The link works for 7 days.";
+  const body = [
+    paragraph(`Hi ${escapeHtml(first)},`),
+    paragraph(escapeHtml(lead)),
+    paragraph(escapeHtml(action)),
+    button(link, reset ? "Choose a new password" : "Choose your password"),
+    paragraph(`Or open ${textLink(link, link)}`, "font-size:13px;color:#555555;")
+  ].join("\n");
+  return {
+    subject: reset ? "Reset your My Home Builder crew portal password" : "Set up your My Home Builder crew portal",
+    html: layout({ title: reset ? "Reset your password" : "Your crew portal", preheader: action, kicker: "Crew portal", heading: reset ? "Choose a new password." : "Welcome to the crew portal.", body }),
+    text: joinText([`Hi ${first},`, "", lead, "", action, "", link])
+  };
+}
+
+// Tells the builder a subcontractor sent an invoice, with its lien waiver.
+export function crewBillMessage({ worker, entry, jobName, adminUrl }) {
+  const amount = money(entry.amountCents);
+  const lead = `${worker.name}${worker.company ? ` (${worker.company})` : ""} sent invoice ${entry.invoiceNumber} for ${amount}${jobName ? ` on ${jobName}` : ""}, with a signed ${entry.waiver?.name?.toLowerCase() || "lien waiver"}.`;
+  const body = [paragraph(escapeHtml(lead)), paragraph("Approve it to the job, or return it with a note, in the admin panel's Labor page.", "font-size:13px;color:#555555;"), button(adminUrl, "Open Labor")].join("\n");
+  return {
+    subject: `Invoice from ${worker.company || worker.name}: ${amount}`,
+    html: layout({ title: "Invoice received", preheader: lead, kicker: "Labor", heading: "An invoice came in.", body, forClient: false }),
+    text: joinText([lead, "", `Admin panel: ${adminUrl}`])
+  };
+}

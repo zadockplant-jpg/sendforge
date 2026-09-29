@@ -107,6 +107,8 @@ import { formatDate, money } from "./format.js";
 import { isPdf, signDocument } from "./pdf.js";
 import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record } from "./books.js";
 import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
+import { CREW_SECTIONS } from "./labor.js";
+import { handleAdminLabor, handleCrew } from "./crew.js";
 import {
   adminBillingPage,
   adminBooksPage,
@@ -249,6 +251,7 @@ const NOTICES = {
   "client-added": { text: "Client portal created." },
   "client-exists": { text: "A client portal with that id already exists.", tone: "error" },
   "client-updated": { text: "Client emails saved." },
+  "site-saved": { text: "Job site address saved. It goes on subcontractors' lien waivers for this job." },
   invalid: { text: "Please check the form and try again.", tone: "error" },
   voided: { text: "Marked void." },
   sent: { text: "Emailed to the client." },
@@ -950,8 +953,11 @@ async function handleWebhook(context, store, origin) {
 
 // ---------- Documents ----------
 
+// `uploadedBy` is admin, client or crew. Documents shared with an employee or subcontractor live
+// under the portal id crew:<worker id>, in the crew sections (labor.js), with `flags.crewName`.
 async function storeUpload(store, slug, file, uploadedBy, flags) {
   if (!store.files) return { error: "files-not-configured" };
+  const crew = slug.startsWith("crew:");
   if (!file || typeof file.arrayBuffer !== "function" || !file.size || file.size > MAX_UPLOAD_BYTES) return { error: "upload-failed" };
   const contentType = (file.type || "application/octet-stream").split(";")[0].trim().toLowerCase();
   const name = safeFileName(file.name);
@@ -975,13 +981,21 @@ async function storeUpload(store, slug, file, uploadedBy, flags) {
     createdAt: new Date().toISOString(),
     requiresClientSignature: Boolean(flags.requiresClientSignature),
     requiresAdminSignature: Boolean(flags.requiresAdminSignature),
-    section: uploadedBy === "admin" ? parseSection(flags.section) : CLIENT_UPLOADS,
+    section: crew ? crewSection(flags.section) : uploadedBy === "admin" ? parseSection(flags.section) : CLIENT_UPLOADS,
     signatures: [],
     signedKey: null
   };
   await putDocument(store, document);
-  await record(store, { actor: uploadedBy === "admin" ? "admin" : "client", action: "document.uploaded", clientSlug: slug, summary: uploadedBy === "admin" ? `Shared ${name} with the client in ${sectionName(document.section, "admin")}${document.requiresClientSignature ? ", to sign" : ""}` : `The client uploaded ${name}`, data: { documentId: id } });
+  const toSign = document.requiresClientSignature ? ", to sign" : "";
+  const summary = crew
+    ? (uploadedBy === "admin" ? `Shared ${name} with ${flags.crewName} in ${CREW_SECTIONS.find(([key]) => key === document.section)[1]}${toSign}` : `${flags.crewName} uploaded ${name}`)
+    : (uploadedBy === "admin" ? `Shared ${name} with the client in ${sectionName(document.section, "admin")}${toSign}` : `The client uploaded ${name}`);
+  await record(store, { actor: uploadedBy === "admin" ? "admin" : crew ? "crew" : "client", action: "document.uploaded", clientSlug: crew ? null : slug, summary, data: { documentId: id, ...(crew ? { workerId: slug.slice(5) } : {}) } });
   return { document };
+}
+
+function crewSection(value) {
+  return CREW_SECTIONS.some(([key]) => key === value) ? value : "other";
 }
 
 async function applySignature(store, document, party, form, request) {
@@ -1012,7 +1026,8 @@ async function applySignature(store, document, party, form, request) {
 
   const updated = { ...document, signatures, signedKey, signedAt: signature.signedAt };
   await putDocument(store, updated);
-  await record(store, { actor: party === "admin" ? "admin" : "client", ip: signature.ip, action: "document.signed", clientSlug: document.clientSlug, summary: `${name} signed ${document.name}${party === "admin" ? " for My Home Builder" : ""}`, data: { documentId: document.id, party } });
+  const crew = document.clientSlug.startsWith("crew:");
+  await record(store, { actor: party === "admin" ? "admin" : crew ? "crew" : "client", ip: signature.ip, action: "document.signed", clientSlug: crew ? null : document.clientSlug, summary: `${name} signed ${document.name}${party === "admin" ? " for My Home Builder" : ""}`, data: { documentId: document.id, party } });
   return { document: updated };
 }
 
@@ -1443,6 +1458,23 @@ async function handleAdminTemplates(context, store, id, action) {
   return redirectResponse(`${listPath}?notice=template-saved`);
 }
 
+// What crew.js uses from here: responses and the document functions.
+const KIT = {
+  htmlResponse,
+  scriptedHtmlResponse,
+  redirectResponse,
+  fileResponse,
+  methodNotAllowedResponse,
+  notFound: () => notFoundResponse(null, false),
+  storeUpload,
+  applySignature,
+  documentDownload,
+  decodeSignatureImage,
+  decodeSegment,
+  requestIp,
+  safeFileName
+};
+
 // context: { request, env }. env carries the portal settings under the names below; index.js
 // maps them from the MHB_* environment variables.
 export async function handlePortalRequest(context) {
@@ -1478,6 +1510,9 @@ export async function handlePortalRequest(context) {
     // Public quote and invoice links. The unguessable token in the path is the access key.
     const shareMatch = pathname.match(/^\/clients\/(invoice|pay|quote)\/([^/]+)(?:\/(return|accept))?$/u);
     if (shareMatch) return handleShare(context, store, shareMatch, origin);
+
+    // The crew portal: employees and subcontractors, with their own sign-in.
+    if (pathname === "/clients/crew" || pathname.startsWith("/clients/crew/")) return handleCrew({ ...context, kit: KIT }, store, pathname, url);
 
     const session = await readClientSession(context.request, sessionSecret, DEFAULT_CLIENT_SLUG);
     const admin = await hasAdminSession(context.request, sessionSecret);
@@ -1614,6 +1649,7 @@ export async function handlePortalRequest(context) {
       if (!store) return redirectResponse("/clients/admin?notice=invalid");
 
       if (pathname === "/clients/admin/books" || pathname.startsWith("/clients/admin/books/")) return handleBooks(context, store, pathname, url);
+      if (pathname === "/clients/admin/labor" || pathname.startsWith("/clients/admin/labor/")) return handleAdminLabor({ ...context, kit: KIT }, store, pathname, url);
 
       // Share a document into any client portal's section, and see what awaits a signature.
       if (pathname === "/clients/admin/documents") {
@@ -1668,7 +1704,7 @@ export async function handlePortalRequest(context) {
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=client-added`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -1694,6 +1730,19 @@ export async function handlePortalRequest(context) {
             await record(store, { actor: "admin", action: "client.emails-saved", clientSlug: slug, ip: requestIp(context.request), summary: `Saved the emails for ${target.name}: ${emails.addresses.join(", ") || "none"}` });
           }
           return redirectResponse(`${back}&notice=client-updated`);
+        }
+
+        // The job site's address, printed on subcontractors' lien waivers for this job.
+        if (area === "site" && !id && !action) {
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+          const siteAddress = String(form?.get("siteAddress") || "").trim().replaceAll(/\s+/gu, " ");
+          if (!form || siteAddress.length > 200) return redirectResponse(`${back}&notice=invalid`);
+          if (siteAddress !== (target.siteAddress || "")) {
+            await putClient(store, { ...target, siteAddress });
+            await record(store, { actor: "admin", action: "client.site-saved", clientSlug: slug, ip: requestIp(context.request), summary: `Saved the job site address for ${target.name}: ${siteAddress || "none"}` });
+          }
+          return redirectResponse(`${back}&notice=site-saved`);
         }
 
         if (area === "documents" && !id && !action && method === "POST") {
