@@ -13,6 +13,17 @@
 //            payment date. A deleted invoice's hand-recorded payment goes with it; its Stripe
 //            payment stays, as Unapplied payments, since Stripe still holds the money.
 //   fee      Dr Stripe fees, Cr Stripe balance
+//   refund:<Stripe refund id>
+//            Dr Refunds, Cr Stripe balance, on the refund date; one part per refund. A deleted
+//            invoice's refund comes out of Unapplied payments instead.
+//   dispute  Dr Funds held in disputes (what Stripe withdrew) and Dispute losses and fees (its
+//            fee), Cr Stripe balance, on the day the dispute opened
+//   dispute-close
+//            won: Dr Stripe balance, Cr Funds held in disputes (and Cr Dispute losses and fees for
+//            a returned fee); lost: Dr Dispute losses and fees, Cr Funds held in disputes
+//
+// A refund of money not on an invoice (a second payment, a deleted invoice's) posts
+// Dr Unapplied payments, Cr Stripe balance, once per refund.
 //
 // Entries carry a source, an external id and labels, so bank transactions can join the journal
 // later (the business account) and be labeled and categorized against new accounts.
@@ -21,12 +32,20 @@ import { money } from "./format.js";
 
 const RECEIVABLE = "1100";
 const STRIPE = "1200";
+const DISPUTED = "1250";
 const RECEIVED = "1300";
 const UNAPPLIED = "2100";
 const SALES = "4000";
+const REFUNDS = "4200";
 const STRIPE_FEES = "6100";
-const PARTS = ["issue", "payment", "fee"];
+const DISPUTE_LOSSES = "6200";
 const QUERY_TIMEOUT_MS = 5000;
+
+// A part's kind: every "refund:<id>" part is a refund.
+export const partKind = (part) => (String(part).startsWith("refund:") ? "refund" : part);
+const PART_ORDER = ["issue", "payment", "fee", "refund", "dispute", "dispute-close"];
+const PART_WORDS = { issue: "invoice", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome" };
+const disputeWon = (dispute) => ["won", "warning_closed"].includes(dispute?.status);
 
 function data(row) {
   if (!row) return null;
@@ -60,20 +79,58 @@ export function bookParts(item, { deleted = false } = {}) {
     if (stripe && Number.isInteger(payment.feeCents) && payment.feeCents > 0) {
       parts.fee = { date, lines: [[STRIPE_FEES, payment.feeCents, 0], [STRIPE, 0, payment.feeCents]] };
     }
+    if (stripe) {
+      for (const refund of payment.refunds || []) {
+        if (!(refund.amountCents > 0) || ["failed", "canceled"].includes(refund.status)) continue;
+        parts[`refund:${refund.id}`] = { date: calendarDate(refund.refundedAt), lines: [[deleted ? UNAPPLIED : REFUNDS, refund.amountCents, 0], [STRIPE, 0, refund.amountCents]] };
+      }
+      const dispute = payment.dispute;
+      if (dispute?.id && dispute.amountCents > 0 && dispute.openedAt) {
+        const fee = dispute.feeCents > 0 ? dispute.feeCents : 0;
+        parts.dispute = { date: calendarDate(dispute.openedAt), lines: [[DISPUTED, dispute.amountCents, 0], ...(fee ? [[DISPUTE_LOSSES, fee, 0]] : []), [STRIPE, 0, dispute.amountCents + fee]] };
+        if (dispute.closedAt) {
+          const returned = dispute.feeReturnedCents > 0 ? dispute.feeReturnedCents : 0;
+          parts["dispute-close"] = {
+            date: calendarDate(dispute.closedAt),
+            lines: disputeWon(dispute)
+              ? [[STRIPE, dispute.amountCents + returned, 0], [DISPUTED, 0, dispute.amountCents], ...(returned ? [[DISPUTE_LOSSES, 0, returned]] : [])]
+              : [[DISPUTE_LOSSES, dispute.amountCents, 0], [DISPUTED, 0, dispute.amountCents]]
+          };
+        }
+      }
+    }
   }
   return parts;
 }
 
-// For an invoice deleted without its last state at hand: what its held parts become.
+// For an invoice deleted without its last state at hand: what its held parts become. Its sale
+// goes, a Stripe payment stays as Unapplied payments (and its refunds come out of them), and
+// Stripe's fee and any dispute stay as they were.
 function deletedParts(held) {
   const parts = {};
-  const payment = held.payment?.[0];
-  if (payment && payment.lines.some(([account, debit]) => account === STRIPE && debit > 0)) {
-    const amount = payment.lines.find(([account]) => account === STRIPE)[1];
-    parts.payment = { date: payment.date, lines: [[STRIPE, amount, 0], [UNAPPLIED, 0, amount]] };
+  for (const [part, entries] of Object.entries(held)) {
+    const entry = entries[0];
+    if (!entry || part === "issue") continue;
+    if (part === "payment") {
+      const stripe = entry.lines.find(([account, debit]) => account === STRIPE && debit > 0);
+      if (stripe) parts.payment = { date: entry.date, lines: [[STRIPE, stripe[1], 0], [UNAPPLIED, 0, stripe[1]]] };
+      continue;
+    }
+    parts[part] = { date: entry.date, lines: partKind(part) === "refund" ? entry.lines.map(([account, debit, credit]) => [account === REFUNDS ? UNAPPLIED : account, debit, credit]) : entry.lines };
   }
-  if (held.fee?.[0]) parts.fee = { date: held.fee[0].date, lines: held.fee[0].lines };
   return parts;
+}
+
+// The parts whose journal entries do not match what they should be, in posting order.
+function offParts(held, wanted) {
+  const rank = (part) => PART_ORDER.indexOf(partKind(part));
+  return [...new Set([...Object.keys(held), ...Object.keys(wanted)])]
+    .filter((part) => {
+      const have = held[part] || [];
+      const want = wanted[part] || null;
+      return !(have.length === (want ? 1 : 0) && (!want || signature(have[0]) === signature(want)));
+    })
+    .sort((left, right) => rank(left) - rank(right) || left.localeCompare(right));
 }
 
 function signature(part) {
@@ -83,12 +140,16 @@ function signature(part) {
 
 function memoFor(item, part, { deleted = false, reversal = false, reason = "" } = {}) {
   const label = item?.kind ? billingLabel(item) : item?.number ? `Invoice ${item.number}` : "An invoice";
+  const kind = partKind(part);
   if (reversal) {
     const why = { voided: "voided", deleted: "deleted", "payment-removed": "marked unpaid", opening: "opening" }[reason] || "changed";
-    return `${label} · ${part === "issue" ? "invoice" : part === "fee" ? "Stripe fee" : "payment"} ${why}`;
+    return `${label} · ${PART_WORDS[kind] || "entry"} ${why}`;
   }
-  if (part === "issue") return `${label} · ${item.title || "invoiced"}`;
-  if (part === "fee") return `${label} · Stripe fee`;
+  if (kind === "issue") return `${label} · ${item.title || "invoiced"}`;
+  if (kind === "fee") return `${label} · Stripe fee`;
+  if (kind === "refund") return `${label} · refunded through Stripe`;
+  if (kind === "dispute") return `${label} · dispute opened; Stripe is holding the payment`;
+  if (kind === "dispute-close") return `${label} · dispute ${disputeWon(item?.payment?.dispute) ? "won" : "lost"}`;
   const payment = item?.payment || {};
   if (deleted) return `${label} · Stripe payment kept after the invoice was deleted`;
   return payment.source === "stripe"
@@ -155,10 +216,9 @@ async function syncInvoiceBooks(trx, { item = null, itemId = item?.id, itemNumbe
   const wanted = item ? bookParts(item, { deleted }) : deletedParts(held);
   const subject = item || { id: itemId, number: itemNumber, clientSlug };
   let posted = 0;
-  for (const part of PARTS) {
+  for (const part of offParts(held, wanted)) {
     const have = held[part] || [];
     const want = wanted[part] || null;
-    if (have.length === (want ? 1 : 0) && (!want || signature(have[0]) === signature(want))) continue;
     for (const entry of have) {
       await post(trx, {
         kind: "reversal", part, reverses: entry.id, date: entry.date, item: subject, clientSlug: subject.clientSlug,
@@ -167,7 +227,7 @@ async function syncInvoiceBooks(trx, { item = null, itemId = item?.id, itemNumbe
       posted += 1;
     }
     if (want) {
-      await post(trx, { kind: part, part, date: want.date, item: subject, memo: memoFor(subject, part, { deleted }), lines: want.lines, source, activityId });
+      await post(trx, { kind: partKind(part), part, date: want.date, item: subject, memo: memoFor(subject, part, { deleted }), lines: want.lines, source, activityId });
       posted += 1;
     }
   }
@@ -242,7 +302,8 @@ async function ensureBooksOpened(store) {
 // it follows: an error is logged, and the Books page's balance check shows anything missed.
 //   event: { action, summary, actor (admin|client|stripe|system), ip, item, clientSlug,
 //            amountCents, data, deleted, reason, unapplied: { externalId, amountCents, date,
-//            item, clientSlug, memo }, moved: true }
+//            item, clientSlug, memo }, unappliedRefund: { the same, for a refund of money
+//            not on an invoice }, moved: true }
 export async function record(store, event) {
   if (!store) return;
   try {
@@ -250,6 +311,7 @@ export async function record(store, event) {
     await store.db.transaction(async (trx) => {
       // A repeated Stripe event for money not tied to an invoice was recorded the first time.
       if (event.unapplied && (await trx("mhb_journal_entries").where({ kind: "unapplied", external_id: event.unapplied.externalId }).first().timeout(QUERY_TIMEOUT_MS))) return;
+      if (event.unappliedRefund && (await trx("mhb_journal_entries").where({ kind: "unapplied-refund", external_id: event.unappliedRefund.externalId }).first().timeout(QUERY_TIMEOUT_MS))) return;
       const activityId = await insertActivity(trx, event);
       if (event.moved && event.item) {
         await trx("mhb_journal_entries").where({ item_id: event.item.id }).update({ client_slug: event.item.clientSlug }).timeout(QUERY_TIMEOUT_MS);
@@ -263,6 +325,13 @@ export async function record(store, event) {
         await post(trx, {
           kind: "unapplied", date: date || todayInMichigan(), item: item || null, clientSlug, memo, externalId,
           lines: [[STRIPE, amountCents, 0], [UNAPPLIED, 0, amountCents]], source: "stripe", activityId
+        });
+      }
+      if (event.unappliedRefund) {
+        const { externalId, amountCents, date, item, clientSlug, memo } = event.unappliedRefund;
+        await post(trx, {
+          kind: "unapplied-refund", date: date || todayInMichigan(), item: item || null, clientSlug, memo, externalId,
+          lines: [[UNAPPLIED, amountCents, 0], [STRIPE, 0, amountCents]], source: "stripe", activityId
         });
       }
     });
@@ -286,12 +355,8 @@ export async function checkBooks(store) {
   for (const item of items) {
     known.add(item.id);
     const held = await heldParts(store.db, item.id);
-    const wanted = bookParts(item);
-    const off = PARTS.filter((part) => {
-      const have = held[part] || [];
-      return !(have.length === (wanted[part] ? 1 : 0) && (!wanted[part] || signature(have[0]) === signature(wanted[part])));
-    });
-    if (off.length) problems.push({ itemId: item.id, clientSlug: item.clientSlug, label: billingLabel(item), parts: off });
+    const off = offParts(held, bookParts(item));
+    if (off.length) problems.push({ itemId: item.id, clientSlug: item.clientSlug, label: billingLabel(item), parts: [...new Set(off.map(partKind))] });
   }
   const orphans = await store.db.raw(
     `SELECT item_id, max(item_number) AS item_number, max(client_slug) AS client_slug
@@ -301,12 +366,8 @@ export async function checkBooks(store) {
   for (const row of orphans.rows) {
     if (known.has(row.item_id)) continue;
     const held = await heldParts(store.db, row.item_id);
-    const wanted = deletedParts(held);
-    const off = PARTS.filter((part) => {
-      const have = held[part] || [];
-      return !(have.length === (wanted[part] ? 1 : 0) && (!wanted[part] || signature(have[0]) === signature(wanted[part])));
-    });
-    if (off.length) problems.push({ itemId: row.item_id, number: row.item_number, clientSlug: row.client_slug, label: `Invoice ${row.item_number} (deleted)`, parts: off, deleted: true });
+    const off = offParts(held, deletedParts(held));
+    if (off.length) problems.push({ itemId: row.item_id, number: row.item_number, clientSlug: row.client_slug, label: `Invoice ${row.item_number} (deleted)`, parts: [...new Set(off.map(partKind))], deleted: true });
   }
   return { balanced: debits === credits && problems.length === 0, debits, credits, problems };
 }
@@ -358,7 +419,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
   const net = (lines, accounts) => lines.filter((line) => accounts.includes(line.account)).reduce((sum, line) => sum + line.debit - line.credit, 0);
   const balances = new Map(accountRows.map((account) => [account.code, { debit: 0, credit: 0 }]));
   const opening = { receivable: 0 };
-  const period = { invoiced: 0, received: 0, fees: 0 };
+  const period = { invoiced: 0, received: 0, fees: 0, refunds: 0 };
   const entries = [];
   for (const row of entryRows) {
     const lines = linesByEntry.get(Number(row.id));
@@ -369,10 +430,15 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
       balance.credit += line.credit;
       balances.set(line.account, balance);
     }
+    // Received counts payments (and money not on an invoice); cash is every entry's effect on the
+    // Stripe balance and payments received outside Stripe.
+    const kind = row.part ? partKind(row.part) : row.kind;
     const change = {
       invoiced: -net(lines, [SALES]),
-      received: row.part === "fee" ? 0 : net(lines, [STRIPE, RECEIVED]),
+      received: kind === "payment" || row.kind === "unapplied" ? net(lines, [STRIPE, RECEIVED]) : 0,
       fees: net(lines, [STRIPE_FEES]),
+      refunds: net(lines, [REFUNDS]) + (row.kind === "unapplied-refund" ? net(lines, [UNAPPLIED]) : 0),
+      cash: net(lines, [STRIPE, RECEIVED]),
       receivable: net(lines, [RECEIVABLE])
     };
     if (from && row.entry_date < from) {
@@ -382,6 +448,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
     period.invoiced += change.invoiced;
     period.received += change.received;
     period.fees += change.fees;
+    period.refunds += change.refunds;
     const item = row.item_id ? items.get(row.item_id) : null;
     entries.push({
       id: Number(row.id),
@@ -421,6 +488,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
       ...period,
       outstanding: balanceOf(RECEIVABLE),
       unapplied: -balanceOf(UNAPPLIED),
+      disputed: balanceOf(DISPUTED),
       stripeBalance: balanceOf(STRIPE),
       receivedOutsideStripe: balanceOf(RECEIVED)
     },

@@ -345,6 +345,23 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
 
 // ---------- Quote and invoice document ----------
 
+// Refunds Stripe made or is making on an invoice's payment (not failed or canceled ones).
+function liveRefunds(item) {
+  return (item.payment?.refunds || []).filter((refund) => refund.amountCents > 0 && !["failed", "canceled"].includes(refund.status));
+}
+
+// What happened to a Stripe payment after it was made, as Stripe reported it.
+function stripeAftermath(item) {
+  const lines = liveRefunds(item).map((refund) => `Refunded ${money(refund.amountCents, item.currency)} on ${formatDate(refund.refundedAt)}${refund.status === "pending" ? " (pending)" : ""}.`);
+  const dispute = item.payment?.dispute;
+  if (dispute?.id) {
+    lines.push(dispute.closedAt
+      ? `Disputed; the dispute was ${["won", "warning_closed"].includes(dispute.status) ? "won" : "lost"} on ${formatDate(dispute.closedAt)}.`
+      : `Disputed on ${formatDate(dispute.openedAt)} (${dispute.status.replaceAll("_", " ")}). Respond in the Stripe dashboard.`);
+  }
+  return lines.map((line) => `<p class="admin-meta">${escapeHtml(line)}</p>`).join("\n          ");
+}
+
 function paymentSummary(item) {
   const payment = item.payment || {};
   return [formatDate(item.paidAt), payment.label].filter(Boolean).join(" · ");
@@ -365,6 +382,9 @@ export function billingDocument({ item, client }) {
     const paidCents = item.payment?.amountCents ?? item.amountCents;
     totals.push(`<tr><th scope="row" colspan="3">Total</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
     totals.push(`<tr><th scope="row" colspan="3">Paid ${escapeHtml(paymentSummary(item))}</th><td>${money(-paidCents, item.currency)}</td></tr>`);
+    for (const refund of liveRefunds(item)) {
+      totals.push(`<tr><th scope="row" colspan="3">Refunded ${escapeHtml(formatDate(refund.refundedAt))}</th><td>${money(refund.amountCents, item.currency)}</td></tr>`);
+    }
     totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Balance due</th><td>${money(Math.max(item.amountCents - paidCents, 0), item.currency)}</td></tr>`);
   } else if (invoice) {
     totals.push(`<tr class="billing-total"><th scope="row" colspan="3">${item.status === "void" ? "Total (void)" : "Amount due"}</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
@@ -993,7 +1013,8 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
       : `<section class="admin-card">
           <h2>Payment</h2>
           <p class="admin-meta">Paid online through Stripe: ${escapeHtml(summary)}.</p>
-          <p class="portal-security-note">Stripe payments keep the details Stripe recorded.</p>
+          ${stripeAftermath(item)}
+          <p class="portal-security-note">Stripe payments keep the details Stripe recorded. Refunds are made in Stripe.</p>
         </section>`);
   }
 
@@ -1108,7 +1129,7 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
     : `<section class="books-check books-check-off" aria-labelledby="books-check-heading">
           <h2 id="books-check-heading">The books do not balance.</h2>
           ${check.debits !== check.credits ? `<p>Debits are ${money(check.debits)} and credits are ${money(check.credits)}.</p>` : ""}
-          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", payment: "payment", fee: "Stripe fee" })[part]).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
+          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome" })[part] || part).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
           <form action="/clients/admin/books/correct" method="post">
             <button class="button button-solid" type="submit">Post corrections</button>
           </form>
@@ -1120,13 +1141,15 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
     ["Invoiced", summary.invoiced, `in ${range}`],
     ["Received", summary.received, `in ${range}`],
     ["Stripe fees", summary.fees, `in ${range}`],
-    ["Outstanding", summary.outstanding, report.to ? `owed on ${dateText(report.to)}` : "owed now"],
-    ["Unapplied payments", summary.unapplied, "received, not tied to an invoice"]
+    ["Refunds", summary.refunds, `in ${range}`],
+    ["Outstanding", summary.outstanding, report.to ? `owed on ${dateText(report.to)}` : "owed now", true],
+    ["Unapplied payments", summary.unapplied, "received, not tied to an invoice"],
+    ...(summary.disputed ? [["Held in disputes", summary.disputed, "until Stripe decides"]] : [])
   ];
 
   const ledgerRows = report.entries.slice().reverse().map((entry) => {
     const text = entry.itemExists ? [entry.itemLabel, ...entry.memo.split(" · ").slice(1)].join(" · ") : entry.memo;
-    const received = entry.received - entry.fees;
+    const received = entry.cash;
     return `<tr>
           <td>${dateText(entry.date)}</td>
           <td>${itemLink(entry, text)}<small>${escapeHtml(names.get(entry.clientSlug) || entry.clientSlug || "")}${entry.source === "opening" ? " · opening entry" : ""}${entry.kind === "reversal" ? " · reversal" : ""}</small></td>
@@ -1194,7 +1217,7 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
       ${balance}
 
       <dl class="billing-totals books-summary">
-        ${figures.map(([label, cents, note], index) => `<div${index === 3 ? ' class="billing-totals-due"' : ""}><dt>${label}</dt><dd>${money(cents)}</dd><dd class="books-summary-note">${escapeHtml(note)}</dd></div>`).join("\n        ")}
+        ${figures.map(([label, cents, note, due]) => `<div${due ? ' class="billing-totals-due"' : ""}><dt>${label}</dt><dd>${money(cents)}</dd><dd class="books-summary-note">${escapeHtml(note)}</dd></div>`).join("\n        ")}
       </dl>
 
       <section class="books-section" aria-labelledby="books-ledger-heading">

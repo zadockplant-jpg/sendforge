@@ -62,8 +62,12 @@ import {
 import {
   createCheckoutSession,
   expireCheckoutSession,
+  listRefunds,
+  retrieveCharge,
   retrieveCheckoutSession,
+  retrieveDispute,
   retrievePaymentDetails,
+  retrievePaymentIntent,
   stripeConfigured,
   verifyWebhookSignature
 } from "./stripe.js";
@@ -78,6 +82,7 @@ import {
   deletedInvoicePaymentMessage,
   duplicatePaymentMessage,
   emailConfigured,
+  mismatchedPaymentMessage,
   isValidEmail,
   parseEmailList,
   paymentFailedMessage,
@@ -505,6 +510,13 @@ function webhookConfigured(env) {
   return typeof env.STRIPE_WEBHOOK_SECRET === "string" && env.STRIPE_WEBHOOK_SECRET.length > 0;
 }
 
+// A Checkout pays an invoice only for the total it was opened with. Stripe's copy of the session
+// says what it took.
+function paymentMatches(invoice, session) {
+  return (!Number.isInteger(session.amount_total) || session.amount_total === invoice.amountCents)
+    && (!session.currency || session.currency === (invoice.currency || "usd"));
+}
+
 // Records a paid Checkout Session and, when notify is set, emails the client's receipt and the
 // builder's notice. A failed email throws EmailDeliveryError so the webhook answers 500 and
 // Stripe retries; the retry skips anything already recorded or sent.
@@ -528,6 +540,22 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
     return invoice;
   }
 
+  // An amount the invoice does not total (it changed after Checkout opened) is kept as unapplied
+  // and the builder is told, once per Checkout; the invoice stays open.
+  if (invoice.status !== "paid" && !paymentMatches(invoice, session)) {
+    if (notify) {
+      const amountCents = Number.isInteger(session.amount_total) ? session.amount_total : 0;
+      const alert = await sendOnce(env, store, sentKey(invoice, `mismatch:${session.id}`), { to: adminEmail(env), ...mismatchedPaymentMessage({ item: invoice, client, session, adminUrl }), category: "builder-notice" });
+      if (!alert.ok) throw new EmailDeliveryError("mismatched payment alert");
+      await record(store, {
+        actor: "stripe", action: "stripe.mismatch", item: invoice, amountCents, data: { session: session.id },
+        summary: `Stripe took ${money(amountCents, session.currency || invoice.currency)} for ${billingLabel(invoice)}, which totals ${money(invoice.amountCents, invoice.currency)}; not applied`,
+        unapplied: { externalId: session.id, amountCents, item: invoice, memo: `${billingLabel(invoice)} · payment did not match its total (refund or apply it)` }
+      });
+    }
+    return invoice;
+  }
+
   let paid = invoice;
   if (invoice.status !== "paid") {
     const paymentIntentId = typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id;
@@ -535,7 +563,7 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
     paid = {
       ...invoice,
       status: "paid",
-      paidAt: new Date().toISOString(),
+      paidAt: details?.chargedAt || new Date().toISOString(),
       stripeSessionId: session.id,
       payment: {
         source: "stripe",
@@ -545,7 +573,8 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
         ...(Number.isInteger(details?.feeCents) ? { feeCents: details.feeCents } : {}),
         email: session.customer_details?.email || session.customer_email || "",
         amountCents: Number.isInteger(session.amount_total) ? session.amount_total : invoice.amountCents,
-        paymentIntentId: paymentIntentId || ""
+        paymentIntentId: paymentIntentId || "",
+        chargeId: details?.chargeId || ""
       }
     };
     await putBilling(store, paid);
@@ -570,7 +599,7 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
 
 // ACH and other bank payments complete Checkout before the money arrives.
 async function markProcessing(store, invoice, session) {
-  if (invoice.status !== "open") return invoice;
+  if (invoice.status !== "open" || !paymentMatches(invoice, session)) return invoice;
   const updated = { ...invoice, status: "processing", processingAt: new Date().toISOString(), stripeSessionId: session.id };
   await putBilling(store, updated);
   await record(store, { actor: "stripe", action: "stripe.processing", item: updated, amountCents: Number.isInteger(session.amount_total) ? session.amount_total : invoice.amountCents, summary: `Bank payment started for ${billingLabel(invoice)}`, data: { session: session.id } });
@@ -625,8 +654,8 @@ async function confirmReturn(env, store, invoice, sessionId, origin) {
   if (!belongs) return "payment-pending";
   try {
     if (checkout.payment_status === "paid") {
-      await settleStripePayment(env, store, invoice, checkout, origin, { notify: !webhookConfigured(env) });
-      return "paid";
+      const settled = await settleStripePayment(env, store, invoice, checkout, origin, { notify: !webhookConfigured(env) });
+      return settled.status === "paid" ? "paid" : "payment-pending";
     }
     if (checkout.status === "complete") await markProcessing(store, invoice, checkout);
   } catch (error) {
@@ -716,6 +745,114 @@ async function handleShare(context, store, match, origin) {
   return notFoundResponse(null, false);
 }
 
+// A dispute as the books need it: what Stripe withdrew, its fee, any fee returned, and when it
+// opened and closed. `at` is the event's time, for when Stripe gives none.
+function disputeFields(dispute, before, at) {
+  const moves = Array.isArray(dispute.balance_transactions) ? dispute.balance_transactions : [];
+  const sum = (pick) => moves.reduce((total, move) => total + Math.max(Number(pick(move)) || 0, 0), 0);
+  const iso = (seconds) => (Number.isInteger(seconds) ? new Date(seconds * 1000).toISOString() : null);
+  const reinstated = moves.filter((move) => Number(move.amount) > 0 && Number.isInteger(move.created)).map((move) => move.created).sort((left, right) => left - right).pop();
+  const closed = ["won", "lost", "warning_closed"].includes(dispute.status);
+  return {
+    id: String(dispute.id || ""),
+    status: String(dispute.status || ""),
+    amountCents: sum((move) => -move.amount),
+    feeCents: sum((move) => move.fee),
+    feeReturnedCents: sum((move) => -move.fee),
+    openedAt: before?.openedAt || iso(dispute.created) || at,
+    closedAt: closed ? before?.closedAt || iso(reinstated) || at : null
+  };
+}
+
+function disputeSummary(label, dispute, before, currency) {
+  const amount = money(dispute.amountCents, currency);
+  if (dispute.status === "won") return `Won the dispute on ${label}; Stripe returned ${amount}`;
+  if (dispute.status === "lost") return `Lost the dispute on ${label} (${amount})`;
+  if (before?.status && before.status !== dispute.status) return `The dispute on ${label} is now ${dispute.status.replaceAll("_", " ")}`;
+  if (before?.status) return `Stripe updated the dispute on ${label}: holding ${amount}`;
+  return `A dispute opened on ${label}${dispute.amountCents ? `; Stripe is holding ${amount}` : ""}${dispute.feeCents ? ` and charged a ${money(dispute.feeCents, currency)} fee` : ""}`;
+}
+
+// Refunds and disputes on a portal payment. Stripe's own copies of the charge, its refunds and the
+// dispute are read, so a late or repeated event changes nothing. Each refund is kept on the
+// invoice's payment with its day, and the dispute with what Stripe withdrew, its fee and how it
+// ended; the books follow. A refund of money not applied to an invoice (a second payment, a
+// deleted invoice's) comes out of Unapplied payments. Returns whether it was a portal payment.
+async function settleChargeEvent(env, store, event, chargeId) {
+  const charge = await retrieveCharge(env, chargeId);
+  const intentId = typeof charge?.payment_intent === "string" ? charge.payment_intent : charge?.payment_intent?.id;
+  if (!intentId) return false;
+  const invoiceId = charge.metadata?.invoiceId || (await retrievePaymentIntent(env, intentId))?.metadata?.invoiceId;
+  if (typeof invoiceId !== "string" || !invoiceId) return false;
+  const disputeEvent = String(event.type).startsWith("charge.dispute.");
+  const refunds = disputeEvent ? [] : await listRefunds(env, chargeId);
+  const dispute = disputeEvent ? await retrieveDispute(env, event.data.object.id) : null;
+  const at = Number.isInteger(event.created) ? new Date(event.created * 1000).toISOString() : new Date().toISOString();
+  const invoice = await getBillingById(store, invoiceId);
+  const label = invoice ? billingLabel(invoice) : charge.metadata?.invoiceNumber ? `Invoice ${charge.metadata.invoiceNumber}` : "an invoice";
+  const currency = charge.currency || invoice?.currency || "usd";
+  const live = (refund) => refund.amount > 0 && !["failed", "canceled"].includes(refund.status);
+
+  if (!invoice || invoice.kind !== "invoice" || invoice.status !== "paid" || invoice.payment?.source !== "stripe" || invoice.payment.paymentIntentId !== intentId) {
+    for (const refund of refunds.filter(live)) {
+      await record(store, {
+        actor: "stripe", action: "stripe.refunded", item: invoice || null, clientSlug: invoice?.clientSlug ?? charge.metadata?.clientSlug ?? null, amountCents: refund.amount, data: { refund: refund.id, charge: chargeId },
+        summary: `Refunded ${money(refund.amount, currency)} of a payment for ${label} that was not applied to it`,
+        unappliedRefund: {
+          externalId: refund.id, amountCents: refund.amount, item: invoice || null, clientSlug: invoice?.clientSlug ?? null,
+          date: todayInMichigan(Number.isInteger(refund.created) ? new Date(refund.created * 1000) : new Date()), memo: `${label} · refund of a payment not applied to it`
+        }
+      });
+    }
+    if (dispute && ["charge.dispute.created", "charge.dispute.closed"].includes(event.type)) {
+      await record(store, { actor: "stripe", action: "stripe.dispute", item: invoice || null, clientSlug: invoice?.clientSlug ?? null, data: { dispute: dispute.id, status: dispute.status },
+        summary: `The dispute on a payment for ${label} that was not applied to it is ${String(dispute.status || "").replaceAll("_", " ")}; see the Stripe dashboard` });
+    }
+    return true;
+  }
+
+  const payment = { ...invoice.payment };
+  const events = [];
+  if (!disputeEvent) {
+    const known = new Map((payment.refunds || []).map((refund) => [refund.id, refund]));
+    const listed = [];
+    for (const refund of refunds) {
+      if (typeof refund.id !== "string" || !Number.isInteger(refund.amount)) continue;
+      const status = String(refund.status || "succeeded").slice(0, 25);
+      const before = known.get(refund.id);
+      known.delete(refund.id);
+      listed.push({ id: refund.id, amountCents: refund.amount, status, refundedAt: before?.refundedAt || (Number.isInteger(refund.created) ? new Date(refund.created * 1000).toISOString() : at) });
+      if (!before && live(refund)) events.push({ action: "stripe.refunded", amountCents: refund.amount, data: { refund: refund.id }, summary: `Refunded ${money(refund.amount, currency)} of ${label} through Stripe` });
+      else if (before && before.status !== status && ["failed", "canceled"].includes(status)) events.push({ action: "stripe.refund-failed", amountCents: refund.amount, data: { refund: refund.id }, summary: `A refund of ${money(refund.amount, currency)} on ${label} ${status === "canceled" ? "was canceled" : "failed"}` });
+    }
+    payment.refunds = [...listed, ...known.values()];
+    payment.refundedCents = Number.isInteger(charge.amount_refunded) ? charge.amount_refunded : payment.refunds.filter((refund) => refund.amountCents > 0 && !["failed", "canceled"].includes(refund.status)).reduce((sum, refund) => sum + refund.amountCents, 0);
+  }
+  if (dispute) {
+    const fields = disputeFields(dispute, payment.dispute, at);
+    if (JSON.stringify(fields) !== JSON.stringify(payment.dispute || null)) {
+      events.push({ action: "stripe.dispute", amountCents: fields.amountCents, data: { dispute: fields.id, status: fields.status }, summary: disputeSummary(label, fields, payment.dispute, currency) });
+    }
+    payment.dispute = fields;
+  }
+  if (JSON.stringify(payment) === JSON.stringify(invoice.payment)) return true;
+  const updated = { ...invoice, payment };
+  await putBilling(store, updated);
+  if (!events.length) events.push({ action: "stripe.updated", summary: `Stripe updated the payment for ${label}` });
+  for (const entry of events) await record(store, { actor: "stripe", item: updated, ...entry });
+  return true;
+}
+
+// Each Stripe event the portal handled is kept by id, for the record.
+async function rememberStripeEvent(store, event) {
+  if (typeof event.id !== "string" || !event.id) return;
+  try {
+    await store.db("mhb_stripe_events").insert({ id: event.id.slice(0, 255), type: String(event.type || "").slice(0, 80) }).onConflict("id").ignore();
+  } catch (error) {
+    console.error(JSON.stringify({ message: "stripe event not kept", error: error instanceof Error ? error.message : "Unknown error" }));
+  }
+}
+
 async function handleWebhook(context, store, origin) {
   const secret = context.env.STRIPE_WEBHOOK_SECRET;
   if (!secret || !store) return new Response("Webhook not configured", { status: 503 });
@@ -733,10 +870,28 @@ async function handleWebhook(context, store, origin) {
     return new Response("Invalid payload", { status: 400 });
   }
 
-  const session = event.data?.object || {};
-  const invoiceId = session.metadata?.invoiceId;
+  const received = () => new Response(JSON.stringify({ received: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const unavailable = (error, what) => {
+    console.error(JSON.stringify({ message: `stripe ${what} unavailable; Stripe will retry the event`, event: String(event.id || ""), error: error instanceof Error ? error.message : "Unknown error" }));
+    return new Response("Stripe unavailable; retry later", { status: 500 });
+  };
+  const object = event.data?.object || {};
+  const invoiceId = object.metadata?.invoiceId;
   const handled = ["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed"];
+  let relevant = false;
   if (handled.includes(event.type) && typeof invoiceId === "string" && invoiceId) {
+    // Stripe's own copy of the session decides, not the event's: events can arrive late, twice or
+    // out of order. Without a secret key (a webhook alone), the event's copy is all there is.
+    let session = object;
+    if (stripeConfigured(context.env)) {
+      try {
+        session = await retrieveCheckoutSession(context.env, object.id);
+      } catch (error) {
+        return unavailable(error, "session");
+      }
+      if (session?.metadata?.invoiceId !== invoiceId) return received();
+    }
+    relevant = true;
     // By id alone: the session's clientSlug is the project the invoice was in when Checkout
     // started, and the invoice may have been sent to another project since.
     const invoice = await getBillingById(store, invoiceId);
@@ -764,7 +919,7 @@ async function handleWebhook(context, store, origin) {
           await recordPaymentFailure(context.env, store, invoice, session, origin);
         } else if (session.payment_status === "paid") {
           await settleStripePayment(context.env, store, invoice, session, origin, { notify: true });
-        } else if (event.type === "checkout.session.completed" && session.payment_status === "unpaid") {
+        } else if (event.type === "checkout.session.completed" && session.status === "complete" && session.payment_status === "unpaid") {
           await markProcessing(store, invoice, session);
         }
       } catch (error) {
@@ -774,7 +929,19 @@ async function handleWebhook(context, store, origin) {
       }
     }
   }
-  return new Response(JSON.stringify({ received: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const refundEvent = event.type === "charge.refunded" || event.type === "charge.refund.updated";
+  if ((refundEvent || String(event.type).startsWith("charge.dispute.")) && stripeConfigured(context.env)) {
+    const chargeId = event.type === "charge.refunded" ? object.id : typeof object.charge === "string" ? object.charge : object.charge?.id;
+    if (typeof chargeId === "string" && chargeId.startsWith("ch_")) {
+      try {
+        relevant = await settleChargeEvent(context.env, store, event, chargeId);
+      } catch (error) {
+        return unavailable(error, "charge");
+      }
+    }
+  }
+  if (relevant) await rememberStripeEvent(store, event);
+  return received();
 }
 
 // ---------- Documents ----------

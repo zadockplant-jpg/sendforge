@@ -162,7 +162,8 @@ entry): issuing posts the sale, tax and any referral discount or credit; a
 payment moves it to the Stripe balance or to Payments received outside Stripe,
 with Stripe's fee; refunds and disputes post on their own dates. Voiding,
 correcting or removing reverses only what changed. Money Stripe took that no
-invoice can take is kept in Unapplied payments, once per Checkout. The first
+invoice can take is kept in Unapplied payments, once per Checkout, and a refund
+of it comes out of Unapplied payments, once per refund. The first
 time the books are used they open from what the portal already holds: the
 JayJe rows in `admin_audit_log` become the start of the activity log and every
 invoice gets its opening entries.

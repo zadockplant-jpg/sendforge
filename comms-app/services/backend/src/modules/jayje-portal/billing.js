@@ -174,6 +174,25 @@ export function createPortalBilling({db,stripe,service,siteUrl,referrals=null,bo
   // Each Stripe event handled is kept by id, for the record.
   const remember=async event=>{ if(event.id) await db('jayje_stripe_events').insert({id:String(event.id).slice(0,255),type:String(event.type).slice(0,80)}).onConflict('id').ignore(); };
   const refundsOf=async charge=>stripe.refunds?.list?(await stripe.refunds.list({charge:charge.id,limit:100})).data||[]:charge.refunds?.data||[];
+  // A refund or dispute of money no invoice could take (kept as unapplied): its refunds come out of
+  // Unapplied payments, once each, and a dispute is logged for the admin to follow in Stripe.
+  async function notApplied(event,charge,attempt) {
+    const invoice=await db('jayje_documents').where({id:attempt.invoice_id}).first();
+    const ref=invoice?.reference||'an invoice';
+    const who={actor:'stripe',clientId:invoice?.client_id??null,documentId:invoice?.id??null,reference:invoice?.reference??null};
+    if(event.type.startsWith('charge.dispute.')) {
+      if(['charge.dispute.created','charge.dispute.closed'].includes(event.type)) await books?.record(null,{...who,action:'stripe.dispute',data:{dispute:event.data.object.id},
+        summary:`The dispute on a payment for ${ref} that was not applied to it is ${String(event.data.object.status||'open').replaceAll('_',' ')}; see the Stripe dashboard`});
+      return;
+    }
+    for(const refund of await refundsOf(charge)) {
+      if(!(refund.amount>0) || ['failed','canceled'].includes(refund.status)) continue;
+      await books?.record(null,{...who,action:'stripe.refunded',amountCents:refund.amount,data:{refund:refund.id},
+        summary:`Refunded ${money(refund.amount)} of a payment for ${ref} that was not applied to it`,
+        unappliedRefund:{externalId:refund.id,amountCents:refund.amount,date:dayOf(fromSeconds(refund.created)||new Date()),doc:invoice||null,clientId:invoice?.client_id??null,
+          memo:`${invoice?.reference||'An invoice'} · refund of a payment not applied to it`}});
+    }
+  }
   async function event(event) {
     const object=event.data.object;
     const at=fromSeconds(event.created)||new Date();
@@ -202,7 +221,12 @@ export function createPortalBilling({db,stripe,service,siteUrl,referrals=null,bo
         if(!intent.metadata?.jayje_attempt_id) return;
         const attempt=await db('jayje_checkout_attempts').where({id:intent.metadata.jayje_attempt_id}).first();
         if(!attempt?.stripe_session_id) throw fail(409,'payment_not_recorded_yet');
-        payment=await settle(await stripe.checkout.sessions.retrieve(attempt.stripe_session_id));
+        try { payment=await settle(await stripe.checkout.sessions.retrieve(attempt.stripe_session_id)); }
+        catch(error) {
+          if(!['duplicate_invoice_payment','payment_verification_failed'].includes(error?.publicCode)) throw error;
+          await notApplied(event,charge,attempt);
+          return remember(event);
+        }
         if(!payment) throw fail(409,'payment_not_recorded_yet');
       }
       // A charge's `disputed` flag can remain true after the dispute is won.

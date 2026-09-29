@@ -15,7 +15,8 @@
 //                  lost: Dr 6200 / Cr 1250                                              closed
 // Drafts, quotes and voided invoices post nothing. Money Stripe took that no invoice can take (a
 // second payment, or one that fails the checks) is posted to 2100 Unapplied payments, once per
-// Checkout. Entries carry a source, an external id and labels, so the business bank account can
+// Checkout, and a refund of such money comes out of it (Dr 2100 / Cr 1200), once per refund.
+// Entries carry a source, an external id and labels, so the business bank account can
 // join the journal later and be labeled and categorized against new accounts.
 //
 // Recording runs inside the caller's transaction, in a savepoint: when it works the action and its
@@ -180,16 +181,22 @@ export function createBooks({db}) {
   // or its own. Never fails the action it follows.
   //   event: { actor, userId, email, ip, action, summary, clientId, documentId, reference,
   //            amountCents, data, sync: [document ids], reason,
-  //            unapplied: { externalId, amountCents, date, clientId, doc, memo } }
+  //            unapplied: { externalId, amountCents, date, clientId, doc, memo },
+  //            unappliedRefund: { the same, for a refund of money no invoice took } }
   async function record(trx,event) {
     const work=async sp=>{
       // A repeated Stripe event for money no invoice can take was recorded the first time.
       if(event.unapplied && await sp('jayje_journal_entries').where({kind:'unapplied',external_id:event.unapplied.externalId}).first()) return;
+      if(event.unappliedRefund && await sp('jayje_journal_entries').where({kind:'unapplied-refund',external_id:event.unappliedRefund.externalId}).first()) return;
       const activityId=await insertActivity(sp,event);
       for(const id of event.sync||[]) await syncDocument(sp,id,{reason:event.reason,source:event.actor==='stripe'?'stripe':'portal',activityId});
       if(event.unapplied) {
         const {externalId,amountCents,date,clientId,doc,memo}=event.unapplied;
         await post(sp,{kind:'unapplied',date:date||dayOf(new Date()),doc:doc||null,clientId,memo,externalId,lines:[[A.stripe,amountCents,0],[A.unapplied,0,amountCents]],source:'stripe',activityId});
+      }
+      if(event.unappliedRefund) {
+        const {externalId,amountCents,date,clientId,doc,memo}=event.unappliedRefund;
+        await post(sp,{kind:'unapplied-refund',date:date||dayOf(new Date()),doc:doc||null,clientId,memo,externalId,lines:[[A.unapplied,amountCents,0],[A.stripe,0,amountCents]],source:'stripe',activityId});
       }
     };
     try { await (trx?trx.transaction(work):db.transaction(work)); }
@@ -313,7 +320,7 @@ export function createBooks({db}) {
       summary.invoiced+=change.billed;
       summary.received+=kind==='payment'||row.kind==='unapplied'?change.received:0;
       summary.fees+=net(lines,[A.fees]);
-      summary.refunds+=net(lines,[A.refunds]);
+      summary.refunds+=net(lines,[A.refunds])+(row.kind==='unapplied-refund'?net(lines,[A.unapplied]):0);
       summary.salesTax+=net(lines,[A.tax],-1);
       summary.discounts+=net(lines,[A.discounts]);
       owed+=change.owed;

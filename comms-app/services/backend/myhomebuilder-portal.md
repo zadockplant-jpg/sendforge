@@ -28,13 +28,25 @@ the same way jayje.com forwards its account pages. Everything else lives here:
   `/clients/muskegon-addition/`.
 - **Stripe** calls `https://comms-app-1wo0.onrender.com/v1/myhomebuilder/portal/stripe/webhook`
   directly, signed with its own secret. Subscribe it to these events, with API version
-  `2024-06-20`:
+  `2024-06-20` (`stripe.js` `WEBHOOK_EVENTS`):
   - `checkout.session.completed`
   - `checkout.session.async_payment_succeeded`
   - `checkout.session.async_payment_failed`
+  - `charge.refunded` and `charge.refund.updated`
+  - `charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`,
+    `charge.dispute.funds_withdrawn` and `charge.dispute.funds_reinstated`
 
-  The endpoint ignores Checkout sessions that are not portal invoices. SendForge's and
-  JayJe's webhooks are separate and unchanged.
+  In the myhomebuilder repository, `npm run setup:portal` adds any of these that an existing
+  webhook does not send yet, keeping its signing secret. The endpoint ignores Checkout sessions
+  and charges that are not portal invoices. SendForge's and JayJe's webhooks are separate and
+  unchanged.
+- **What the webhook trusts.** The signature proves an event came from Stripe; the webhook then
+  reads Stripe's own copy of the Checkout session (or the charge, its refunds and the dispute)
+  and acts on that, so a late, repeated or out-of-order event changes nothing. If Stripe cannot
+  be reached it answers 500 and Stripe retries. A Checkout pays an invoice only for the total it
+  was opened with: a payment of any other amount or currency leaves the invoice open, is kept as
+  unapplied, and emails the builder once ("Stripe payment for Invoice N does not match its
+  total"). Each event handled is kept by id in `mhb_stripe_events`.
 
 ## Configuration (Render)
 
@@ -187,29 +199,43 @@ bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tabl
     templates and documents
   - clients' actions: sign-ins, quotes accepted, uploads and signatures, Stripe Checkout opened
   - Stripe's events: payments (with Stripe's fee), bank payments started or failed, second
-    payments for a paid invoice, payments for a deleted invoice
+    payments for a paid invoice, payments for a deleted invoice or for an amount the invoice
+    does not total, refunds (and refunds that failed), and disputes opened, updated, won or lost
   - the portal's own: invoice numbers re-sorted by date
 - **Journal** (`mhb_journal_entries` and `mhb_journal_lines`) is double-entry: each entry's
   debits equal its credits, and each line is one or the other. The chart of accounts
   (`mhb_accounts`):
   - 1100 Accounts receivable
   - 1200 Stripe balance
+  - 1250 Funds held in disputes
   - 1300 Payments received outside Stripe
   - 2100 Unapplied payments
   - 4000 Sales
+  - 4200 Refunds
   - 6100 Stripe fees
+  - 6200 Dispute losses and fees
+
+  Migration `20261003_myhomebuilder_portal_stripe_events.js` added 1250, 4200 and 6200, the
+  `mhb_stripe_events` table, and room for one journal part per refund.
 - **How an invoice's entries follow it.** They are derived from its state (`syncInvoiceBooks`).
   After any change, the journal gets only the difference: a reversal of each part that no longer
   matches, on that part's own date, and the part as it is now. The parts:
   - **issue:** receivable to sales, on the invoice date.
   - **payment:** Stripe balance, or received outside Stripe, to receivable, on the payment date.
   - **fee:** Stripe fees to Stripe balance.
+  - **refund:<id>:** refunds to Stripe balance, on the refund's day, one part per Stripe refund.
+    A refund that fails or is canceled comes back off. The invoice's payment keeps each refund
+    (`payment.refunds`), and the admin page and the client's invoice show them.
+  - **dispute:** funds held in disputes (what Stripe withdrew) and dispute fees to Stripe balance,
+    on the day it opened; **dispute-close**, when it closes: won, back to the Stripe balance
+    with any returned fee; lost, to dispute losses. The payment keeps it as `payment.dispute`.
 
   A voided or deleted invoice's issue is reversed. A deleted invoice's hand-recorded payment goes
   with it, but its Stripe payment stays, moved to unapplied payments, since Stripe holds the
   money. Money Stripe took with no invoice to apply it to (a second payment, or a payment for a
-  deleted invoice) is posted to unapplied payments, once per Checkout: (kind, external id) is
-  unique.
+  deleted invoice, or one for an amount the invoice does not total) is posted to unapplied
+  payments, once per Checkout: (kind, external id) is unique. A refund of such money comes out
+  of unapplied payments, once per refund.
 - **Recording** happens in one transaction per event, activity and journal together.
   - It never fails the action it follows: an error is logged instead.
   - The page's **balance check** (`checkBooks`) compares every invoice with its entries. It
@@ -218,7 +244,8 @@ bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tabl
     is ever deleted from the journal.
 - **The page** has these parts:
   - Filters: one client portal or all, and a date range, with quick periods.
-  - Totals: invoiced, received, Stripe fees, outstanding and unapplied.
+  - Totals: invoiced, received, Stripe fees, refunds, outstanding and unapplied, and money
+    held in disputes when there is any.
   - The ledger, newest first, with a running amount owed.
   - Account balances (a trial balance).
   - The activity log.

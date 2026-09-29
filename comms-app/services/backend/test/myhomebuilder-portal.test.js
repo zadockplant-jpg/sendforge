@@ -26,6 +26,7 @@ const { up: plainNumbers } = await import("../src/db/migrations/20260925_myhomeb
 const { up: recipientsTable } = await import("../src/db/migrations/20260925_myhomebuilder_portal_recipients.js");
 const { up: projectEmails } = await import("../src/db/migrations/20260927_myhomebuilder_portal_project_emails.js");
 const { up: booksTables } = await import("../src/db/migrations/20260930_myhomebuilder_portal_books.js");
+const { up: stripeEvents } = await import("../src/db/migrations/20261003_myhomebuilder_portal_stripe_events.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
 const { ADMIN_SESSION_TTL_SECONDS, createAdminSession, hmacHex, isValidSlug, slugify } = await import(
@@ -41,7 +42,9 @@ const { PDFDocument } = await import("../src/modules/myhomebuilder-portal/vendor
 
 // email.failures holds statuses SendGrid returns for the next requests (outages and rate limits).
 const email = { delivered: [], failures: [] };
-const stripe = { created: [], expired: [], versions: new Set(), sessions: new Map() };
+// charges, refunds (by charge), disputes and intents (their metadata) serve refund and dispute
+// events; unavailable makes every Stripe request fail.
+const stripe = { created: [], expired: [], versions: new Set(), sessions: new Map(), charges: new Map(), refunds: new Map(), disputes: new Map(), intents: new Map(), unavailable: false };
 const realFetch = globalThis.fetch;
 
 globalThis.fetch = async (input, init = {}) => {
@@ -69,7 +72,13 @@ globalThis.fetch = async (input, init = {}) => {
 
   if (url.startsWith("https://api.stripe.com/v1/")) {
     stripe.versions.add(headers.get("Stripe-Version"));
+    if (stripe.unavailable) return Response.json({ error: { message: "Stripe is unavailable" } }, { status: 500 });
     const path = url.slice("https://api.stripe.com/v1".length);
+    const charge = path.match(/^\/charges\/([^/?]+)$/u);
+    if (charge) return stripe.charges.has(charge[1]) ? Response.json(stripe.charges.get(charge[1])) : Response.json({ error: { message: "No such charge" } }, { status: 404 });
+    if (path.startsWith("/refunds?")) return Response.json({ object: "list", data: stripe.refunds.get(new URLSearchParams(path.split("?")[1]).get("charge")) || [] });
+    const dispute = path.match(/^\/disputes\/([^/?]+)$/u);
+    if (dispute) return stripe.disputes.has(dispute[1]) ? Response.json(stripe.disputes.get(dispute[1])) : Response.json({ error: { message: "No such dispute" } }, { status: 404 });
     if (path === "/checkout/sessions" && init.method === "POST") {
       const params = Object.fromEntries(new URLSearchParams(init.body));
       const id = `cs_test_${stripe.created.length + 1}`;
@@ -99,8 +108,10 @@ globalThis.fetch = async (input, init = {}) => {
       return session ? Response.json(session) : Response.json({ error: { message: "No such session" } }, { status: 404 });
     }
     if (path.startsWith("/payment_intents/")) {
+      const id = path.split("/")[2].split("?")[0];
       return Response.json({
-        id: path.split("/")[2].split("?")[0],
+        id,
+        metadata: stripe.intents.get(id)?.metadata || {},
         latest_charge: {
           receipt_url: "https://pay.stripe.com/receipts/test_receipt",
           payment_method_details: { type: "card", card: { brand: "visa", last4: "4242" } },
@@ -131,7 +142,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events"];
 let server;
 let base;
 let renumbered = [];
@@ -188,6 +199,7 @@ before(async () => {
   await insertLegacyProjects();
   await projectEmails(db);
   await booksTables(db);
+  await stripeEvents(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -204,6 +216,8 @@ beforeEach(async () => {
   stripe.created.length = 0;
   stripe.expired.length = 0;
   stripe.sessions.clear();
+  for (const map of [stripe.charges, stripe.refunds, stripe.disputes, stripe.intents]) map.clear();
+  stripe.unavailable = false;
   process.env.MHB_PORTAL_ENABLED = "true";
   delete process.env.ADMIN_WRITES_ENABLED;
 });
@@ -301,8 +315,8 @@ async function postInvoice(adminCookie, fields) {
   return { response, item };
 }
 
-async function signedWebhook(type, session, { http = false } = {}) {
-  const payload = JSON.stringify({ id: `evt_${Math.random()}`, type, data: { object: session } });
+async function signedWebhook(type, session, { http = false, id = `evt_${Math.random()}` } = {}) {
+  const payload = JSON.stringify({ id, type, created: Math.floor(Date.now() / 1000), data: { object: session } });
   const timestamp = Math.floor(Date.now() / 1000);
   const signature = await hmacHex(process.env.MHB_STRIPE_WEBHOOK_SECRET, `${timestamp}.${payload}`);
   const init = { method: "POST", headers: { "Stripe-Signature": `t=${timestamp},v1=${signature}`, "Content-Type": "application/json" }, body: payload };
@@ -1088,6 +1102,7 @@ test("Stripe payments post with their fee, repeated events post nothing, and mon
 
   // A second payment for the paid invoice (an old Checkout, say) is kept as unapplied, once.
   const second = { id: "cs_test_second", status: "complete", payment_status: "paid", amount_total: 50000, currency: "usd", payment_intent: "pi_second", customer_details: { email: "payer@example.com" }, metadata: { clientSlug: "muskegon-addition", invoiceId: item.id, invoiceNumber: "1" } };
+  stripe.sessions.set(second.id, second);
   await signedWebhook("checkout.session.completed", second);
   await signedWebhook("checkout.session.completed", second);
   assert.deepEqual(await ledgerBalances(), { 1200: 99738, 2100: -50000, 4000: -50000, 6100: 262 });
@@ -1096,7 +1111,9 @@ test("Stripe payments post with their fee, repeated events post nothing, and mon
   await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}/delete`, form({}, adminCookie));
   assert.deepEqual(await ledgerBalances(), { 1200: 99738, 2100: -100000, 6100: 262 });
   // Paid after it was deleted: unapplied too.
-  await signedWebhook("checkout.session.completed", { ...second, id: "cs_test_late", payment_intent: "pi_late" });
+  const late = { ...second, id: "cs_test_late", payment_intent: "pi_late" };
+  stripe.sessions.set(late.id, late);
+  await signedWebhook("checkout.session.completed", late);
   assert.deepEqual(await ledgerBalances(), { 1200: 149738, 2100: -150000, 6100: 262 });
 
   const stripeLog = await db("mhb_activity").where({ actor: "stripe" }).orderBy("id").select("action", "summary");
@@ -1106,6 +1123,123 @@ test("Stripe payments post with their fee, repeated events post nothing, and mon
   const check = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
   assert.match(check, /The books balance\./u);
   assert.match(check, /<dt>Unapplied payments<\/dt><dd>\$1,500\.00<\/dd>/u);
+});
+
+test("the webhook reads Stripe's copy of the session, and a payment that no longer matches the invoice is kept as unapplied", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  await request(`/clients/pay/${item.shareToken}`);
+  const sessionId = [...stripe.sessions.keys()].at(-1);
+
+  // An event that says paid while Stripe says unpaid changes nothing.
+  const claimed = { ...stripe.sessions.get(sessionId), status: "complete", payment_status: "paid", payment_intent: "pi_claimed" };
+  assert.equal((await signedWebhook("checkout.session.completed", claimed)).status, 200);
+  assert.equal((await stored(item)).status, "open");
+
+  // A late event that still says unpaid records the payment Stripe now reports.
+  const stale = { ...stripe.sessions.get(sessionId) };
+  payStripeSession(sessionId);
+  assert.equal((await signedWebhook("checkout.session.completed", stale)).status, 200);
+  assert.equal((await stored(item)).status, "paid");
+
+  // Stripe cannot be reached: the webhook answers 500, so Stripe tries again later.
+  const { item: later } = await postInvoice(adminCookie, { title: "Framing", amount: "300" });
+  await request(`/clients/pay/${later.shareToken}`);
+  const laterSession = [...stripe.sessions.keys()].at(-1);
+  stripe.unavailable = true;
+  assert.equal((await signedWebhook("checkout.session.completed", payStripeSession(laterSession))).status, 500);
+  stripe.unavailable = false;
+  assert.equal((await stored(later)).status, "open");
+
+  // Paid for a total the invoice does not have: kept as unapplied, the builder told once, the invoice left open.
+  payStripeSession(laterSession, { amount_total: 25000 });
+  for (let i = 0; i < 2; i++) assert.equal((await signedWebhook("checkout.session.completed", stripe.sessions.get(laterSession))).status, 200);
+  assert.equal((await stored(later)).status, "open");
+  const alerts = deliveredTo("mb@myhomebuilderllc.com").filter((message) => message.subject === "Stripe payment for Invoice 2 does not match its total");
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].text, /Stripe received \$250\.00 from Muskegon Addition for Invoice 2 · Framing, which totals \$300\.00\. The payment was not applied, so the invoice is still open\./u);
+  assert.equal((await ledgerBalances())[2100], -25000);
+  assert.equal((await db("mhb_activity").where({ action: "stripe.mismatch" })).length, 1);
+  // The client's return from Checkout says the payment is being confirmed, not that it is paid.
+  assert.match((await request(`/clients/pay/${later.shareToken}/return?session_id=${laterSession}`)).headers.get("Location"), /notice=payment-pending/u);
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+});
+
+test("refunds and disputes reach the invoice and the books, and each Stripe event is kept by id", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  await request(`/clients/pay/${item.shareToken}`);
+  await signedWebhook("checkout.session.completed", payStripeSession([...stripe.sessions.keys()].at(-1), { payment_intent: "pi_refund" }));
+  const seconds = (iso) => Date.parse(iso) / 1000;
+  stripe.intents.set("pi_refund", { metadata: { invoiceId: item.id, invoiceNumber: "1", clientSlug: "muskegon-addition" } });
+  stripe.charges.set("ch_refund", { id: "ch_refund", payment_intent: "pi_refund", amount_refunded: 10000, refunded: false, currency: "usd", metadata: {} });
+  stripe.refunds.set("ch_refund", [{ id: "re_part", amount: 10000, status: "succeeded", created: seconds("2026-09-26T15:00:00Z") }]);
+  assert.equal((await signedWebhook("charge.refunded", { id: "ch_refund" }, { id: "evt_refund_1" })).status, 200);
+  assert.equal((await signedWebhook("charge.refunded", { id: "ch_refund" }, { id: "evt_refund_2" })).status, 200);
+  const refunded = await stored(item);
+  assert.deepEqual(refunded.payment.refunds, [{ id: "re_part", amountCents: 10000, status: "succeeded", refundedAt: "2026-09-26T15:00:00.000Z" }]);
+  assert.equal(refunded.payment.refundedCents, 10000);
+  assert.deepEqual(await ledgerBalances(), { 1200: 50000 - 262 - 10000, 4000: -50000, 4200: 10000, 6100: 262 });
+  assert.equal((await db("mhb_activity").where({ action: "stripe.refunded" })).length, 1, "a repeated event logs nothing new");
+  const entry = await db("mhb_journal_entries").where({ kind: "refund" }).select(db.raw("to_char(entry_date, 'YYYY-MM-DD') AS day"), "memo").first();
+  assert.deepEqual({ ...entry }, { day: "2026-09-26", memo: "Invoice 1 · refunded through Stripe" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Refunded \$100\.00 on Sep 26, 2026\./u);
+  assert.match(await (await request(`/clients/invoice/${item.shareToken}`)).text(), /Refunded Sep 26, 2026<\/th><td>\$100\.00/u);
+
+  // A refund Stripe could not make comes back off the books.
+  stripe.refunds.set("ch_refund", [{ id: "re_part", amount: 10000, status: "failed", created: seconds("2026-09-26T15:00:00Z") }]);
+  stripe.charges.get("ch_refund").amount_refunded = 0;
+  await signedWebhook("charge.refund.updated", { id: "re_part", charge: "ch_refund" }, { id: "evt_refund_3" });
+  assert.equal((await ledgerBalances())[4200], undefined);
+  assert.equal((await db("mhb_activity").where({ action: "stripe.refund-failed" })).length, 1);
+
+  // A dispute holds the money until it closes; a win returns it and the fee.
+  stripe.disputes.set("dp_1", { id: "dp_1", charge: "ch_refund", status: "needs_response", created: seconds("2026-09-27T15:00:00Z"), balance_transactions: [{ amount: -50000, fee: 1500, created: seconds("2026-09-27T15:00:00Z") }] });
+  await signedWebhook("charge.dispute.created", { id: "dp_1", charge: "ch_refund" }, { id: "evt_dispute_1" });
+  assert.deepEqual(await ledgerBalances(), { 1200: 50000 - 262 - 50000 - 1500, 1250: 50000, 4000: -50000, 6100: 262, 6200: 1500 });
+  const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(books, /The books balance\./u);
+  assert.match(books, /<dt>Held in disputes<\/dt><dd>\$500\.00<\/dd>/u);
+  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Disputed on Sep 27, 2026 \(needs response\)\. Respond in the Stripe dashboard\./u);
+  stripe.disputes.get("dp_1").status = "won";
+  stripe.disputes.get("dp_1").balance_transactions.push({ amount: 50000, fee: -1500, created: seconds("2026-09-29T15:00:00Z") });
+  await signedWebhook("charge.dispute.closed", { id: "dp_1", charge: "ch_refund" }, { id: "evt_dispute_2" });
+  assert.deepEqual(await ledgerBalances(), { 1200: 50000 - 262, 4000: -50000, 6100: 262 });
+  assert.deepEqual((await db("mhb_activity").where({ action: "stripe.dispute" }).orderBy("id")).map((row) => row.summary), [
+    "A dispute opened on Invoice 1; Stripe is holding $500.00 and charged a $15.00 fee",
+    "Won the dispute on Invoice 1; Stripe returned $500.00"
+  ]);
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+
+  // Each portal event handled is kept by id; an event for a payment made elsewhere is not.
+  stripe.charges.set("ch_other", { id: "ch_other", payment_intent: "pi_other", amount_refunded: 500, refunded: false, metadata: {} });
+  assert.equal((await signedWebhook("charge.refunded", { id: "ch_other" }, { id: "evt_elsewhere" })).status, 200);
+  const kept = (await db("mhb_stripe_events").select("id")).map((row) => row.id).filter((id) => /^evt_(refund|dispute|elsewhere)/u.test(id)).sort();
+  assert.deepEqual(kept, ["evt_dispute_1", "evt_dispute_2", "evt_refund_1", "evt_refund_2", "evt_refund_3"]);
+});
+
+test("a refund of a payment not applied to an invoice comes out of Unapplied payments, once", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Deposit", amount: "500" });
+  await request(`/clients/pay/${item.shareToken}`);
+  await signedWebhook("checkout.session.completed", payStripeSession([...stripe.sessions.keys()].at(-1)));
+  const second = { id: "cs_test_second", status: "complete", payment_status: "paid", amount_total: 50000, currency: "usd", payment_intent: "pi_second", customer_details: { email: "payer@example.com" }, metadata: { clientSlug: "muskegon-addition", invoiceId: item.id, invoiceNumber: "1" } };
+  stripe.sessions.set(second.id, second);
+  await signedWebhook("checkout.session.completed", second);
+  assert.equal((await ledgerBalances())[2100], -50000);
+
+  stripe.intents.set("pi_second", { metadata: second.metadata });
+  stripe.charges.set("ch_second", { id: "ch_second", payment_intent: "pi_second", amount_refunded: 50000, refunded: true, currency: "usd", metadata: {} });
+  stripe.refunds.set("ch_second", [{ id: "re_second", amount: 50000, status: "succeeded", created: Math.floor(Date.now() / 1000) }]);
+  for (let i = 0; i < 2; i++) assert.equal((await signedWebhook("charge.refunded", { id: "ch_second" })).status, 200);
+  assert.deepEqual(await ledgerBalances(), { 1200: 50000 - 262, 4000: -50000, 6100: 262 });
+  assert.equal((await stored(item)).payment.refunds, undefined, "the invoice's own payment is untouched");
+  const logged = await db("mhb_activity").where({ action: "stripe.refunded" });
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].summary, "Refunded $500.00 of a payment for Invoice 1 that was not applied to it");
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
 });
 
 test("the books open with the invoices already in the portal, and their history from their records", async () => {

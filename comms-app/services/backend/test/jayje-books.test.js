@@ -227,6 +227,27 @@ test('money Stripe took that no invoice can take is kept as unapplied, once',asy
   assert.equal((await books.check()).balanced,true);
 });
 
+test('a refund of money no invoice could take comes out of Unapplied payments, once, and the webhook succeeds',async()=>{
+  const {d}=await paidByStripe();
+  const [attempt]=await db('jayje_checkout_attempts').insert({id:randomUUID(),invoice_id:d.id,status:'open',amount_cents:d.total_cents,currency:'usd',expires_at:new Date(Date.now()+3600000),stripe_session_id:`cs_test_${randomUUID()}`}).returning('*');
+  const pi=`pi_${randomUUID()}`,chargeId=`ch_${randomUUID()}`;
+  sessions.set(attempt.stripe_session_id,{id:attempt.stripe_session_id,mode:'payment',status:'complete',payment_status:'paid',amount_total:d.total_cents,currency:'usd',payment_intent:pi,metadata:{jayje_invoice_id:d.id,jayje_attempt_id:attempt.id}});
+  await assert.rejects(webhook('checkout.session.completed',{id:attempt.stripe_session_id,metadata:{jayje_invoice_id:d.id}}),{publicCode:'duplicate_invoice_payment'});
+  const before=(await books.report()).summary.unapplied;
+  intents.set(pi,{id:pi,metadata:{jayje_invoice_id:d.id,jayje_attempt_id:attempt.id}});
+  charges.set(chargeId,{id:chargeId,payment_intent:pi,amount_refunded:d.total_cents,refunded:true,disputed:false});
+  refundLists.set(chargeId,[{id:`re_${randomUUID()}`,amount:d.total_cents,status:'succeeded',created:seconds('2026-09-22T15:00:00Z')}]);
+  await webhook('charge.refunded',{id:chargeId},'evt_unapplied_refund');
+  await webhook('charge.refunded',{id:chargeId});
+  assert.equal(before-(await books.report()).summary.unapplied,d.total_cents,'the refund comes out of Unapplied payments');
+  assert.equal(await db('jayje_journal_entries').where({kind:'unapplied-refund'}).count({n:'*'}).first().then(r=>Number(r.n)),1);
+  assert.equal((await activity('stripe.refunded',d.id)).length,1);
+  assert.equal((await activity('stripe.refunded',d.id))[0].summary,`Refunded $212.00 of a payment for ${d.reference} that was not applied to it`);
+  assert.ok(await db('jayje_stripe_events').where({id:'evt_unapplied_refund'}).first());
+  assert.equal((await db('jayje_payments').where({invoice_id:d.id}).first()).status,'paid','the invoice keeps its own payment');
+  assert.equal((await books.check()).balanced,true);
+});
+
 test('referral discounts and credits: counted as discounts, withdrawn with a removed payment unless spent',async()=>{
   const referrer=await service.createClient(admin,{name:'Carol Referrer',email:'carol@example.com'});
   friend=await service.createClient(admin,{name:'Dana Friend',email:'dana@example.com'});

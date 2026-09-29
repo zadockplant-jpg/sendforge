@@ -8,7 +8,14 @@ export const STRIPE_API_VERSION = "2024-06-20";
 export const WEBHOOK_EVENTS = [
   "checkout.session.completed",
   "checkout.session.async_payment_succeeded",
-  "checkout.session.async_payment_failed"
+  "checkout.session.async_payment_failed",
+  "charge.refunded",
+  "charge.refund.updated",
+  "charge.dispute.created",
+  "charge.dispute.updated",
+  "charge.dispute.closed",
+  "charge.dispute.funds_withdrawn",
+  "charge.dispute.funds_reinstated"
 ];
 
 export function stripeConfigured(env) {
@@ -61,6 +68,25 @@ export async function retrieveCheckoutSession(env, sessionId) {
   return stripeRequest(env, "GET", `/checkout/sessions/${encodeURIComponent(sessionId)}`);
 }
 
+// Refunds and disputes arrive as charge events. The portal reads Stripe's own copies of the
+// charge, its refunds and the dispute, and finds the invoice from the payment's metadata.
+export async function retrieveCharge(env, chargeId) {
+  return stripeRequest(env, "GET", `/charges/${encodeURIComponent(chargeId)}`);
+}
+
+export async function retrievePaymentIntent(env, paymentIntentId) {
+  return stripeRequest(env, "GET", `/payment_intents/${encodeURIComponent(paymentIntentId)}`);
+}
+
+export async function listRefunds(env, chargeId) {
+  const page = await stripeRequest(env, "GET", `/refunds?charge=${encodeURIComponent(chargeId)}&limit=100`);
+  return Array.isArray(page?.data) ? page.data : [];
+}
+
+export async function retrieveDispute(env, disputeId) {
+  return stripeRequest(env, "GET", `/disputes/${encodeURIComponent(disputeId)}`);
+}
+
 // Closes an unfinished checkout so an edited, voided or already-paid invoice cannot be paid from it.
 export async function expireCheckoutSession(env, sessionId) {
   if (!stripeConfigured(env) || typeof sessionId !== "string" || !sessionId.startsWith("cs_")) return false;
@@ -100,6 +126,9 @@ export async function retrievePaymentDetails(env, paymentIntentId) {
       label: paymentLabel(charge?.payment_method_details),
       receiptUrl: charge?.receipt_url || "",
       ...(Number.isInteger(fee) && fee >= 0 ? { feeCents: fee } : {}),
+      // When Stripe charged, for the payment's day in the books.
+      ...(Number.isInteger(charge?.created) ? { chargedAt: new Date(charge.created * 1000).toISOString() } : {}),
+      chargeId: typeof charge?.id === "string" ? charge.id : "",
       paymentIntentId
     };
   } catch (error) {

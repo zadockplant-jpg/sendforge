@@ -468,6 +468,27 @@ export function duplicatePaymentMessage({ item, client, session, adminUrl }) {
   };
 }
 
+// Stripe took an amount the invoice does not total (it changed after Checkout opened), so the
+// payment was not applied to it.
+export function mismatchedPaymentMessage({ item, client, session, adminUrl }) {
+  const label = billingLabel(item);
+  const paid = money(Number.isInteger(session.amount_total) ? session.amount_total : 0, session.currency || item.currency);
+  const total = money(item.amountCents, item.currency);
+  const reference = session.payment_intent ? String(session.payment_intent) : String(session.id || "");
+  const lead = `Stripe received ${paid} from ${client.name} for ${label} · ${item.title}, which totals ${total}. The payment was not applied, so the invoice is still open.`;
+  const action = `Check payment ${reference} in the Stripe dashboard. Refund it, or record the payment on the invoice once the amounts agree.`;
+  const body = [
+    paragraph(escapeHtml(lead)),
+    paragraph(escapeHtml(action), "font-size:13px;color:#555555;"),
+    button(adminUrl, "Open the invoice")
+  ].join("\n");
+  return {
+    subject: `Stripe payment for ${label} does not match its total`,
+    html: layout({ title: `Payment for ${label} does not match`, preheader: `${paid} from ${client.name}`, kicker: "Payment not applied", heading: `${label} was paid a different amount.`, body, forClient: false }),
+    text: joinText([lead, action, "", `Admin panel: ${adminUrl}`])
+  };
+}
+
 // Stripe took a payment for an invoice no longer in the portal (deleted), so nothing records it.
 export function deletedInvoicePaymentMessage({ session, client, adminUrl }) {
   const number = session.metadata?.invoiceNumber || "";
