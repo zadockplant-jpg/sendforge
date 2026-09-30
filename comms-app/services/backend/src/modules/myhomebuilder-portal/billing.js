@@ -200,14 +200,31 @@ export function issuedDate(item) {
   return isValidDate(item?.issuedOn || "") ? item.issuedOn : todayInMichigan(new Date(item?.createdAt || Date.now()));
 }
 
-// One Checkout line for the invoice total keeps Stripe's amount identical to the invoice,
+// Payments toward an invoice before it is paid off (a client paying down a bill), recorded by
+// hand: item.installments, each { id, method, label, reference, amountCents, paidOn, ... }. The
+// invoice stays open until they reach its total; the payment that settles the rest is
+// item.payment, as for an invoice paid at once.
+export function installmentsTotal(item) {
+  return (item?.installments || []).reduce((sum, entry) => sum + (Number.isInteger(entry.amountCents) ? entry.amountCents : 0), 0);
+}
+
+// What is still owed: the total less every payment received (a paid invoice's settling payment
+// covers the rest, unless Stripe charged less).
+export function balanceDue(item) {
+  const earlier = installmentsTotal(item);
+  const settled = item?.status === "paid" ? (item.payment?.amountCents ?? item.amountCents - earlier) : 0;
+  return Math.max(0, item.amountCents - earlier - settled);
+}
+
+// One Checkout line for what is due keeps Stripe's amount identical to the invoice's balance,
 // including credits and fractional quantities that Checkout line items cannot express.
 export function checkoutLine(item) {
   const names = billingLineItems(item).map((line) => line.description).join(", ");
+  const partly = installmentsTotal(item) > 0;
   return {
-    name: `${billingLabel(item)} · ${item.title}`.slice(0, 250),
+    name: `${billingLabel(item)} · ${item.title}${partly ? " · balance due" : ""}`.slice(0, 250),
     description: names.length > 500 ? `${names.slice(0, 497)}...` : names,
-    unitCents: item.amountCents
+    unitCents: balanceDue(item)
   };
 }
 
@@ -221,8 +238,9 @@ export function billingLabel(item) {
   return `${item.kind === "invoice" ? "Invoice" : "Quote"} ${item.number}`;
 }
 
+// Open and payable online: Stripe takes at least $0.50, so a smaller balance is recorded by hand.
 export function isPayable(item) {
-  return item.kind === "invoice" && item.status === "open";
+  return item.kind === "invoice" && item.status === "open" && balanceDue(item) >= MIN_INVOICE_CENTS;
 }
 
 // Open quotes and invoices can be edited, and so can paid invoices (to correct a title, a line

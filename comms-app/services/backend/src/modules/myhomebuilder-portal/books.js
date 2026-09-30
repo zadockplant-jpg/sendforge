@@ -62,10 +62,11 @@ const SUBCONTRACTORS = "5100";
 const SHOP_LABOR = "6450";
 const QUERY_TIMEOUT_MS = 5000;
 
-// A part's kind: every "refund:<id>" part is a refund.
-export const partKind = (part) => (String(part).startsWith("refund:") ? "refund" : part);
-const PART_ORDER = ["issue", "payment", "fee", "refund", "dispute", "dispute-close", "cost", "paid", "bank"];
-const PART_WORDS = { issue: "invoice", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment", bank: "bank transaction" };
+// A part's kind: every "refund:<id>" part is a refund, every "installment:<id>" a payment toward
+// the balance.
+export const partKind = (part) => (String(part).startsWith("refund:") ? "refund" : String(part).startsWith("installment:") ? "installment" : part);
+const PART_ORDER = ["issue", "installment", "payment", "fee", "refund", "dispute", "dispute-close", "cost", "paid", "bank"];
+const PART_WORDS = { issue: "invoice", installment: "payment", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment", bank: "bank transaction" };
 const disputeWon = (dispute) => ["won", "warning_closed"].includes(dispute?.status);
 
 function data(row) {
@@ -88,6 +89,14 @@ export function bookParts(item, { deleted = false } = {}) {
   if (!item || item.kind !== "invoice") return parts;
   if (!deleted && item.status !== "void" && item.amountCents > 0) {
     parts.issue = { date: issuedDate(item), lines: [[RECEIVABLE, item.amountCents, 0], [SALES, 0, item.amountCents]] };
+  }
+  // Payments toward the balance, recorded by hand: received outside Stripe, on their own dates. A
+  // deleted invoice's go with it, like a payment recorded by hand.
+  if (!deleted) {
+    for (const entry of item.installments || []) {
+      if (!(entry.amountCents > 0)) continue;
+      parts[`installment:${entry.id}`] = { date: calendarDate(entry.paidOn), lines: [[RECEIVED, entry.amountCents, 0], [RECEIVABLE, 0, entry.amountCents]] };
+    }
   }
   const payment = item.status === "paid" ? item.payment : null;
   if (payment) {
@@ -176,7 +185,7 @@ function deletedParts(held) {
   const parts = {};
   for (const [part, entries] of Object.entries(held)) {
     const entry = entries[0];
-    if (!entry || part === "issue") continue;
+    if (!entry || part === "issue" || partKind(part) === "installment") continue;
     if (part === "payment") {
       const stripe = entry.lines.find(([account, debit]) => account === STRIPE && debit > 0);
       if (stripe) parts.payment = { date: entry.date, lines: [[STRIPE, stripe[1], 0], [UNAPPLIED, 0, stripe[1]]] };
@@ -217,6 +226,10 @@ function memoFor(item, part, { deleted = false, reversal = false, reason = "" } 
   if (kind === "refund") return `${label} · refunded through Stripe`;
   if (kind === "dispute") return `${label} · dispute opened; Stripe is holding the payment`;
   if (kind === "dispute-close") return `${label} · dispute ${disputeWon(item?.payment?.dispute) ? "won" : "lost"}`;
+  if (kind === "installment") {
+    const entry = (item?.installments || []).find((candidate) => `installment:${candidate.id}` === part);
+    return `${label} · payment toward the balance${entry?.label ? ` by ${entry.label}` : ""}`;
+  }
   const payment = item?.payment || {};
   if (deleted) return `${label} · Stripe payment kept after the invoice was deleted`;
   return payment.source === "stripe"
@@ -568,7 +581,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
     const kind = row.part ? partKind(row.part) : row.kind;
     const change = {
       invoiced: -net(lines, [SALES]),
-      received: kind === "payment" || row.kind === "unapplied" ? net(lines, [STRIPE, RECEIVED]) : 0,
+      received: kind === "payment" || kind === "installment" || row.kind === "unapplied" ? net(lines, [STRIPE, RECEIVED]) : 0,
       fees: net(lines, [STRIPE_FEES]),
       refunds: net(lines, [REFUNDS]) + (row.kind === "unapplied-refund" ? net(lines, [UNAPPLIED]) : 0),
       cash: net(lines, [STRIPE, RECEIVED]),

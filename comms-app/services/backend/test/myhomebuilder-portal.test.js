@@ -2644,3 +2644,131 @@ test("an entry changed or removed while the protection is off is found, and so i
   assert.match(page, /The activity log was altered\./u);
   assert.match(page, /Entry #3 /u, "the first entry after the gap no longer matches");
 });
+
+// ---------- Paying a bill down: payments toward an invoice's balance ----------
+
+test("payments toward an invoice leave the rest due, show on the invoice, and post to the books on their dates", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000", issuedOn: "2026-09-01" });
+  const base = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+
+  const first = await request(`${base}/record-payment`, form({ amount: "300", method: "zelle", paidOn: "2026-09-10", sendReceipt: "yes" }, adminCookie));
+  assert.equal(first.headers.get("Location"), `${base}?notice=payment-partial-receipt`);
+  let saved = await stored(item);
+  assert.equal(saved.status, "open");
+  assert.equal(saved.installments.length, 1);
+  assert.equal(saved.installments[0].amountCents, 30000);
+  assert.deepEqual(await ledgerBalances(), { 1100: 70000, 1300: 30000, 4000: -100000 });
+  const receipt = deliveredTo("pat@example.com").at(-1);
+  assert.equal(receipt.subject, `Payment received for invoice ${saved.number} from My Home Builder LLC`);
+  assert.match(receipt.text, /Amount paid: \$300\.00/u);
+  assert.match(receipt.text, /Balance due: \$700\.00/u);
+
+  // More than the balance, or no amount, is refused.
+  assert.equal((await request(`${base}/record-payment`, form({ amount: "701", method: "check", paidOn: "2026-09-11" }, adminCookie))).headers.get("Location"), `${base}?notice=payment-over-balance`);
+  assert.equal((await request(`${base}/record-payment`, form({ amount: "abc", method: "check", paidOn: "2026-09-11" }, adminCookie))).headers.get("Location"), `${base}?notice=payment-amount-invalid`);
+  await request(`${base}/record-payment`, form({ amount: "200", method: "check", reference: "#1042", paidOn: "2026-09-20" }, adminCookie));
+
+  const list = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(list, /\$1,000\.00<small>\$500\.00 due<\/small>/u);
+  assert.match(list, /portal-status-open">Partly paid<\/span>/u);
+  assert.match(list, /<dt>Paid<\/dt><dd>\$500\.00<\/dd>/u);
+  assert.match(list, /<dt>Outstanding<\/dt><dd>\$500\.00<\/dd>/u);
+  const invoicePage = await (await request(`/clients/invoice/${saved.shareToken}`)).text();
+  assert.match(invoicePage, /Paid Sep 10, 2026 · Zelle<\/th><td>-\$300\.00/u);
+  assert.match(invoicePage, /Paid Sep 20, 2026 · Check #1042<\/th><td>-\$200\.00/u);
+  assert.match(invoicePage, /Balance due<\/th><td>\$500\.00/u);
+  assert.match(invoicePage, /You have paid \$500\.00 of \$1,000\.00\. \$500\.00 is left to pay\./u);
+  assert.match(invoicePage, /Pay \$500\.00 securely/u);
+
+  // The status popup's Mark as paid settles what is left.
+  const settled = await request(`${base}/record-payment`, form({ method: "cash", paidOn: "2026-09-30", return: "list" }, adminCookie));
+  assert.equal(settled.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-recorded");
+  saved = await stored(item);
+  assert.equal(saved.status, "paid");
+  assert.equal(saved.payment.amountCents, 50000);
+  assert.deepEqual(await ledgerBalances(), { 1300: 100000, 4000: -100000 });
+  const entries = await db("mhb_journal_entries").where({ item_id: item.id }).orderBy("id").select("part", db.raw("to_char(entry_date, 'YYYY-MM-DD') AS day"));
+  assert.deepEqual(entries.map((entry) => [entry.part.replace(/:.+$/u, ""), entry.day]), [["issue", "2026-09-01"], ["installment", "2026-09-10"], ["installment", "2026-09-20"], ["payment", "2026-09-30"]]);
+  assert.match(await (await request(`/clients/invoice/${saved.shareToken}`)).text(), /Balance due<\/th><td>\$0\.00/u);
+
+  // Marked unpaid, the earlier payments stay and the last one's amount is due again.
+  await request(`${base}/reopen`, form({}, adminCookie));
+  saved = await stored(item);
+  assert.equal(saved.status, "open");
+  assert.equal(saved.installments.length, 2);
+  assert.deepEqual(await ledgerBalances(), { 1100: 50000, 1300: 50000, 4000: -100000 });
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+});
+
+test("online payment charges only the balance, and a payment added by mistake can be removed", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Siding", amount: "1,000" });
+  const base = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  await request(`${base}/record-payment`, form({ amount: "250", method: "check", paidOn: "2026-09-10" }, adminCookie));
+  const mistake = await request(`${base}/record-payment`, form({ amount: "100", method: "cash", paidOn: "2026-09-11" }, adminCookie));
+  assert.equal(mistake.headers.get("Location"), `${base}?notice=payment-partial`);
+  const wrong = (await stored(item)).installments.find((entry) => entry.amountCents === 10000);
+  assert.equal((await request(`${base}/remove-payment`, form({ installment: wrong.id }, adminCookie))).headers.get("Location"), `${base}?notice=partial-removed`);
+  assert.equal((await stored(item)).installments.length, 1);
+  assert.deepEqual(await ledgerBalances(), { 1100: 75000, 1300: 25000, 4000: -100000 });
+
+  // Editing below what was paid, or voiding, is refused while payments are on it.
+  const edited = await request(`${base}/edit`, form({ kind: "invoice", title: "Siding", amount: "200" }, adminCookie));
+  assert.equal(edited.status, 400);
+  assert.match(await edited.text(), /cannot be less than the \$250\.00 already paid/u);
+  assert.equal((await request(`${base}/void`, form({}, adminCookie))).headers.get("Location"), `${base}?notice=void-has-payments`);
+
+  const saved = await stored(item);
+  await request(`/clients/pay/${saved.shareToken}`);
+  const params = stripe.created.at(-1);
+  assert.equal(params["line_items[0][price_data][unit_amount]"], "75000");
+  assert.match(params["line_items[0][price_data][product_data][name]"], /· balance due$/u);
+  const session = payStripeSession([...stripe.sessions.keys()].at(-1));
+  assert.equal((await signedWebhook("checkout.session.completed", session)).status, 200);
+  const paid = await stored(item);
+  assert.equal(paid.status, "paid");
+  assert.equal(paid.payment.amountCents, 75000);
+  assert.deepEqual(await ledgerBalances(), { 1200: 75000 - 262, 1300: 25000, 4000: -100000, 6100: 262 });
+  const receipt = deliveredTo("pat@example.com").at(-1);
+  assert.match(receipt.text, /Amount paid: \$750\.00/u);
+  assert.match(receipt.text, /Earlier payments: \$250\.00/u);
+  const notice = deliveredTo("mb@myhomebuilderllc.com").at(-1);
+  assert.doesNotMatch(notice.text, /differs/u, "the balance was paid, as expected");
+});
+
+test("Add payment beside New invoice records a payment toward any open invoice of the project", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item: one } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
+  const { item: two } = await postInvoice(adminCookie, { title: "Roofing", amount: "400" });
+  const list = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(list, /<a class="button button-outline" href="\/clients\/admin\/clients\/muskegon-addition\/payments\/new" data-add-payment>Add payment<\/a>/u);
+  assert.match(list, /<dialog class="admin-dialog" id="add-payment-dialog"/u);
+  assert.match(list, new RegExp(`<option value="${two.id}" data-balance="400\\.00"( selected)?>Invoice ${(await stored(two)).number} · Roofing · \\$400\\.00 due</option>`, "u"));
+
+  const page = await request(`/clients/admin/clients/muskegon-addition/payments/new?invoice=${two.id}`, { headers: { Cookie: adminCookie } });
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), new RegExp(`<option value="${two.id}" data-balance="400\\.00" selected>`, "u"));
+
+  const added = await request("/clients/admin/clients/muskegon-addition/payments", form({ invoice: one.id, amount: "600", method: "zelle", paidOn: "2026-09-15" }, adminCookie));
+  assert.equal(added.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-partial");
+  assert.equal((await stored(one)).installments[0].amountCents, 60000);
+  const whole = await request("/clients/admin/clients/muskegon-addition/payments", form({ invoice: two.id, amount: "400", method: "check", paidOn: "2026-09-16" }, adminCookie));
+  assert.equal(whole.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-recorded");
+  assert.equal((await stored(two)).status, "paid");
+  assert.equal((await request("/clients/admin/clients/muskegon-addition/payments", form({ invoice: "", amount: "5", method: "cash", paidOn: "2026-09-16" }, adminCookie))).headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-invoice-required");
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+});
+
+test("deleting an invoice with payments toward it takes them out of the books too", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
+  const base = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  await request(`${base}/record-payment`, form({ amount: "300", method: "zelle", paidOn: "2026-09-10" }, adminCookie));
+  assert.match(await (await request(`${base}/delete`, { headers: { Cookie: adminCookie } })).text(), /Payments toward it \(\$300\.00 · Zelle · Sep 10, 2026\) are deleted with it\./u);
+  await request(`${base}/delete`, form({}, adminCookie));
+  assert.deepEqual(await ledgerBalances(), {});
+  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+});

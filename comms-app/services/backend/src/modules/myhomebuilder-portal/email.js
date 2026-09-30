@@ -1,4 +1,4 @@
-import { billingLabel, billingLineItems, quantityText } from "./billing.js";
+import { balanceDue, billingLabel, billingLineItems, installmentsTotal, quantityText } from "./billing.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 
 export const ADMIN_EMAIL = "mb@myhomebuilderllc.com";
@@ -302,16 +302,19 @@ function settledInvoiceMessage({ item, client, viewUrl }) {
 }
 
 export function billingIssuedMessage({ item, client, viewUrl, payUrl }) {
-  const total = money(item.amountCents, item.currency);
+  // An invoice already partly paid asks for what is left.
+  const partly = item.kind === "invoice" && installmentsTotal(item) > 0;
+  const total = money(partly ? balanceDue(item) : item.amountCents, item.currency);
+  const paidSoFar = partly ? money(installmentsTotal(item), item.currency) : "";
   const due = formatDate(item.dueDate);
   if (item.kind === "invoice" && (item.status === "paid" || item.status === "processing")) return settledInvoiceMessage({ item, client, viewUrl });
   if (item.kind === "invoice") {
     const body = [
       paragraph("Here is your invoice from My Home Builder LLC."),
-      facts([["Invoice", item.number], ["Project", client.name], ["Amount due", total], ["Due", due]]),
+      facts([["Invoice", item.number], ["Project", client.name], ...(partly ? [["Invoice total", money(item.amountCents, item.currency)], ["Paid so far", paidSoFar]] : []), [partly ? "Balance due" : "Amount due", total], ["Due", due]]),
       payUrl ? button(payUrl, `Pay ${total}`) : button(viewUrl, "View the invoice"),
       payUrl ? paragraph(`${textLink(viewUrl, "View the invoice")} &nbsp;·&nbsp; Payments are processed securely by Stripe.`, "font-size:13px;color:#555555;") : "",
-      linesTable(item, "Amount due"),
+      linesTable(item, partly ? "Invoice total" : "Amount due"),
       notesBlock(item)
     ].join("\n");
     return {
@@ -323,10 +326,12 @@ export function billingIssuedMessage({ item, client, viewUrl, payUrl }) {
         `Invoice: ${item.number}`,
         `Project: ${client.name}`,
         `Title: ${item.title}`,
-        `Amount due: ${total}`,
+        partly ? `Invoice total: ${money(item.amountCents, item.currency)}` : null,
+        partly ? `Paid so far: ${paidSoFar}` : null,
+        `${partly ? "Balance due" : "Amount due"}: ${total}`,
         due ? `Due: ${due}` : null,
         "",
-        ...textLines(item, "Amount due"),
+        ...textLines(item, partly ? "Invoice total" : "Amount due"),
         "",
         payUrl ? `Pay online: ${payUrl}` : null,
         `View the invoice: ${viewUrl}`,
@@ -376,7 +381,7 @@ export function paymentReceiptMessage({ item, client, viewUrl }) {
   const method = payment.label || "";
   const body = [
     paragraph(`My Home Builder LLC received your payment for <strong>${escapeHtml(item.title)}</strong>. Thank you.`),
-    facts([["Amount paid", paid], ["Paid on", paidOn], ["Payment method", method], ["Invoice", item.number], ["Project", client.name]]),
+    facts([["Amount paid", paid], ["Paid on", paidOn], ["Payment method", method], ...(installmentsTotal(item) ? [["Earlier payments", money(installmentsTotal(item), item.currency)]] : []), ["Invoice", item.number], ["Project", client.name]]),
     linesTable(item, "Invoice total"),
     button(viewUrl, "View the paid invoice"),
     payment.receiptUrl ? paragraph(textLink(payment.receiptUrl, "View the Stripe payment receipt"), "font-size:13px;color:#555555;") : "",
@@ -391,6 +396,7 @@ export function paymentReceiptMessage({ item, client, viewUrl }) {
       `Amount paid: ${paid}`,
       paidOn ? `Paid on: ${paidOn}` : null,
       method ? `Payment method: ${method}` : null,
+      installmentsTotal(item) ? `Earlier payments: ${money(installmentsTotal(item), item.currency)}` : null,
       `Invoice: ${item.number}`,
       `Project: ${client.name}`,
       "",
@@ -405,12 +411,47 @@ export function paymentReceiptMessage({ item, client, viewUrl }) {
   };
 }
 
+// A receipt for a payment toward the balance, with what is still due.
+export function partialPaymentReceiptMessage({ item, client, installment, viewUrl }) {
+  const paid = money(installment.amountCents, item.currency);
+  const paidOn = formatDate(installment.paidOn);
+  const due = money(balanceDue(item), item.currency);
+  const body = [
+    paragraph(`My Home Builder LLC received your payment toward <strong>${escapeHtml(item.title)}</strong>. Thank you.`),
+    facts([["Amount paid", paid], ["Paid on", paidOn], ["Payment method", installment.label || ""], ["Invoice total", money(item.amountCents, item.currency)], ["Paid so far", money(installmentsTotal(item), item.currency)], ["Balance due", due], ["Invoice", item.number], ["Project", client.name]]),
+    button(viewUrl, "View the invoice"),
+    paragraph("Keep this email for your records.", "font-size:13px;color:#555555;")
+  ].join("\n");
+  return {
+    subject: `Payment received for invoice ${item.number} from My Home Builder LLC`,
+    html: layout({ title: `Payment received for invoice ${item.number}`, preheader: `${paid} received${paidOn ? ` on ${paidOn}` : ""}. ${due} is still due.`, kicker: `Receipt · Invoice ${item.number}`, heading: "Thank you for your payment.", body }),
+    text: joinText([
+      `My Home Builder LLC received your payment toward ${item.title}. Thank you.`,
+      "",
+      `Amount paid: ${paid}`,
+      paidOn ? `Paid on: ${paidOn}` : null,
+      installment.label ? `Payment method: ${installment.label}` : null,
+      `Invoice total: ${money(item.amountCents, item.currency)}`,
+      `Paid so far: ${money(installmentsTotal(item), item.currency)}`,
+      `Balance due: ${due}`,
+      `Invoice: ${item.number}`,
+      `Project: ${client.name}`,
+      "",
+      `View the invoice: ${viewUrl}`,
+      "",
+      "Keep this email for your records. Questions? Reply to this email.",
+      "My Home Builder LLC · Muskegon, Michigan"
+    ])
+  };
+}
+
 export function adminPaidMessage({ item, client, adminUrl, receiptTo }) {
   const label = billingLabel(item);
   const payment = item.payment || {};
   const paid = money(payment.amountCents ?? item.amountCents, item.currency);
-  const mismatch = Number.isInteger(payment.amountCents) && payment.amountCents !== item.amountCents
-    ? `The amount paid differs from the current invoice total of ${money(item.amountCents, item.currency)}.`
+  const owed = item.amountCents - installmentsTotal(item);
+  const mismatch = Number.isInteger(payment.amountCents) && payment.amountCents !== owed
+    ? `The amount paid differs from the balance that was due, ${money(owed, item.currency)}.`
     : "";
   const receiptLine = receiptTo ? `Receipt emailed to ${receiptTo}.` : "No client email is on file, so no receipt was emailed. Add one on the client panel and use Resend receipt.";
   const body = [

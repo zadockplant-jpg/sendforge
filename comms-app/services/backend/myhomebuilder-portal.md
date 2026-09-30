@@ -193,6 +193,26 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   - 20 sign-in or admin-code attempts and 120 form posts per visitor address per minute
   - 3 admin code requests per address and 12 overall per 10 minutes
 
+## Paying a bill down
+
+An invoice can be paid over time. **Add a payment** (on the invoice's admin page, or **Add
+payment** beside New invoice and New quote, which asks which open invoice) records money received
+outside Stripe:
+
+- **Toward the balance or settling it:** less than the balance due, it is a payment toward it
+  (`item.installments`) and the invoice stays open, shown as Partly paid. The balance, or no
+  amount given (the list's status popup), settles it (`item.payment`). More than the balance is
+  refused.
+- **Receipts:** each payment can email the client a receipt with what is still due.
+- **What the client sees:** the invoice lists every payment and the balance due, and paying online
+  charges only the balance (Stripe needs at least $0.50; less is recorded by hand). The emailed
+  invoice and the lists show the balance too.
+- **Correcting:** a payment toward the balance added by mistake is removed from the invoice's
+  admin page while the invoice is open. Marking a paid invoice unpaid removes only the settling
+  payment.
+- **Limits:** an invoice with payments toward it cannot be voided, and its total cannot be edited
+  below what has been paid. Deleting it deletes its payments, and they come out of the books.
+
 ## Books
 
 The admin panel's **Books** page (`/clients/admin/books`, `books.js`) holds the portal's
@@ -238,7 +258,10 @@ bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tabl
   After any change, the journal gets only the difference: a reversal of each part that no longer
   matches, on that part's own date, and the part as it is now. The parts:
   - **issue:** receivable to sales, on the invoice date.
+  - **installment:<id>:** a payment toward the balance recorded by hand (Add payment), received
+    outside Stripe to receivable, on its own date. One part per payment; removing one reverses it.
   - **payment:** Stripe balance, or received outside Stripe, to receivable, on the payment date.
+    After payments toward the balance, it is the rest: what settled the invoice.
   - **fee:** Stripe fees to Stripe balance.
   - **refund:<id>:** refunds to Stripe balance, on the refund's day, one part per Stripe refund.
     A refund that fails or is canceled comes back off. The invoice's payment keeps each refund

@@ -1,4 +1,4 @@
-import { billingLabel, billingLineItems, isEditable, issuedDate, moneyInput, PAYMENT_METHODS, quantityText, todayInMichigan } from "./billing.js";
+import { balanceDue, billingLabel, billingLineItems, installmentsTotal, isEditable, isPayable, issuedDate, moneyInput, PAYMENT_METHODS, quantityText, todayInMichigan } from "./billing.js";
 import { addressesText, clientEmails, MAX_RECIPIENTS } from "./email.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 import { DOCUMENT_SECTIONS, awaitingSignature, groupBySection, sectionName, sectionOf } from "./documents.js";
@@ -215,7 +215,8 @@ function billingStatus(item) {
   if (item.status === "accepted") return ["paid", "Accepted"];
   if (item.status === "void") return ["void", "Void"];
   if (item.status === "processing") return ["open", "Processing"];
-  return item.kind === "invoice" ? ["open", "Due"] : ["open", "Awaiting review"];
+  if (item.kind === "invoice") return installmentsTotal(item) > 0 ? ["open", "Partly paid"] : ["open", "Due"];
+  return ["open", "Awaiting review"];
 }
 
 function kindLabel(item) {
@@ -247,7 +248,7 @@ function statusDetail(item) {
 function deleteNote(item) {
   if (item.status === "processing") return "A bank payment for this invoice is still processing, so it can be deleted once it finishes.";
   if (item.kind === "quote") return "Its link stops working and its number is not used again. This can't be undone.";
-  return `${item.status === "paid" ? "Its payment record is deleted with it. " : ""}Its link stops working, and later invoices move up a number. This can't be undone.`;
+  return `${item.status === "paid" || installmentsTotal(item) > 0 ? "Its payment records are deleted with it. " : ""}Its link stops working, and later invoices move up a number. This can't be undone.`;
 }
 
 function billingRows(items, { basePath, viewer }) {
@@ -282,7 +283,7 @@ function billingRows(items, { basePath, viewer }) {
     return `<tr>
           <td><span class="portal-number">${escapeHtml(item.number)}</span></td>
           <td>${escapeHtml(item.title)}${dueLine}${note}</td>
-          <td>${money(item.amountCents, item.currency)}</td>
+          <td>${money(item.amountCents, item.currency)}${partlyPaid(item) ? `<small>${money(balanceDue(item), item.currency)} due</small>` : ""}</td>
           <td>${status}${detail ? `<small class="status-detail">${detailText}</small>` : ""}</td>
           <td>${action}</td>
         </tr>`;
@@ -299,10 +300,9 @@ function billingRows(items, { basePath, viewer }) {
 function billingTotals(items) {
   const invoices = items.filter((item) => item.kind === "invoice" && item.status !== "void");
   if (!invoices.length) return "";
-  const paidOf = (item) => (item.status === "paid" ? item.payment?.amountCents ?? item.amountCents : 0);
   const invoiced = invoices.reduce((sum, item) => sum + item.amountCents, 0);
-  const paid = invoices.reduce((sum, item) => sum + paidOf(item), 0);
-  const outstanding = invoices.reduce((sum, item) => sum + Math.max(item.amountCents - paidOf(item), 0), 0);
+  const paid = invoices.reduce((sum, item) => sum + item.amountCents - balanceDue(item), 0);
+  const outstanding = invoices.reduce((sum, item) => sum + balanceDue(item), 0);
   return `
       <dl class="billing-totals">
         <div><dt>Invoiced</dt><dd>${money(invoiced)}</dd></div>
@@ -423,6 +423,15 @@ function stripeAftermath(item) {
   return lines.map((line) => `<p class="admin-meta">${escapeHtml(line)}</p>`).join("\n          ");
 }
 
+// Open with payments toward it already (a client paying a bill down over time).
+function partlyPaid(item) {
+  return item.kind === "invoice" && ["open", "processing"].includes(item.status) && installmentsTotal(item) > 0;
+}
+
+function paidSoFar(item) {
+  return partlyPaid(item) ? `<p class="portal-notice">You have paid ${money(installmentsTotal(item), item.currency)} of ${money(item.amountCents, item.currency)}. ${money(balanceDue(item), item.currency)} is left to pay.</p>` : "";
+}
+
 function paymentSummary(item) {
   const payment = item.payment || {};
   return [formatDate(item.paidAt), payment.label].filter(Boolean).join(" · ");
@@ -439,14 +448,20 @@ export function billingDocument({ item, client }) {
             </tr>`).join("");
 
   const totals = [];
+  const earlier = (item.installments || []).map((entry) => `<tr><th scope="row" colspan="3">Paid ${escapeHtml([formatDate(entry.paidOn), entry.label].filter(Boolean).join(" · "))}</th><td>${money(-entry.amountCents, item.currency)}</td></tr>`);
   if (invoice && item.status === "paid") {
-    const paidCents = item.payment?.amountCents ?? item.amountCents;
+    const paidCents = item.payment?.amountCents ?? item.amountCents - installmentsTotal(item);
     totals.push(`<tr><th scope="row" colspan="3">Total</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
+    totals.push(...earlier);
     totals.push(`<tr><th scope="row" colspan="3">Paid ${escapeHtml(paymentSummary(item))}</th><td>${money(-paidCents, item.currency)}</td></tr>`);
     for (const refund of liveRefunds(item)) {
       totals.push(`<tr><th scope="row" colspan="3">Refunded ${escapeHtml(formatDate(refund.refundedAt))}</th><td>${money(refund.amountCents, item.currency)}</td></tr>`);
     }
-    totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Balance due</th><td>${money(Math.max(item.amountCents - paidCents, 0), item.currency)}</td></tr>`);
+    totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Balance due</th><td>${money(balanceDue(item), item.currency)}</td></tr>`);
+  } else if (invoice && earlier.length && item.status !== "void") {
+    totals.push(`<tr><th scope="row" colspan="3">Total</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
+    totals.push(...earlier);
+    totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Balance due</th><td>${money(balanceDue(item), item.currency)}</td></tr>`);
   } else if (invoice) {
     totals.push(`<tr class="billing-total"><th scope="row" colspan="3">${item.status === "void" ? "Total (void)" : "Amount due"}</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
   } else {
@@ -517,9 +532,9 @@ function acceptForm(action, { requireName }) {
 export function billingDetailPage({ client, item, stripeReady, admin = false, notice = null }) {
   let action = statusPanel(item);
   if (item.kind === "invoice" && item.status === "open") {
-    action = stripeReady
-      ? `<form action="/clients/billing/${encodeURIComponent(item.id)}/pay" method="post">
-          <button class="button button-solid" type="submit">Pay ${money(item.amountCents, item.currency)} securely</button>
+    action = stripeReady && isPayable(item)
+      ? `${paidSoFar(item)}<form action="/clients/billing/${encodeURIComponent(item.id)}/pay" method="post">
+          <button class="button button-solid" type="submit">Pay ${money(balanceDue(item), item.currency)} securely</button>
           <p class="portal-security-note">Payments are processed by Stripe. Card and bank details are entered on Stripe's secure checkout page and never touch this website.</p>
         </form>`
       : '<p class="portal-notice">Online payment is not available yet. Please contact My Home Builder to arrange payment.</p>';
@@ -548,8 +563,8 @@ export function sharedBillingPage({ client, item, stripeReady, token, notice = n
   const invoice = item.kind === "invoice";
   let action = statusPanel(item);
   if (invoice && item.status === "open") {
-    action = stripeReady
-      ? `<a class="button button-solid" href="/clients/pay/${encodeURIComponent(token)}">Pay ${money(item.amountCents, item.currency)} securely</a>
+    action = stripeReady && isPayable(item)
+      ? `${paidSoFar(item)}<a class="button button-solid" href="/clients/pay/${encodeURIComponent(token)}">Pay ${money(balanceDue(item), item.currency)} securely</a>
           <p class="portal-security-note">Payments are processed by Stripe. Card and bank details are entered on Stripe's secure checkout page and never touch this website.</p>`
       : '<p class="portal-notice">Online payment is not available yet. Please contact My Home Builder to arrange payment.</p>';
     action += checkOption(item);
@@ -745,6 +760,52 @@ function statusDialogs(client, readiness) {
         </dialog>`;
 }
 
+// Add payment: a payment toward one of the project's open invoices. The list opens it in a popup;
+// the same form is a page without scripts.
+function addPaymentFields({ client, billing, readiness, selected = "", prefix }) {
+  const open = billing.filter((item) => item.kind === "invoice" && item.status === "open" && balanceDue(item) > 0);
+  if (!open.length) return '<p class="admin-meta">No invoices in this project are waiting for payment.</p>';
+  const chosen = open.find((item) => item.id === selected) || open[0];
+  const emails = clientEmails(client);
+  const options = open.map((item) => `<option value="${escapeAttribute(item.id)}" data-balance="${escapeAttribute(moneyInput(balanceDue(item)))}"${item === chosen ? " selected" : ""}>${escapeHtml(billingLabel(item))} · ${escapeHtml(item.title)} · ${money(balanceDue(item), item.currency)} due</option>`).join("");
+  return `<form class="admin-stack-form" method="post" action="/clients/admin/clients/${encodeURIComponent(client.slug)}/payments" data-add-payment-form>
+            <label for="${prefix}-invoice">Invoice
+              <select id="${prefix}-invoice" name="invoice" data-add-payment-invoice>${options}</select>
+            </label>
+            <label for="${prefix}-amount">Amount received ($)
+              <input id="${prefix}-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required value="${escapeAttribute(moneyInput(balanceDue(chosen)))}" data-add-payment-amount>
+            </label>
+            ${paymentFields(prefix, { date: todayInMichigan() })}
+            ${readiness.email && emails.length ? `<label class="portal-check" for="${prefix}-receipt">
+              <input id="${prefix}-receipt" name="sendReceipt" type="checkbox" value="yes" checked>
+              <span>Email a receipt to ${escapeHtml(addressesText(emails))}</span>
+            </label>` : ""}
+            <button class="button button-solid" type="submit">Add payment</button>
+            <p class="portal-security-note">A payment less than the balance leaves the rest due, and the invoice shows each payment. The balance marks it paid.</p>
+          </form>`;
+}
+
+function addPaymentDialog({ client, billing, readiness }) {
+  return `<dialog class="admin-dialog" id="add-payment-dialog" aria-labelledby="add-payment-title">
+          <div class="admin-dialog-head">
+            <h2 id="add-payment-title">Add a payment</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          ${addPaymentFields({ client, billing, readiness, prefix: "add-payment" })}
+        </dialog>`;
+}
+
+export function adminAddPaymentPage({ client, billing, readiness, selected = "", notice = null }) {
+  return adminShell(`<div class="site-width portal-shell portal-detail">
+      <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a></p>
+      <h1 class="portal-heading portal-heading-sm">Add a payment.</h1>
+      ${noticeMarkup(notice)}
+      <section class="admin-card admin-card-narrow">
+        ${addPaymentFields({ client, billing, readiness, selected, prefix: "add-payment" })}
+      </section>
+    </div>`, { title: "Add a payment", scripts: [BILLING_SCRIPT] });
+}
+
 // Admin Documents page: share a document into any client portal's section and ask for
 // signatures, with everything still awaiting a signature listed first.
 export function adminDocumentsPage({ clients, documents, notice = null }) {
@@ -853,6 +914,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           <div class="admin-actions-bar">
             <a class="button button-solid" href="${base}/billing/new?kind=invoice">New invoice</a>
             <a class="button button-outline" href="${base}/billing/new?kind=quote">New quote</a>
+            <a class="button button-outline" href="${base}/payments/new" data-add-payment>Add payment</a>
           </div>
           ${templatePicker(templates, `${base}/billing/new`)}
         </div>
@@ -879,6 +941,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           <button class="button button-solid" type="submit">Share with client</button>
         </form>
         ${statusDialogs(selected, readiness)}
+        ${addPaymentDialog({ client: selected, billing, readiness })}
       </section>`;
     })()
     : `<section class="admin-panel"><p class="portal-empty">Choose a client portal to manage its quotes, invoices and documents.</p></section>`;
@@ -1182,16 +1245,26 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   }
 
   if (invoice && item.status === "open") {
+    const installments = item.installments || [];
+    const listed = installments.length
+      ? `<ul class="admin-activity">${installments.map((entry) => `<li><span>${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}</span>
+            <form class="admin-manage" action="${base}/remove-payment" method="post"><input type="hidden" name="installment" value="${escapeAttribute(entry.id)}"><button class="portal-logout-button" type="submit">Remove</button></form></li>`).join("")}</ul>
+          <p class="admin-meta">Paid so far ${money(installmentsTotal(item), item.currency)} of ${money(item.amountCents, item.currency)}; ${money(balanceDue(item), item.currency)} is due.</p>`
+      : "";
     cards.push(`<section class="admin-card">
-          <h2>Record a payment</h2>
-          <p class="admin-meta">For checks, Zelle, cash and other payments received outside Stripe.</p>
+          <h2>Add a payment</h2>
+          <p class="admin-meta">For checks, Zelle, cash and other payments received outside Stripe. A payment less than the balance leaves the rest due; the balance marks the invoice paid.</p>
+          ${listed}
           <form class="admin-stack-form" action="${base}/record-payment" method="post">
+            <label for="payment-amount">Amount received ($)
+              <input id="payment-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required value="${escapeAttribute(moneyInput(balanceDue(item)))}">
+            </label>
             ${paymentFields("payment", { date: links.today })}
             ${readiness.email && projectEmails.length ? `<label class="portal-check" for="payment-receipt">
               <input id="payment-receipt" name="sendReceipt" type="checkbox" value="yes" checked>
               <span>Email a receipt to ${escapeHtml(addressesText(projectEmails))}</span>
             </label>` : ""}
-            <button class="button button-solid" type="submit">Mark as paid</button>
+            <button class="button button-solid" type="submit">Add payment</button>
           </form>
         </section>`);
   }
@@ -1199,10 +1272,14 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   if (invoice && item.status === "paid") {
     const payment = item.payment || {};
     const summary = [payment.label || "Payment", formatDate(item.paidAt), money(payment.amountCents ?? item.amountCents, item.currency)].filter(Boolean).join(" · ");
+    const earlier = (item.installments || []).length
+      ? `<p class="admin-meta">Paid earlier toward the balance: ${item.installments.map((entry) => `${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}`).join("; ")}.</p>`
+      : "";
     cards.push(payment.source === "manual"
       ? `<section class="admin-card">
           <h2>Payment</h2>
           <p class="admin-meta">Recorded as ${escapeHtml(summary)}.</p>
+          ${earlier}
           <form class="admin-stack-form" action="${base}/payment" method="post">
             ${paymentFields("edit-payment", { payment, date: String(item.paidAt || links.today).slice(0, 10) })}
             <button class="button button-solid" type="submit">Save payment</button>
@@ -1215,6 +1292,7 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
       : `<section class="admin-card">
           <h2>Payment</h2>
           <p class="admin-meta">Paid online through Stripe: ${escapeHtml(summary)}.</p>
+          ${earlier}
           ${stripeAftermath(item)}
           <p class="portal-security-note">Stripe payments keep the details Stripe recorded. Refunds are made in Stripe.</p>
         </section>`);
@@ -1248,7 +1326,8 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
 
   const manage = [];
   if (isEditable(item)) manage.push(`<a class="button button-outline" href="${base}/edit">Edit ${invoice ? "invoice" : "quote"}</a>`);
-  if (item.status === "open") manage.push(`<form action="${base}/void" method="post"><button class="portal-logout-button" type="submit">Mark void</button></form>`);
+  // An invoice with payments toward it is not voided (its payments would have nothing to apply to).
+  if (item.status === "open" && !installmentsTotal(item)) manage.push(`<form action="${base}/void" method="post"><button class="portal-logout-button" type="submit">Mark void</button></form>`);
   manage.push(`<form action="/clients/admin/templates/from-billing" method="post"><input type="hidden" name="client" value="${escapeAttribute(client.slug)}"><input type="hidden" name="id" value="${escapeAttribute(item.id)}"><button class="portal-logout-button" type="submit">Save as a template</button></form>`);
   cards.push(`<section class="admin-card">
           <h2>Manage</h2>
@@ -1331,7 +1410,7 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
     : `<section class="books-check books-check-off" aria-labelledby="books-check-heading">
           <h2 id="books-check-heading">The books do not balance.</h2>
           ${check.debits !== check.credits ? `<p>Debits are ${money(check.debits)} and credits are ${money(check.credits)}.</p>` : ""}
-          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment" })[part] || part).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
+          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", installment: "payment toward the balance", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment" })[part] || part).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
           <form action="/clients/admin/books/correct" method="post">
             <button class="button button-solid" type="submit">Post corrections</button>
           </form>
@@ -1524,13 +1603,14 @@ export function billingDeletePage({ client, item, partner = null }) {
       ? `It was paid online through Stripe (${paid}). The payment stays in the Stripe account; this portal will no longer show it.`
       : `It is marked paid (${paid}). That payment record is deleted with it.`);
   }
+  if (installmentsTotal(item) > 0) notes.push(`Payments toward it (${item.installments.map((entry) => `${money(entry.amountCents, item.currency)} · ${entry.label} · ${formatDate(entry.paidOn)}`).join("; ")}) are deleted with it.`);
   if (item.sentAt) notes.push(`It was emailed to ${item.sentTo}. The link in that email will stop working.`);
   if (partner) {
     notes.push(invoice
       ? `It was made from Quote ${partner.number}. The quote stays and can be invoiced again.`
       : `Invoice ${partner.number} was made from it. The invoice stays.`);
   }
-  if (item.status === "open" && invoice) notes.push("To keep a record of it instead, go back and use Mark void.");
+  if (item.status === "open" && invoice && !installmentsTotal(item)) notes.push("To keep a record of it instead, go back and use Mark void.");
   const numbering = invoice
     ? "Later invoices move up a number, so invoice numbers stay in date order."
     : "Its number is not used again.";

@@ -89,6 +89,7 @@ import {
   maskedEmail,
   parseEmailList,
   paymentFailedMessage,
+  partialPaymentReceiptMessage,
   paymentReceiptMessage,
   quoteAcceptedMessage,
   sendEmail
@@ -96,6 +97,9 @@ import {
 import {
   MIN_INVOICE_CENTS,
   addDays,
+  balanceDue,
+  installmentsTotal,
+  parseMoney,
   billingLabel,
   billingLineItems,
   issuedDate,
@@ -116,6 +120,7 @@ import {
   adminBillingPage,
   adminBooksPage,
   adminDashboardPage,
+  adminAddPaymentPage,
   adminDocumentsPage,
   adminRequestPage,
   adminTemplatesPage,
@@ -277,6 +282,13 @@ const NOTICES = {
   "payment-from-stripe": { text: "This payment came through Stripe, so its details stay as Stripe recorded them.", tone: "info" },
   "payment-other-required": { text: "Type the payment method when you choose Other.", tone: "error" },
   "payment-date-invalid": { text: "Enter the date the payment was received.", tone: "error" },
+  "payment-partial": { text: "Payment added. The rest of the invoice is still due." },
+  "payment-partial-receipt": { text: "Payment added and a receipt was emailed to the client. The rest of the invoice is still due." },
+  "payment-amount-invalid": { text: "Enter the amount received, like 500 or 500.00.", tone: "error" },
+  "payment-over-balance": { text: "That is more than the invoice's balance due, so it was not added.", tone: "error" },
+  "payment-invoice-required": { text: "Choose the invoice the payment goes toward.", tone: "error" },
+  "partial-removed": { text: "Payment removed. The invoice's balance due went back up." },
+  "void-has-payments": { text: "Payments have been added to this invoice, so it cannot be voided. Remove them first.", tone: "error" },
   moved: { text: "Sent to this project. It keeps its number and link, and this project's emails are used from now on." },
   "moved-pair": { text: "Sent to this project with its linked quote or invoice. Both keep their numbers and links." },
   "move-processing": { text: "A bank payment for this invoice is still processing, so it stays in this project until the payment finishes.", tone: "error" },
@@ -523,7 +535,7 @@ function webhookConfigured(env) {
 // A Checkout pays an invoice only for the total it was opened with. Stripe's copy of the session
 // says what it took.
 function paymentMatches(invoice, session) {
-  return (!Number.isInteger(session.amount_total) || session.amount_total === invoice.amountCents)
+  return (!Number.isInteger(session.amount_total) || session.amount_total === balanceDue(invoice))
     && (!session.currency || session.currency === (invoice.currency || "usd"));
 }
 
@@ -559,7 +571,7 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
       if (!alert.ok) throw new EmailDeliveryError("mismatched payment alert");
       await record(store, {
         actor: "stripe", action: "stripe.mismatch", item: invoice, amountCents, data: { session: session.id },
-        summary: `Stripe took ${money(amountCents, session.currency || invoice.currency)} for ${billingLabel(invoice)}, which totals ${money(invoice.amountCents, invoice.currency)}; not applied`,
+        summary: `Stripe took ${money(amountCents, session.currency || invoice.currency)} for ${billingLabel(invoice)}, whose balance due is ${money(balanceDue(invoice), invoice.currency)}; not applied`,
         unapplied: { externalId: session.id, amountCents, item: invoice, memo: `${billingLabel(invoice)} · payment did not match its total (refund or apply it)` }
       });
     }
@@ -582,7 +594,7 @@ async function settleStripePayment(env, store, invoice, session, origin, { notif
         receiptUrl: details?.receiptUrl || "",
         ...(Number.isInteger(details?.feeCents) ? { feeCents: details.feeCents } : {}),
         email: session.customer_details?.email || session.customer_email || "",
-        amountCents: Number.isInteger(session.amount_total) ? session.amount_total : invoice.amountCents,
+        amountCents: Number.isInteger(session.amount_total) ? session.amount_total : balanceDue(invoice),
         paymentIntentId: paymentIntentId || "",
         chargeId: details?.chargeId || ""
       }
@@ -635,18 +647,18 @@ async function checkoutUrl(env, store, invoice, client, { successUrl, cancelUrl 
   const now = Math.floor(Date.now() / 1000);
   // An open Checkout is reused only while it still shows this total and number (numbers follow
   // invoice dates, so they can change).
-  if (invoice.checkoutSessionId && invoice.checkoutSuccessUrl === successUrl && invoice.checkoutAmountCents === invoice.amountCents && invoice.checkoutNumber === invoice.number && (invoice.checkoutExpiresAt || 0) > now + 300) {
+  if (invoice.checkoutSessionId && invoice.checkoutSuccessUrl === successUrl && invoice.checkoutAmountCents === balanceDue(invoice) && invoice.checkoutNumber === invoice.number && (invoice.checkoutExpiresAt || 0) > now + 300) {
     const existing = await retrieveCheckoutSession(env, invoice.checkoutSessionId).catch(() => null);
     if (existing?.status === "open" && existing.url) return existing.url;
   }
   const session = await createCheckoutSession(env, { invoice, client, successUrl, cancelUrl });
-  await record(store, { actor: "client", action: "stripe.checkout", item: invoice, amountCents: invoice.amountCents, summary: `Opened Stripe Checkout for ${billingLabel(invoice)} (${money(invoice.amountCents, invoice.currency)})`, data: { session: session.id } });
+  await record(store, { actor: "client", action: "stripe.checkout", item: invoice, amountCents: balanceDue(invoice), summary: `Opened Stripe Checkout for ${billingLabel(invoice)} (${money(balanceDue(invoice), invoice.currency)})`, data: { session: session.id } });
   await putBilling(store, {
     ...invoice,
     checkoutSessionId: session.id,
     checkoutExpiresAt: session.expires_at || now + 23 * 60 * 60,
     checkoutSuccessUrl: successUrl,
-    checkoutAmountCents: invoice.amountCents,
+    checkoutAmountCents: balanceDue(invoice),
     checkoutNumber: invoice.number
   });
   return session.url;
@@ -1074,6 +1086,53 @@ function templateRecord(values, existing = null) {
   };
 }
 
+// Records a payment received outside Stripe for an open invoice and returns the notice to show.
+// Less than the balance is a payment toward it (item.installments; the invoice stays open for the
+// rest); the balance, or no amount given, settles the invoice (item.payment). More is refused.
+// With sendReceipt, the client is emailed a receipt for it.
+async function addPayment({ env, store, target, item, form, readiness, origin, note }) {
+  if (item.kind !== "invoice" || item.status !== "open") return "not-payable";
+  const entered = parseManualPayment(form);
+  if (entered.error) return entered.error;
+  const balance = balanceDue(item);
+  const typed = String(form.get("amount") || "").trim();
+  const amountCents = typed ? parseMoney(typed) : balance;
+  if (!amountCents || amountCents < 0) return "payment-amount-invalid";
+  if (amountCents > balance) return "payment-over-balance";
+  // The balance Checkout would charge is changing.
+  if (item.checkoutSessionId) await expireCheckoutSession(env, item.checkoutSessionId);
+  const { paidOn, ...details } = entered;
+  const receiptTo = clientEmails(target);
+  const wantsReceipt = form.get("sendReceipt") === "yes" && readiness.email && receiptTo.length;
+
+  if (amountCents < balance) {
+    const installment = { id: randomId(8), source: "manual", ...details, amountCents, paidOn, recordedAt: new Date().toISOString() };
+    const updated = await withShareToken(store, { ...item, installments: [...(item.installments || []), installment] });
+    await putBilling(store, updated);
+    await note({ action: "payment.partial", item: updated, amountCents, summary: `Recorded a ${installment.label} payment of ${money(amountCents, updated.currency)} toward ${billingLabel(updated)}, received ${formatDate(paidOn)}; ${money(balanceDue(updated), updated.currency)} still due` });
+    if (!wantsReceipt) return "payment-partial";
+    const message = partialPaymentReceiptMessage({ item: updated, client: target, installment, viewUrl: shareLinks(origin, updated).view });
+    const receipt = await sendOnce(env, store, sentKey(updated, `receipt:${installment.id}`), { to: receiptTo, ...message, ...clientSender(env), category: "receipt" }, { remember: true });
+    if (!receipt.ok) return "payment-partial";
+    await note({ action: "receipt.emailed", item: updated, summary: `Emailed the receipt for the ${money(amountCents, updated.currency)} payment toward ${billingLabel(updated)} to ${receiptTo.join(", ")}` });
+    return "payment-partial-receipt";
+  }
+
+  const updated = await withShareToken(store, {
+    ...item,
+    status: "paid",
+    paidAt: paidOn,
+    payment: { source: "manual", ...details, amountCents: balance, recordedAt: new Date().toISOString() }
+  });
+  await putBilling(store, updated);
+  await note({ action: "payment.recorded", item: updated, amountCents: balance, summary: `Recorded a ${updated.payment.label} payment of ${money(balance, updated.currency)} for ${billingLabel(updated)}, received ${formatDate(updated.paidAt)}${installmentsTotal(updated) ? "; it is paid in full" : ""}` });
+  if (!wantsReceipt) return "payment-recorded";
+  const receipt = await sendOnce(env, store, sentKey(updated, "receipt"), receiptMessage(env, updated, target, receiptTo, origin), { remember: true });
+  if (!receipt.ok) return "payment-recorded";
+  await note({ action: "receipt.emailed", item: updated, summary: `Emailed the receipt for ${billingLabel(updated)} to ${receiptTo.join(", ")}` });
+  return "payment-recorded-receipt";
+}
+
 async function handleAdminBilling(context, store, target, id, action, readiness, origin) {
   const env = context.env;
   const method = context.request.method;
@@ -1184,12 +1243,15 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (parsed.error) {
       return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }), 400);
     }
+    if (parsed.values.amountCents < installmentsTotal(item)) {
+      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: `The total cannot be less than the ${money(installmentsTotal(item), item.currency)} already paid toward this invoice.`, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }), 400);
+    }
     if (item.checkoutSessionId && parsed.values.amountCents !== item.amountCents) await expireCheckoutSession(env, item.checkoutSessionId);
     const { title, description, lineItems, amountCents, dueDate } = parsed.values;
     const issuedOn = parsed.values.issuedOn || issuedDate(item);
-    // A payment recorded by hand is the invoice paid in full, so its amount follows the new total.
-    // A Stripe payment keeps the amount Stripe charged.
-    const payment = item.payment?.source === "manual" ? { payment: { ...item.payment, amountCents } } : {};
+    // A payment recorded by hand settles the invoice, so its amount follows the new total, less
+    // any payments toward the balance before it. A Stripe payment keeps the amount Stripe charged.
+    const payment = item.payment?.source === "manual" ? { payment: { ...item.payment, amountCents: amountCents - installmentsTotal(item) } } : {};
     const edited = { ...item, title, description, lineItems, amountCents, dueDate, issuedOn, ...payment, updatedAt: new Date().toISOString() };
     await putBilling(store, edited);
     const renumbered = issuedOn !== issuedDate(item) && (await keepInvoicesInDateOrder(store, item.kind));
@@ -1271,6 +1333,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   }
 
   if (action === "void") {
+    if (item.status === "open" && installmentsTotal(item) > 0) return redirectResponse(`${itemPath}?notice=void-has-payments`);
     if (item.status === "open") {
       if (item.checkoutSessionId) await expireCheckoutSession(env, item.checkoutSessionId);
       const voided = { ...item, status: "void", voidedAt: new Date().toISOString() };
@@ -1280,34 +1343,27 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     return redirectResponse(`${itemPath}?notice=voided`);
   }
 
-  // Marked paid from the invoice page, or from the admin list's status popup (return=list),
-  // which goes back to the list.
+  // A payment from the invoice page, the admin list's status popup or Add payment (return=list,
+  // which goes back to the list): toward the balance, or settling it (addPayment).
   if (action === "record-payment") {
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
     const back = (notice) => redirectResponse(form?.get("return") === "list" ? `/clients/admin?client=${encodeURIComponent(slug)}&notice=${notice}` : `${itemPath}?notice=${notice}`);
+    return back(await addPayment({ env, store, target, item, form, readiness, origin, note }));
+  }
+
+  // Removes a payment toward the balance added by mistake, while the invoice is still open.
+  if (action === "remove-payment") {
+    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+    const back = (notice) => redirectResponse(`${itemPath}?notice=${notice}`);
     if (item.kind !== "invoice" || item.status !== "open") return back("not-payable");
-    const entered = parseManualPayment(form);
-    if (entered.error) return back(entered.error);
+    const removed = (item.installments || []).find((entry) => entry.id === String(form?.get("installment") || ""));
+    if (!removed) return back("invalid");
     if (item.checkoutSessionId) await expireCheckoutSession(env, item.checkoutSessionId);
-    const { paidOn, ...details } = entered;
-    const updated = await withShareToken(store, {
-      ...item,
-      status: "paid",
-      paidAt: paidOn,
-      payment: { source: "manual", ...details, amountCents: item.amountCents, recordedAt: new Date().toISOString() }
-    });
+    const updated = { ...item, installments: item.installments.filter((entry) => entry.id !== removed.id) };
     await putBilling(store, updated);
-    await note({ action: "payment.recorded", item: updated, amountCents: updated.payment.amountCents, summary: `Recorded a ${updated.payment.label} payment of ${money(updated.payment.amountCents, updated.currency)} for ${billingLabel(updated)}, received ${formatDate(updated.paidAt)}` });
-    let notice = "payment-recorded";
-    const receiptTo = clientEmails(target);
-    if (form.get("sendReceipt") === "yes" && readiness.email && receiptTo.length) {
-      const receipt = await sendOnce(env, store, sentKey(updated, "receipt"), receiptMessage(env, updated, target, receiptTo, origin), { remember: true });
-      if (receipt.ok) {
-        notice = "payment-recorded-receipt";
-        await note({ action: "receipt.emailed", item: updated, summary: `Emailed the receipt for ${billingLabel(updated)} to ${receiptTo.join(", ")}` });
-      }
-    }
-    return back(notice);
+    await note({ action: "payment.removed", item: updated, reason: "payment-removed", amountCents: removed.amountCents, summary: `Removed the ${removed.label} payment of ${money(removed.amountCents, item.currency)} (${formatDate(removed.paidOn)}) from ${billingLabel(item)}; ${money(balanceDue(updated), item.currency)} is due` });
+    await deleteSentEmails(store, [sentKey(item, `receipt:${removed.id}`)]);
+    return back("partial-removed");
   }
 
   // Corrects a payment recorded by hand (method, reference or date; the amount is the invoice
@@ -1322,7 +1378,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const entered = parseManualPayment(form);
     if (entered.error) return back(entered.error);
     const { paidOn, ...details } = entered;
-    const corrected = { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, amountCents: item.amountCents, updatedAt: new Date().toISOString() } };
+    const corrected = { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, amountCents: item.amountCents - installmentsTotal(item), updatedAt: new Date().toISOString() } };
     await putBilling(store, corrected);
     const was = `${item.payment?.label || "payment"}, ${formatDate(item.paidAt)}`;
     const now = `${corrected.payment.label}, ${formatDate(corrected.paidAt)}`;
@@ -1720,7 +1776,7 @@ export async function handlePortalRequest(context) {
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=client-added`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|payments)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -1730,6 +1786,23 @@ export async function handlePortalRequest(context) {
         const id = idRaw ? decodeSegment(idRaw) : "";
 
         if (area === "billing") return handleAdminBilling(context, store, target, id, action || "", readiness, origin);
+
+        // Add payment: a payment toward any open invoice of this project (the page without scripts;
+        // the list opens the same form in a popup).
+        if (area === "payments" && !action && (id === "new" || !id)) {
+          const billing = await listBilling(store, slug);
+          if (id === "new") {
+            if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+            return scriptedHtmlResponse(adminAddPaymentPage({ client: target, billing, readiness, selected: url.searchParams.get("invoice") || "", notice: noticeFromQuery(url) }));
+          }
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+          const item = billing.find((entry) => entry.id === String(form?.get("invoice") || "") && entry.kind === "invoice");
+          if (!form || !item) return redirectResponse(`${back}&notice=payment-invoice-required`);
+          const admin = { actor: "admin", ip: requestIp(context.request) };
+          const notice = await addPayment({ env, store, target, item, form, readiness, origin, note: (event) => record(store, { ...admin, ...event }) });
+          return redirectResponse(`${back}&notice=${notice}`);
+        }
 
         // The project's email list: saving an empty field clears it.
         if (area === "profile" && !id && !action) {
