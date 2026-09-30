@@ -211,21 +211,33 @@ export function crewHomePage({ worker, entries, clients, documents, today, secur
           </label>
           <button class="button button-solid" type="submit">Continue to the lien waiver</button>
         </form>`;
-  const coiForm = worker.kind === "subcontractor"
-    ? `<form class="portal-form portal-upload" action="/clients/crew/documents/upload" method="post" enctype="multipart/form-data">
-          <h3>Upload your certificate of insurance</h3>
-          <p>A PDF or photo of your current certificate, up to 20 MB.</p>
-          <label for="coi-file">Choose a file
-            <input id="coi-file" name="file" type="file" required accept="application/pdf,image/*">
+  // Upload document: anything My Home Builder asks for. A subcontractor without a certificate of
+  // insurance on file starts on that choice.
+  const uploads = documents.filter((document) => document.uploadedBy === "crew");
+  const needsCoi = worker.kind === "subcontractor" && !uploads.some((document) => document.section === "insurance");
+  const kinds = [["insurance", "Certificate of insurance"], ["license", "License or certification"], ["other", "Other"]];
+  const coiForm = `<form class="portal-form portal-upload" id="upload-document" action="/clients/crew/documents/upload" method="post" enctype="multipart/form-data">
+          <h3>Upload document</h3>
+          <p>Send My Home Builder a document: your certificate of insurance, a license or certification, or anything else it asks for. PDF, photos and common office files up to 20 MB.</p>
+          <label for="upload-kind">What is it?
+            <select id="upload-kind" name="kind">${kinds.map(([key, label]) => `<option value="${key}"${(needsCoi ? key === "insurance" : key === "other") ? " selected" : ""}>${label}</option>`).join("")}</select>
           </label>
-          <button class="button button-solid" type="submit">Upload</button>
-        </form>`
-    : "";
+          <label for="upload-file">Choose a file
+            <input id="upload-file" name="file" type="file" required>
+          </label>
+          <button class="button button-solid" type="submit">Upload document</button>
+        </form>
+        ${uploads.length ? `<table class="portal-table crew-uploads">
+          <thead><tr><th scope="col">You uploaded</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+          <tbody>${uploads.map((document) => `<tr><td><strong>${escapeHtml(document.name)}</strong><small>${escapeHtml(CREW_SECTIONS.find(([key]) => key === document.section)?.[1] || "Other documents")} · ${dateText(document.createdAt)}</small></td>
+            <td class="portal-actions"><a class="portal-secondary-link" href="/clients/crew/documents/${encodeURIComponent(document.id)}">Download</a></td></tr>`).join("")}</tbody>
+        </table>` : ""}`;
   return crewShell(`<div class="site-width portal-shell">
       <section>
         <p class="portal-kicker">Crew portal · ${escapeHtml(WORKER_KINDS[worker.kind])}</p>
         <h1 class="portal-heading">Hi, ${escapeHtml(firstName(worker))}.</h1>
         <p class="portal-lead">Send your ${employee ? "hours" : "invoices"}, and fill out and sign your paperwork for My Home Builder, in one place.</p>
+        <p class="portal-lead-actions"><a class="button button-outline" href="#upload-document">Upload document</a></p>
         ${notice(status)}
       </section>
       <section class="portal-section" aria-labelledby="paperwork-heading">

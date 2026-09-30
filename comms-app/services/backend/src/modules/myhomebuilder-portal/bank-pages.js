@@ -14,7 +14,7 @@ function notice(status) {
 }
 
 function options(groups, selected = "") {
-  return `<option value="">File to…</option>${groups.map((group) => `<optgroup label="${escapeAttribute(group.label)}">${group.options.map(([value, name]) => `<option value="${escapeAttribute(value)}"${value === selected ? " selected" : ""}>${escapeHtml(group.label !== "Common" && group.label !== "Pay crew" && group.label !== "Overhead" ? name.replace(`${group.label} · `, "") : name)}</option>`).join("")}</optgroup>`).join("")}`;
+  return `<option value="">File to…</option>${groups.map((group) => `<optgroup label="${escapeAttribute(group.label)}">${group.options.map(([value, name]) => `<option value="${escapeAttribute(value)}"${value === selected ? " selected" : ""}>${escapeHtml(!["Common", "Pay crew", "Overhead", "Recorded expenses"].includes(group.label) ? name.replace(`${group.label} · `, "") : name)}</option>`).join("")}</optgroup>`).join("")}`;
 }
 
 function amountCell(txn) {
@@ -43,7 +43,7 @@ function toFileRows(toFile, { accounts, suggestions, groupsFor }) {
             </form>` : ""}</td>
           <td class="bank-file-cell" data-label="File to">
             <form class="bank-file" method="post" action="${path}">
-              <select name="target" data-autofile aria-label="File ${escapeAttribute(txn.description)} to">${options(groupsFor(txn.amountCents))}</select>
+              <select name="target" data-autofile aria-label="File ${escapeAttribute(txn.description)} to">${options(groupsFor(txn.amountCents, txn.ledger))}</select>
               <button class="portal-logout-button" type="submit" data-autofile-button>File</button>
             </form>
           </td>

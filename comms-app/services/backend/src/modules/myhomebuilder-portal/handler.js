@@ -95,8 +95,10 @@ import {
   sendEmail
 } from "./email.js";
 import {
+  MAX_TOTAL_CENTS,
   MIN_INVOICE_CENTS,
   addDays,
+  isValidDate,
   balanceDue,
   installmentsTotal,
   parseMoney,
@@ -106,6 +108,7 @@ import {
   isEditable,
   isPayable,
   parseBillingForm,
+  parseListedPayments,
   parseManualPayment,
   todayInMichigan
 } from "./billing.js";
@@ -115,11 +118,13 @@ import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record, 
 import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
 import { CREW_SECTIONS } from "./labor.js";
 import { handleAdminLabor, handleCrew } from "./crew.js";
-import { handleAdminBank } from "./bank.js";
+import { handleAdminBank, listBankAccounts, unfileExpenseMatch } from "./bank.js";
+import { EXPENSE_CATEGORIES, categoryName, deleteExpense, getExpense, listExpenses, paidWithOptions, putExpense } from "./expenses.js";
 import {
   adminBillingPage,
   adminBooksPage,
   adminDashboardPage,
+  adminAddExpensePage,
   adminAddPaymentPage,
   adminDocumentsPage,
   adminRequestPage,
@@ -283,6 +288,14 @@ const NOTICES = {
   "payment-other-required": { text: "Type the payment method when you choose Other.", tone: "error" },
   "payment-date-invalid": { text: "Enter the date the payment was received.", tone: "error" },
   "payment-partial": { text: "Payment added. The rest of the invoice is still due." },
+  "expense-added": { text: "Expense added. It's a cost of this job in the books." },
+  "expense-deleted": { text: "Expense deleted and taken out of the books." },
+  "expense-date-invalid": { text: "Enter the date of the expense (today or earlier).", tone: "error" },
+  "expense-vendor-required": { text: "Enter who the expense was paid to (up to 120 characters).", tone: "error" },
+  "expense-category-invalid": { text: "Choose what kind of cost it was.", tone: "error" },
+  "expense-amount-invalid": { text: "Enter the expense amount, like 412.37.", tone: "error" },
+  "expense-paid-invalid": { text: "Choose what the expense was paid with.", tone: "error" },
+  "expense-receipt-invalid": { text: "Attach the receipt as a PDF or photo under 20 MB, or leave it off.", tone: "error" },
   "payment-partial-receipt": { text: "Payment added and a receipt was emailed to the client. The rest of the invoice is still due." },
   "payment-amount-invalid": { text: "Enter the amount received, like 500 or 500.00.", tone: "error" },
   "payment-over-balance": { text: "That is more than the invoice's balance due, so it was not added.", tone: "error" },
@@ -1086,6 +1099,58 @@ function templateRecord(values, existing = null) {
   };
 }
 
+// A new invoice with payments already received: the earliest are payments toward the balance, and
+// when they reach the total the last one settles it.
+function withListedPayments(item, payments) {
+  if (!payments.length) return item;
+  const recordedAt = new Date().toISOString();
+  const sorted = [...payments].sort((left, right) => left.paidOn.localeCompare(right.paidOn));
+  const toEntry = ({ paidOn, amountCents, ...details }) => ({ id: randomId(8), source: "manual", ...details, amountCents, paidOn, recordedAt });
+  const total = sorted.reduce((sum, entry) => sum + entry.amountCents, 0);
+  if (total < item.amountCents) return { ...item, installments: sorted.map(toEntry) };
+  const last = sorted.pop();
+  const { paidOn, amountCents, ...details } = last;
+  return { ...item, installments: sorted.map(toEntry), status: "paid", paidAt: paidOn, payment: { source: "manual", ...details, amountCents, recordedAt } };
+}
+
+// Adds a job expense from the Add expense form (multipart, with an optional receipt) and returns
+// the notice to show. `payers` are what it can be paid with (expenses.js paidWithOptions).
+async function addExpense({ store, target, form, payers, ip }) {
+  const spentOn = String(form.get("spentOn") || "").trim();
+  const vendor = String(form.get("vendor") || "").trim().replaceAll(/\s+/gu, " ");
+  const description = String(form.get("description") || "").trim().replaceAll(/\s+/gu, " ");
+  const category = String(form.get("category") || "");
+  const amountCents = parseMoney(String(form.get("amount") || ""));
+  const paidWith = payers.find((option) => option.key === String(form.get("paidWith") || ""));
+  if (!isValidDate(spentOn) || spentOn > todayInMichigan()) return "expense-date-invalid";
+  if (!vendor || vendor.length > 120 || description.length > 200) return "expense-vendor-required";
+  if (!EXPENSE_CATEGORIES.some(([code]) => code === category)) return "expense-category-invalid";
+  if (!amountCents || amountCents > MAX_TOTAL_CENTS) return "expense-amount-invalid";
+  if (!paidWith) return "expense-paid-invalid";
+  const id = randomId(12);
+  let receipt = null;
+  const file = form.get("receipt");
+  if (file && typeof file.arrayBuffer === "function" && file.size > 0) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const type = isPdf(bytes) ? "application/pdf" : String(file.type || "").split(";")[0].trim().toLowerCase();
+    if (bytes.byteLength > MAX_UPLOAD_BYTES || !["application/pdf", "image/jpeg", "image/png", "image/webp", "image/heic"].includes(type)) return "expense-receipt-invalid";
+    const name = safeFileName(file.name);
+    receipt = { key: `expenses/${target.slug}/${id}/${name}`, name, type };
+    await putFile(store, receipt.key, bytes, type);
+  }
+  const expense = {
+    id, clientSlug: target.slug, spentOn, vendor, description, category, amountCents,
+    paidWith: { key: paidWith.key, account: paidWith.account, label: paidWith.label },
+    receipt, bankTransactionId: null, createdAt: new Date().toISOString()
+  };
+  await putExpense(store, expense);
+  await record(store, {
+    actor: "admin", ip, action: "expense.added", clientSlug: target.slug, amountCents, expense, data: { expenseId: id },
+    summary: `Added an expense for ${target.name}: ${vendor}${description ? ` (${description})` : ""} · ${categoryName(category)} · ${money(amountCents)}, paid with ${paidWith.label}`
+  });
+  return "expense-added";
+}
+
 // Records a payment received outside Stripe for an open invoice and returns the notice to show.
 // Less than the balance is a payment toward it (item.installments; the invoice stays open for the
 // rest); the balance, or no amount given, settles the invoice (item.payment). More is refused.
@@ -1168,12 +1233,24 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const saveTemplate = form.get("saveTemplate") === "yes";
     const sendNow = form.get("sendNow") === "yes";
     const parsed = parseBillingForm(form);
-    const echo = { ...parsed.values, saveTemplate, sendNow };
+    // Payments already received, listed on a new invoice (quotes take none).
+    const listed = parsed.values.kind === "invoice" ? parseListedPayments(form) : { payments: [], typed: [] };
+    const echo = { ...parsed.values, saveTemplate, sendNow, payments: listed.typed };
     if (parsed.error) return renderError(echo, parsed.error);
+    if (listed.error) return renderError(echo, listed.error);
+    const listedCents = (listed.payments || []).reduce((sum, entry) => sum + entry.amountCents, 0);
+    if (listedCents > parsed.values.amountCents) return renderError(echo, `The payments listed (${money(listedCents)}) are more than the invoice total (${money(parsed.values.amountCents)}).`);
     if (saveTemplate && (!parsed.values.templateName || parsed.values.templateName.length > 80)) return renderError(echo, "Give the template a name of 80 characters or fewer, or untick Also save this as a template.");
 
     // Saved (and numbered in date order) before it is emailed, so the email carries its number.
-    const saved = await saveNewBillingItem(store, await buildBillingItem(store, target, parsed.values), { context: admin });
+    const built = withListedPayments(await buildBillingItem(store, target, parsed.values), listed.payments || []);
+    const saved = await saveNewBillingItem(store, built, { context: admin });
+    if (listed.payments?.length) {
+      await note({
+        action: "payment.listed", item: saved.item, amountCents: listedCents,
+        summary: `Listed ${listed.payments.length === 1 ? "a payment" : `${listed.payments.length} payments`} already received on ${billingLabel(saved.item)}: ${listed.payments.map((entry) => `${money(entry.amountCents)} ${entry.label} ${formatDate(entry.paidOn)}`).join("; ")}${saved.item.status === "paid" ? "; it is paid in full" : `; ${money(balanceDue(saved.item))} due`}`
+      });
+    }
     let item = saved.item;
     let notice = "billing-added";
     const projectEmails = clientEmails(target);
@@ -1537,9 +1614,53 @@ const KIT = {
   safeFileName
 };
 
+// ---------- The Back button ----------
+// Every form answers with a redirect when it succeeds. A page that answers a form directly (a
+// problem to fix, or a step such as "code sent") loads history.js, which turns its place in the
+// browser's history into a plain visit, so Back never asks to resubmit the form. Opened again, a
+// form's address goes to the page it belongs to rather than "Request not allowed".
+const HISTORY_SCRIPT = "/clients/portal/history.js";
+
+function pageFor(pathname) {
+  const invoice = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/billing\/([^/]+)/u);
+  if (invoice && invoice[2] !== "new") return `/clients/admin/clients/${invoice[1]}/billing/${invoice[2]}`;
+  const client = pathname.match(/^\/clients\/admin\/clients\/([^/]+)/u);
+  if (client) return `/clients/admin?client=${client[1]}`;
+  const worker = pathname.match(/^\/clients\/admin\/labor\/workers\/([^/]+)/u);
+  if (worker) return `/clients/admin/labor/workers/${worker[1]}`;
+  for (const section of ["/clients/admin/labor", "/clients/admin/bank", "/clients/admin/books", "/clients/admin/templates", "/clients/admin/documents"]) {
+    if (pathname === section || pathname.startsWith(`${section}/`)) return section;
+  }
+  if (/^\/clients\/admin\/(request|verify)$/u.test(pathname)) return "/clients/admin/code";
+  if (pathname.startsWith("/clients/admin")) return "/clients/admin";
+  if (pathname.startsWith("/clients/crew")) return "/clients/crew";
+  return "/clients";
+}
+
+async function answerToForm(response) {
+  const type = response.headers.get("Content-Type") || "";
+  if (!type.startsWith("text/html") || (response.status >= 300 && response.status < 400)) return response;
+  const html = await response.text();
+  const headers = new Headers(response.headers);
+  const policy = headers.get("Content-Security-Policy") || "";
+  if (policy && !policy.includes("script-src")) headers.set("Content-Security-Policy", policy.replace("default-src 'none'; ", "default-src 'none'; script-src 'self'; "));
+  headers.delete("Content-Length");
+  const body = html.includes("</head>") ? html.replace("</head>", `  <script src="${HISTORY_SCRIPT}" defer></script>\n</head>`) : html;
+  return new Response(body, { status: response.status, headers });
+}
+
 // context: { request, env }. env carries the portal settings under the names below; index.js
 // maps them from the MHB_* environment variables.
 export async function handlePortalRequest(context) {
+  const response = await routePortalRequest(context);
+  const method = context.request.method;
+  if (method === "GET" || method === "HEAD") {
+    return response.status === 405 ? redirectResponse(pageFor(new URL(context.request.url).pathname)) : response;
+  }
+  return answerToForm(response);
+}
+
+async function routePortalRequest(context) {
   const url = new URL(context.request.url);
   const pathname = url.pathname.replace(/\/+$/u, "") || "/";
   const method = context.request.method;
@@ -1705,14 +1826,17 @@ export async function handlePortalRequest(context) {
         }
         const clients = await listClients(store);
         const selected = clients.find((entry) => entry.slug === requested) || null;
-        const [billing, documents, templates, recipients] = await Promise.all([
+        const [billing, documents, templates, recipients, expenses, accounts] = await Promise.all([
           selected ? listBilling(store, selected.slug) : [],
           selected ? listDocuments(store, selected.slug) : [],
           listTemplates(store),
-          listRecipients(store)
+          listRecipients(store),
+          selected ? listExpenses(store, selected.slug) : [],
+          selected ? listBankAccounts(store) : []
         ]);
         return scriptedHtmlResponse(adminDashboardPage({
-          clients, selected, billing, documents, templates, recipients, readiness, notice, authenticated, newClient, clientError, typedEmails
+          clients, selected, billing, documents, templates, recipients, readiness, notice, authenticated, newClient, clientError, typedEmails,
+          expenses, payers: paidWithOptions(accounts), today: todayInMichigan()
         }), status);
       };
 
@@ -1777,7 +1901,7 @@ export async function handlePortalRequest(context) {
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=client-added`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|payments)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|payments|expenses)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -1787,6 +1911,41 @@ export async function handlePortalRequest(context) {
         const id = idRaw ? decodeSegment(idRaw) : "";
 
         if (area === "billing") return handleAdminBilling(context, store, target, id, action || "", readiness, origin);
+
+        // Add expense: a cost of this job (the page without scripts; the list opens the same form in
+        // a popup), its receipt, and deleting it (which takes it out of the books).
+        if (area === "expenses") {
+          if ((id === "new" && !action) || (!id && !action)) {
+            const payers = paidWithOptions(await listBankAccounts(store));
+            if (id === "new") {
+              if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+              return scriptedHtmlResponse(adminAddExpensePage({ client: target, payers, today: todayInMichigan(), notice: noticeFromQuery(url) }));
+            }
+            if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+            const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 8192);
+            const result = form ? await addExpense({ store, target, form, payers, ip: requestIp(context.request) }) : "invalid";
+            return redirectResponse(`${back}&notice=${result}`);
+          }
+          const expense = await getExpense(store, slug, id);
+          if (!expense) return notFoundResponse(session, admin);
+          if (action === "receipt") {
+            if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+            const object = expense.receipt ? await getFile(store, expense.receipt.key) : null;
+            return object ? fileResponse(object, expense.receipt.name, expense.receipt.type) : notFoundResponse(session, admin);
+          }
+          if (action === "delete") {
+            if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+            const ip = requestIp(context.request);
+            if (expense.bankTransactionId) await unfileExpenseMatch(store, expense, { ip });
+            await deleteExpense(store, expense.id);
+            await record(store, {
+              actor: "admin", ip, action: "expense.deleted", clientSlug: slug, amountCents: expense.amountCents, reason: "deleted", expense: { ...expense, deleted: true }, data: { expenseId: expense.id },
+              summary: `Deleted the expense for ${target.name}: ${expense.vendor} · ${categoryName(expense.category)} · ${money(expense.amountCents)}`
+            });
+            return redirectResponse(`${back}&notice=expense-deleted`);
+          }
+          return notFoundResponse(session, admin);
+        }
 
         // Add payment: a payment toward any open invoice of this project (the page without scripts;
         // the list opens the same form in a popup).

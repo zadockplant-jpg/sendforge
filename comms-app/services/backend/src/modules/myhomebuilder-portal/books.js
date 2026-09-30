@@ -34,6 +34,12 @@
 //            Payroll run, clears Wages payable. Work paid by a bank transaction filed to it posts
 //            there instead (source bank).
 //
+// A job expense added on a client portal's panel (expenses.js) posts one part:
+//   expense  Dr its job cost account (materials, equipment rental, permits and fees, other job
+//            costs) tagged with the job, Cr what paid it: a bank account's books account, Owner
+//            contributions (the owner's own money) or Accounts payable (not paid yet), on its date.
+//            A deleted expense's entry is reversed.
+//
 // A bank transaction filed on the Banking page (bank.js) posts one part:
 //   bank     money out: Dr what it was filed to (a job cost tagged with the job, overhead, a
 //            payable, owner draws...), Cr the bank account's books account; money in: the
@@ -65,8 +71,8 @@ const QUERY_TIMEOUT_MS = 5000;
 // A part's kind: every "refund:<id>" part is a refund, every "installment:<id>" a payment toward
 // the balance.
 export const partKind = (part) => (String(part).startsWith("refund:") ? "refund" : String(part).startsWith("installment:") ? "installment" : part);
-const PART_ORDER = ["issue", "installment", "payment", "fee", "refund", "dispute", "dispute-close", "cost", "paid", "bank"];
-const PART_WORDS = { issue: "invoice", installment: "payment", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment", bank: "bank transaction" };
+const PART_ORDER = ["issue", "installment", "payment", "fee", "refund", "dispute", "dispute-close", "cost", "paid", "expense", "bank"];
+const PART_WORDS = { issue: "invoice", installment: "payment", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment", expense: "expense", bank: "bank transaction" };
 const disputeWon = (dispute) => ["won", "warning_closed"].includes(dispute?.status);
 
 function data(row) {
@@ -147,6 +153,19 @@ export function laborParts(entry) {
     parts.paid = { date: calendarDate(entry.payment.paidOn || entry.paidAt), lines: [[owed, amount, 0], [CHECKING, 0, amount]] };
   }
   return parts;
+}
+
+// ---------- What a job expense's books should hold ----------
+
+export function expenseParts(expense) {
+  const amount = Number(expense?.amountCents || 0);
+  if (!expense || expense.deleted || !(amount > 0) || !expense.category || !expense.paidWith?.account) return {};
+  return { expense: { date: expense.spentOn, lines: [[expense.category, amount, 0], [expense.paidWith.account, 0, amount]], clientSlug: expense.clientSlug || null } };
+}
+
+function expenseMemo(expense, part, { reversal = false } = {}) {
+  const what = [expense.vendor, expense.description].filter(Boolean).join(" · ") || "Expense";
+  return reversal ? `${what} · expense removed` : `${what} · paid with ${expense.paidWith?.label || "unknown"}`;
 }
 
 // ---------- What a bank transaction's books should hold ----------
@@ -333,6 +352,15 @@ export async function syncLaborBooks(trx, entry, { reason = "changed", source = 
   });
 }
 
+// Brings a job expense's journal in line with it (a deleted one's comes back out).
+export async function syncExpenseBooks(trx, expense, { reason = "changed", activityId = null } = {}) {
+  return syncParts(trx, {
+    itemId: expense.id, subject: { id: expense.id, number: null, clientSlug: expense.clientSlug || null }, reason, source: "portal", activityId,
+    wanted: () => expenseParts(expense),
+    memo: (part, options) => expenseMemo(expense, part, options)
+  });
+}
+
 // Brings a bank transaction's journal in line with how it is filed.
 export async function syncBankBooks(trx, txn, { reason = "changed", activityId = null } = {}) {
   return syncParts(trx, {
@@ -414,7 +442,8 @@ async function ensureBooksOpened(store) {
 //            amountCents, data, deleted, reason, unapplied: { externalId, amountCents, date,
 //            item, clientSlug, memo }, unappliedRefund: { the same, for a refund of money
 //            not on an invoice }, moved: true, labor: an hours entry or subcontractor invoice,
-//            bank: a bank transaction (bank.js) }
+//            bank: a bank transaction (bank.js), expense: a job expense, with deleted: true when
+//            it was deleted (expenses.js) }
 export async function record(store, event) {
   if (!store) return;
   try {
@@ -433,6 +462,7 @@ export async function record(store, event) {
       }
       if (event.labor) await syncLaborBooks(trx, event.labor, { reason: event.reason || "changed", activityId });
       if (event.bank) await syncBankBooks(trx, event.bank, { reason: event.reason || "changed", activityId });
+      if (event.expense) await syncExpenseBooks(trx, event.expense, { reason: event.reason || "changed", activityId });
       if (event.unapplied) {
         const { externalId, amountCents, date, item, clientSlug, memo } = event.unapplied;
         await post(trx, {
@@ -478,6 +508,13 @@ export async function checkBooks(store) {
     const off = offParts(await heldParts(store.db, entry.id), laborParts(entry));
     if (off.length) problems.push({ itemId: entry.id, labor: true, clientSlug: entry.clientSlug || null, label: laborName(entry), parts: [...new Set(off.map(partKind))] });
   }
+  // Job expenses.
+  const expenses = await expenseRecords(store.db);
+  for (const expense of expenses) {
+    known.add(expense.id);
+    const off = offParts(await heldParts(store.db, expense.id), expenseParts(expense));
+    if (off.length) problems.push({ itemId: expense.id, expense: true, clientSlug: expense.clientSlug, label: `Expense: ${expense.vendor || "unnamed"} (${expense.spentOn})`, parts: [...new Set(off.map(partKind))] });
+  }
   // Bank transactions: those filed, and any that still hold entries.
   for (const txn of await bankTransactionsWithBooks(store.db)) {
     known.add(txn.id);
@@ -498,6 +535,11 @@ export async function checkBooks(store) {
   return { balanced: debits === credits && problems.length === 0, debits, credits, problems };
 }
 
+async function expenseRecords(db) {
+  const rows = await db("mhb_expenses").select("id", "client_slug", "amount_cents", "data", db.raw("to_char(spent_on, 'YYYY-MM-DD') AS spent_on")).timeout(QUERY_TIMEOUT_MS);
+  return rows.map((row) => ({ ...data(row), id: row.id, clientSlug: row.client_slug, spentOn: row.spent_on, amountCents: Number(row.amount_cents) }));
+}
+
 async function bankTransactionsWithBooks(db) {
   const rows = await db("mhb_bank_transactions")
     .whereNotNull("target")
@@ -514,6 +556,7 @@ export async function correctBooks(store, { ip = null } = {}) {
   const items = new Map((await store.db("mhb_billing").where({ kind: "invoice" }).select("data").timeout(QUERY_TIMEOUT_MS)).map(data).map((item) => [item.id, item]));
   const labor = new Map((await store.db("mhb_labor").select("data").timeout(QUERY_TIMEOUT_MS)).map(data).map((entry) => [entry.id, entry]));
   const bank = new Map((await bankTransactionsWithBooks(store.db)).map((txn) => [txn.id, txn]));
+  const expenses = new Map((await expenseRecords(store.db)).map((expense) => [expense.id, expense]));
   let posted = 0;
   await store.db.transaction(async (trx) => {
     const activityId = await insertActivity(trx, {
@@ -527,6 +570,10 @@ export async function correctBooks(store, { ip = null } = {}) {
       }
       if (problem.bank) {
         posted += await syncBankBooks(trx, bank.get(problem.itemId), { activityId });
+        continue;
+      }
+      if (problem.expense) {
+        posted += await syncExpenseBooks(trx, expenses.get(problem.itemId), { activityId });
         continue;
       }
       const item = items.get(problem.itemId);

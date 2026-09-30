@@ -249,6 +249,36 @@ export function isEditable(item) {
   return item.status === "open" || (item.kind === "invoice" && item.status === "paid");
 }
 
+// Payments already received, listed on a new invoice's form (a deposit, earlier checks): rows of
+// paymentAmount, paymentMethod, paymentMethodName, paymentReference and paymentPaidOn. Blank
+// rows are ignored. Returns { payments, typed } or { error, typed } (typed: the rows as entered).
+const LISTED_PAYMENT_PROBLEMS = {
+  invalid: "Check each payment's method and reference (up to 80 characters).",
+  "payment-other-required": "Type the payment method for each payment marked Other.",
+  "payment-date-invalid": "Enter the date each payment was received."
+};
+export function parseListedPayments(form) {
+  const column = (name) => form.getAll(name).map((value) => String(value ?? ""));
+  const methods = column("paymentMethod");
+  const names = column("paymentMethodName");
+  const references = column("paymentReference");
+  const dates = column("paymentPaidOn");
+  const typed = column("paymentAmount").map((amount, index) => ({
+    amount: amount.trim(), method: methods[index] || "check", methodName: (names[index] || "").trim(), reference: (references[index] || "").trim(), paidOn: (dates[index] || "").trim()
+  }));
+  const payments = [];
+  for (const row of typed) {
+    if (!row.amount) continue;
+    const amountCents = parseMoney(row.amount);
+    if (!amountCents) return { error: "Enter each payment's amount, like 500 or 500.00.", typed };
+    const fields = new Map([["method", row.method], ["methodName", row.methodName], ["reference", row.reference], ["paidOn", row.paidOn]]);
+    const entered = parseManualPayment({ get: (name) => fields.get(name) ?? "" });
+    if (entered.error) return { error: LISTED_PAYMENT_PROBLEMS[entered.error] || LISTED_PAYMENT_PROBLEMS.invalid, typed };
+    payments.push({ ...entered, amountCents });
+  }
+  return { payments, typed };
+}
+
 // Reads the record-payment and edit-payment forms. Returns the payment fields and the label shown
 // on the invoice ("Zelle", "Check #1042", or the typed name for Other), or { error } with a notice code.
 export function parseManualPayment(form) {

@@ -575,7 +575,9 @@ export async function handleCrew(context, store, pathname, url) {
   if (pathname === "/clients/crew/documents/upload") {
     if (method !== "POST") return kit.methodNotAllowedResponse(["POST"]);
     const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 4096);
-    const result = form ? await kit.storeUpload(store, crewSlug(worker.id), form.get("file"), "crew", { section: "insurance", crewName: worker.name }) : { error: "upload-failed" };
+    // What it is decides its section: a certificate of insurance, a license (onboarding), or other.
+    const section = { insurance: "insurance", license: "onboarding" }[String(form?.get("kind") || "")] || "other";
+    const result = form ? await kit.storeUpload(store, crewSlug(worker.id), form.get("file"), "crew", { section, crewName: worker.name }) : { error: "upload-failed" };
     return kit.redirectResponse(`/clients/crew?notice=${result.error === "files-not-configured" ? "upload-failed" : result.error || "uploaded"}`);
   }
 

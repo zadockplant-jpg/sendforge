@@ -2,6 +2,7 @@ import { balanceDue, billingLabel, billingLineItems, installmentsTotal, isEditab
 import { addressesText, clientEmails, MAX_RECIPIENTS } from "./email.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 import { DOCUMENT_SECTIONS, awaitingSignature, groupBySection, sectionName, sectionOf } from "./documents.js";
+import { EXPENSE_CATEGORIES, categoryName } from "./expenses.js";
 
 export { escapeHtml, money };
 export const escapeAttribute = escapeHtml;
@@ -377,6 +378,7 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
         <p class="portal-kicker">Client portal</p>
         <h1 class="portal-heading">${escapeHtml(client.name)}</h1>
         <p class="portal-lead">Review project resources, pay invoices securely, and upload or sign documents in one place.</p>
+        ${storeReady ? '<p class="portal-lead-actions"><a class="button button-outline" href="#upload-document">Upload document</a></p>' : ""}
         ${noticeMarkup(notice)}
         ${setupNote}
       </section>
@@ -388,13 +390,13 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
       <section class="portal-section" aria-labelledby="documents-heading">
         <h2 id="documents-heading">Documents</h2>
         ${documentSections(documents, { basePath: "/clients/documents", viewer: "client" })}
-        ${storeReady ? `<form class="portal-form portal-upload" action="/clients/documents/upload" method="post" enctype="multipart/form-data">
-          <h3>Upload a document</h3>
+        ${storeReady ? `<form class="portal-form portal-upload" id="upload-document" action="/clients/documents/upload" method="post" enctype="multipart/form-data">
+          <h3>Upload document</h3>
           <p>Share plans, photos, permits or signed paperwork with My Home Builder. PDF, images and common office files up to 20 MB.</p>
           <label for="client-upload">Choose a file
             <input id="client-upload" name="file" type="file" required>
           </label>
-          <button class="button button-solid" type="submit">Upload</button>
+          <button class="button button-solid" type="submit">Upload document</button>
         </form>` : ""}
       </section>
       <div class="portal-account-actions">
@@ -760,6 +762,86 @@ function statusDialogs(client, readiness) {
         </dialog>`;
 }
 
+// A job's expenses, newest first, with their total. Clients never see them.
+function expenseRows(expenses, { base }) {
+  if (!expenses.length) return '<p class="portal-empty">No expenses for this job yet. Add expense records a cost of it, such as materials, a rental or a permit.</p>';
+  const rows = expenses.map((expense) => {
+    const path = `${base}/expenses/${encodeURIComponent(expense.id)}`;
+    const name = `${expense.vendor} · ${money(expense.amountCents)}`;
+    return `<tr>
+          <td>${dateText(expense.spentOn)}</td>
+          <td>${escapeHtml(expense.vendor)}${expense.description ? `<small>${escapeHtml(expense.description)}</small>` : ""}</td>
+          <td>${escapeHtml(categoryName(expense.category))}</td>
+          <td>${escapeHtml(expense.paidWith?.label || "")}${expense.bankTransactionId ? "<small>Matched to the bank</small>" : ""}</td>
+          <td>${money(expense.amountCents)}</td>
+          <td><div class="billing-row-actions">
+            ${expense.receipt ? `<a class="portal-secondary-link" href="${path}/receipt">Receipt</a>` : ""}
+            <form method="post" action="${path}/delete" data-confirm="${escapeAttribute(`Delete the expense ${name}? It comes out of the books. This can't be undone.`)}">
+              <button class="billing-trash" type="submit" aria-label="Delete the expense ${escapeAttribute(name)}" title="Delete">${TRASH_ICON}</button>
+            </form>
+          </div></td>
+        </tr>`;
+  }).join("");
+  const total = expenses.reduce((sum, expense) => sum + expense.amountCents, 0);
+  return `<table class="portal-table">
+        <thead><tr><th scope="col">Date</th><th scope="col">Expense</th><th scope="col">Kind</th><th scope="col">Paid with</th><th scope="col">Amount</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <dl class="billing-totals">
+        <div class="billing-totals-due"><dt>Job expenses</dt><dd>${money(total)}</dd></div>
+      </dl>`;
+}
+
+// Add expense: the form, as a popup on the client panel and as a page.
+function addExpenseFields({ client, payers, today, prefix }) {
+  return `<form class="admin-stack-form" method="post" action="/clients/admin/clients/${encodeURIComponent(client.slug)}/expenses" enctype="multipart/form-data">
+            <label for="${prefix}-date">Date
+              <input id="${prefix}-date" name="spentOn" type="date" required value="${escapeAttribute(today)}" max="${escapeAttribute(today)}">
+            </label>
+            <label for="${prefix}-vendor">Paid to
+              <input id="${prefix}-vendor" name="vendor" type="text" maxlength="120" required placeholder="Home Depot">
+            </label>
+            <label for="${prefix}-description">What for (optional)
+              <input id="${prefix}-description" name="description" type="text" maxlength="200" placeholder="Lumber for the deck">
+            </label>
+            <label for="${prefix}-category">Kind of cost
+              <select id="${prefix}-category" name="category">${EXPENSE_CATEGORIES.map(([code, name]) => `<option value="${code}">${escapeHtml(name)}</option>`).join("")}</select>
+            </label>
+            <label for="${prefix}-amount">Amount ($)
+              <input id="${prefix}-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required placeholder="0.00">
+            </label>
+            <label for="${prefix}-paid">Paid with
+              <select id="${prefix}-paid" name="paidWith">${payers.map((option) => `<option value="${escapeAttribute(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</select>
+            </label>
+            <label for="${prefix}-receipt">Receipt (PDF or photo, optional)
+              <input id="${prefix}-receipt" name="receipt" type="file" accept="application/pdf,image/*">
+            </label>
+            <button class="button button-solid" type="submit">Add expense</button>
+            <p class="portal-security-note">It goes in the books as a cost of this job. Clients do not see expenses. If a bank account paid it, file that withdrawal on the Banking page as this expense so it counts once.</p>
+          </form>`;
+}
+
+function addExpenseDialog({ client, payers, today }) {
+  return `<dialog class="admin-dialog" id="add-expense-dialog" aria-labelledby="add-expense-title">
+          <div class="admin-dialog-head">
+            <h2 id="add-expense-title">Add an expense</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          ${addExpenseFields({ client, payers, today, prefix: "add-expense" })}
+        </dialog>`;
+}
+
+export function adminAddExpensePage({ client, payers, today, notice = null }) {
+  return adminShell(`<div class="site-width portal-shell portal-detail">
+      <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a></p>
+      <h1 class="portal-heading portal-heading-sm">Add an expense.</h1>
+      ${noticeMarkup(notice)}
+      <section class="admin-card admin-card-narrow">
+        ${addExpenseFields({ client, payers, today, prefix: "add-expense" })}
+      </section>
+    </div>`, { title: "Add an expense", scripts: [BILLING_SCRIPT] });
+}
+
 // Add payment: a payment toward one of the project's open invoices. The list opens it in a popup;
 // the same form is a page without scripts.
 function addPaymentFields({ client, billing, readiness, selected = "", prefix }) {
@@ -874,7 +956,7 @@ export function adminDocumentsPage({ clients, documents, notice = null }) {
     </div>`, { title: "Documents" });
 }
 
-export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null }) {
+export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, expenses = [], payers = [], today = todayInMichigan() }) {
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
     const emails = clientEmails(client);
@@ -915,10 +997,14 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
             <a class="button button-solid" href="${base}/billing/new?kind=invoice">New invoice</a>
             <a class="button button-outline" href="${base}/billing/new?kind=quote">New quote</a>
             <a class="button button-outline" href="${base}/payments/new" data-add-payment>Add payment</a>
+            <a class="button button-outline" href="${base}/expenses/new" data-add-expense>Add expense</a>
           </div>
           ${templatePicker(templates, `${base}/billing/new`)}
         </div>
         ${billingRows(billing, { basePath: `${base}/billing`, viewer: "admin" })}
+
+        <h3>Expenses</h3>
+        ${expenseRows(expenses, { base })}
 
         <h3>Documents</h3>
         ${documentSections(documents, { basePath: `${base}/documents`, viewer: "admin" })}
@@ -942,6 +1028,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
         </form>
         ${statusDialogs(selected, readiness)}
         ${addPaymentDialog({ client: selected, billing, readiness })}
+        ${addExpenseDialog({ client: selected, payers, today })}
       </section>`;
     })()
     : `<section class="admin-panel"><p class="portal-empty">Choose a client portal to manage its quotes, invoices and documents.</p></section>`;
@@ -1054,6 +1141,39 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
 
   const submitLabel = mode === "edit" ? "Save changes" : template ? "Save template" : kind === "invoice" ? "Post invoice" : "Post quote";
 
+  // A new invoice lists payments already received (a deposit, earlier checks); an existing one's
+  // are added and removed on its page.
+  let paymentsSection = "";
+  if (creating) {
+    const typed = values.payments?.length ? [...values.payments] : [];
+    while (typed.length < Math.max(2, (values.payments?.length || 0) + 1)) typed.push({});
+    const methods = (chosen) => Object.entries(PAYMENT_METHODS).map(([key, label]) => `<option value="${key}"${key === (chosen || "check") ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+    paymentsSection = `<fieldset class="listed-payments" data-listed-payments>
+          <legend>Payments already received (optional, invoices only)</legend>
+          <p class="admin-field-hint">A deposit or payments the client made before this invoice. Less than the total leaves the rest due; the total marks it paid. Blank rows are ignored.</p>
+          ${typed.map((row, index) => `<div class="listed-payment" data-listed-payment>
+            <label for="listed-${index}-amount">Amount ($)
+              <input id="listed-${index}-amount" name="paymentAmount" type="text" inputmode="decimal" maxlength="12" value="${escapeAttribute(row.amount || "")}" placeholder="0.00">
+            </label>
+            <label for="listed-${index}-method">Paid by
+              <select id="listed-${index}-method" name="paymentMethod">${methods(row.method)}</select>
+            </label>
+            <label for="listed-${index}-other">Other method
+              <input id="listed-${index}-other" name="paymentMethodName" type="text" maxlength="60" value="${escapeAttribute(row.methodName || "")}">
+            </label>
+            <label for="listed-${index}-reference">Reference (optional)
+              <input id="listed-${index}-reference" name="paymentReference" type="text" maxlength="80" value="${escapeAttribute(row.reference || "")}" placeholder="Check #1042">
+            </label>
+            <label for="listed-${index}-date">Received on
+              <input id="listed-${index}-date" name="paymentPaidOn" type="date" value="${escapeAttribute(row.paidOn || "")}">
+            </label>
+          </div>`).join("")}
+          <button class="portal-logout-button" type="button" data-listed-payment-add hidden>Add another payment</button>
+        </fieldset>`;
+  } else if (mode === "edit" && kind === "invoice") {
+    paymentsSection = '<p class="admin-field-hint">Payments on this invoice are added and removed on its page (Add a payment).</p>';
+  }
+
   return adminShell(`<div class="site-width portal-shell">
       <p class="portal-kicker">${kicker}</p>
       <h1 class="portal-heading portal-heading-sm">${escapeHtml(heading)}</h1>
@@ -1098,6 +1218,7 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
         <label for="billing-description">Notes and terms
           <textarea id="billing-description" name="description" rows="4" maxlength="2000" placeholder="Scope, milestones or payment terms">${escapeHtml(values.description || "")}</textarea>
         </label>
+        ${paymentsSection}
         ${sendOption}
         ${creating ? `<label class="portal-check" for="save-template">
             <input id="save-template" name="saveTemplate" type="checkbox" value="yes"${values.saveTemplate ? " checked" : ""}>
@@ -1410,7 +1531,7 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
     : `<section class="books-check books-check-off" aria-labelledby="books-check-heading">
           <h2 id="books-check-heading">The books do not balance.</h2>
           ${check.debits !== check.credits ? `<p>Debits are ${money(check.debits)} and credits are ${money(check.credits)}.</p>` : ""}
-          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", installment: "payment toward the balance", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment" })[part] || part).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
+          ${check.problems.length ? `<ul>${check.problems.map((problem) => `<li>${escapeHtml(problem.label)}${problem.clientSlug && names.has(problem.clientSlug) ? ` (${escapeHtml(names.get(problem.clientSlug))})` : ""}: its ${problem.parts.map((part) => ({ issue: "invoiced amount", installment: "payment toward the balance", expense: "expense", payment: "payment", fee: "Stripe fee", refund: "refund", dispute: "dispute", "dispute-close": "dispute outcome", cost: "labor cost", paid: "labor payment" })[part] || part).join(" and ")} ${problem.parts.length > 1 ? "do" : "does"} not match the journal.</li>`).join("")}</ul>` : ""}
           <form action="/clients/admin/books/correct" method="post">
             <button class="button button-solid" type="submit">Post corrections</button>
           </form>

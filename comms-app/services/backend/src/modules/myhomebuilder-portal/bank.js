@@ -12,6 +12,7 @@ import { isValidDate, todayInMichigan } from "./billing.js";
 import { money } from "./format.js";
 import { record } from "./books.js";
 import { getLabor, getSetting, laborLabel, listLabor, putLabor, putSetting } from "./labor.js";
+import { getExpense, listAllExpenses, putExpense } from "./expenses.js";
 import {
   createBankLinkSession,
   createBooksCustomer,
@@ -66,10 +67,29 @@ function payableLabor(labor, amountCents) {
     && (entry.status === "approved" || (entry.status === "paid" && entry.payment?.source !== "bank" && entry.payment?.method !== "payroll")));
 }
 
-// What `value` files the transaction to: { target, account, clientSlug, laborId, name }, or null
-// when it does not fit (a job that is gone, money in filed as a payroll run...).
-export function resolveTarget(value, { clients, labor, amountCents }) {
+// Job expenses recorded by hand, paid from this bank account, that a withdrawal of this amount
+// could be: not matched to another transaction yet.
+function payableExpenses(expenses, { amountCents, ledger }) {
+  if (amountCents === null || amountCents >= 0) return [];
+  return expenses.filter((expense) => expense.amountCents === -amountCents && !expense.bankTransactionId
+    && expense.paidWith?.key?.startsWith("account:") && (!ledger || expense.paidWith.account === ledger));
+}
+
+function expenseName(expense, clients) {
+  const job = clients.find((client) => client.slug === expense.clientSlug)?.name || expense.clientSlug;
+  return `Expense on ${job} · ${expense.vendor}`;
+}
+
+// What `value` files the transaction to: { target, account, clientSlug, laborId, expenseId, name },
+// or null when it does not fit (a job that is gone, money in filed as a payroll run...). An
+// expense recorded by hand is already in the books, so matching it posts nothing (account null).
+export function resolveTarget(value, { clients, labor, amountCents, expenses = [], ledger = null }) {
   const target = String(value || "");
+  const expenseMatch = target.match(/^expense:([A-Za-z0-9_-]{8,32})$/u);
+  if (expenseMatch) {
+    const expense = payableExpenses(expenses, { amountCents, ledger }).find((candidate) => candidate.id === expenseMatch[1]);
+    return expense ? { target, account: null, clientSlug: null, expenseId: expense.id, name: expenseName(expense, clients) } : null;
+  }
   const job = target.match(/^job:([a-z0-9-]{1,64}):(\d{4})$/u);
   if (job) {
     const client = clients.find((entry) => entry.slug === job[1]);
@@ -91,8 +111,10 @@ export function resolveTarget(value, { clients, labor, amountCents }) {
 }
 
 // The choices for a transaction's File to list, grouped.
-export function targetGroups({ clients, labor, amountCents }) {
+export function targetGroups({ clients, labor, amountCents, expenses = [], ledger = null }) {
   const groups = [];
+  const recorded = payableExpenses(expenses, { amountCents, ledger });
+  if (recorded.length) groups.push({ label: "Recorded expenses", options: recorded.map((expense) => [`expense:${expense.id}`, `${expenseName(expense, clients)} · ${expense.spentOn}`]) });
   groups.push({ label: "Common", options: Object.entries(SPECIAL).filter(([, entry]) => fits(entry, amountCents)).map(([value, entry]) => [value, entry.name]) });
   const crew = payableLabor(labor, amountCents);
   if (crew.length) groups.push({ label: "Pay crew", options: crew.map((entry) => [`labor:${entry.id}`, `${laborLabel(entry)} · ${money(entry.amountCents)}${entry.status === "paid" ? " (paid by hand)" : ""}`]) });
@@ -131,7 +153,7 @@ const RULES = [
 
 // A suggested filing for each unfiled transaction: crew work of the same amount, how the same
 // merchant was filed last time, or a common merchant.
-export function suggestTargets(transactions, { clients, labor, filed }) {
+export function suggestTargets(transactions, { clients, labor, filed, expenses = [] }) {
   const learned = new Map();
   for (const txn of filed) {
     const key = `${txn.merchant}|${direction(txn.amountCents)}`;
@@ -139,8 +161,9 @@ export function suggestTargets(transactions, { clients, labor, filed }) {
   }
   const suggestions = new Map();
   for (const txn of transactions) {
-    const context = { clients, labor, amountCents: txn.amountCents };
+    const context = { clients, labor, amountCents: txn.amountCents, expenses, ledger: txn.ledger };
     const candidates = [
+      ...payableExpenses(expenses, { amountCents: txn.amountCents, ledger: txn.ledger }).map((expense) => `expense:${expense.id}`),
       ...payableLabor(labor, txn.amountCents).filter((entry) => entry.status === "approved").map((entry) => `labor:${entry.id}`),
       learned.get(`${txn.merchant}|${direction(txn.amountCents)}`),
       ...RULES.filter(([pattern, way]) => way === direction(txn.amountCents) && pattern.test(String(txn.description).toUpperCase())).map(([, , target]) => target)
@@ -443,6 +466,15 @@ async function fileTransaction(store, txn, resolved, { ip = null } = {}) {
       await record(store, { actor: "admin", ip, action: "labor.bank-unmatched", clientSlug: restored.clientSlug || null, reason: "payment-removed", labor: restored, summary: `${laborLabel(entry)} is no longer paid by the bank transaction ${txn.description}`, data: { laborId: entry.id, transactionId: txn.id } });
     }
   }
+  // An expense it was matched to is free to be matched again.
+  if (was?.expenseId) {
+    const expense = await getExpense(store, null, was.expenseId);
+    if (expense?.bankTransactionId === txn.id) await putExpense(store, { ...expense, bankTransactionId: null });
+  }
+  if (resolved?.expenseId) {
+    const expense = await getExpense(store, null, resolved.expenseId);
+    if (expense) await putExpense(store, { ...expense, bankTransactionId: txn.id });
+  }
   let filed = resolved ? { ...resolved, filedAt: new Date().toISOString() } : null;
   if (resolved?.laborId) {
     const entry = await getLabor(store, resolved.laborId);
@@ -464,6 +496,14 @@ async function fileTransaction(store, txn, resolved, { ip = null } = {}) {
     bank: updated, data: { transactionId: txn.id }
   });
   return updated;
+}
+
+// Deleting an expense matched to a bank transaction unfiles that transaction (handler.js).
+export async function unfileExpenseMatch(store, expense, { ip = null } = {}) {
+  const txn = expense.bankTransactionId ? await getTransaction(store, expense.bankTransactionId) : null;
+  if (!txn || txn.filed?.expenseId !== expense.id) return false;
+  await fileTransaction(store, txn, null, { ip });
+  return true;
 }
 
 // Mark unpaid on crew work paid from the bank unfiles that bank transaction (labor.js's Labor page).
@@ -505,9 +545,10 @@ async function bankPage(context, store, url, { status = null, code = 200 } = {})
   let accounts = await listBankAccounts(store);
   await importStale(env, store, accounts);
   accounts = await listBankAccounts(store);
-  const [clients, labor, unfiledRows, filedRows, counts] = await Promise.all([
+  const [clients, labor, expenses, unfiledRows, filedRows, counts] = await Promise.all([
     listClients(store),
     listLabor(store, { statuses: ["approved", "paid"] }),
+    listAllExpenses(store),
     txnQuery(store).whereNull("target").whereNot({ status: "void" }).orderBy([{ column: "posted_on", order: "desc" }, { column: "created_at", order: "desc" }]).limit(300).timeout(QUERY_TIMEOUT_MS),
     txnQuery(store).whereNotNull("target").orderBy([{ column: "posted_on", order: "desc" }, { column: "updated_at", order: "desc" }]).limit(400).timeout(QUERY_TIMEOUT_MS),
     store.db("mhb_bank_transactions").select("account_id", store.db.raw("count(*) AS total"), store.db.raw("sum(CASE WHEN target IS NULL AND status <> 'void' THEN 1 ELSE 0 END) AS unfiled")).groupBy("account_id").timeout(QUERY_TIMEOUT_MS)
@@ -515,10 +556,10 @@ async function bankPage(context, store, url, { status = null, code = 200 } = {})
   const active = clients.filter((client) => client.active !== false);
   const toFile = unfiledRows.map(toTransaction);
   const filed = filedRows.map(toTransaction);
-  const suggestions = suggestTargets(toFile, { clients: active, labor, filed });
+  const suggestions = suggestTargets(toFile, { clients: active, labor, filed, expenses });
   return context.kit.scriptedHtmlResponse(adminBankPage({
     accounts, toFile, filed: filed.slice(0, 100), suggestions, settingsUrl: FINANCIAL_CONNECTIONS_SETTINGS,
-    groupsFor: (amountCents) => targetGroups({ clients: active, labor, amountCents }),
+    groupsFor: (amountCents, ledger = null) => targetGroups({ clients: active, labor, amountCents, expenses, ledger }),
     counts: new Map(counts.map((row) => [row.account_id, { total: Number(row.total), unfiled: Number(row.unfiled) }])),
     stripeReady: stripeConfigured(env), status: status || bankNotice(url)
   }), code);
@@ -610,16 +651,16 @@ async function uploadStatement(context, store, url) {
 }
 
 async function filingContext(store) {
-  const [clients, labor] = await Promise.all([listClients(store), listLabor(store, { statuses: ["approved", "paid"] })]);
-  return { clients: clients.filter((client) => client.active !== false), labor };
+  const [clients, labor, expenses] = await Promise.all([listClients(store), listLabor(store, { statuses: ["approved", "paid"] }), listAllExpenses(store)]);
+  return { clients: clients.filter((client) => client.active !== false), labor, expenses };
 }
 
-async function fileOne(context, store, txn, value, { clients, labor }) {
+async function fileOne(context, store, txn, value, { clients, labor, expenses }) {
   if (!value) {
     await fileTransaction(store, txn, null, { ip: context.kit.requestIp(context.request) });
     return "unfiled";
   }
-  const resolved = resolveTarget(value, { clients, labor, amountCents: txn.amountCents });
+  const resolved = resolveTarget(value, { clients, labor, amountCents: txn.amountCents, expenses, ledger: txn.ledger });
   if (!resolved) return "target-invalid";
   await fileTransaction(store, txn, resolved, { ip: context.kit.requestIp(context.request) });
   return "filed";
@@ -653,8 +694,8 @@ export async function handleAdminBank(context, store, pathname, url) {
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
     const value = String(form?.get("target") || "");
     const ids = [...new Set((form?.getAll("ids") || []).map(String))].slice(0, 300);
-    // Crew work is paid one transaction at a time, from its own row.
-    if (!value || !ids.length || value.startsWith("labor:")) return kit.redirectResponse("/clients/admin/bank?notice=invalid");
+    // Crew work and recorded expenses are matched one transaction at a time, from their own row.
+    if (!value || !ids.length || value.startsWith("labor:") || value.startsWith("expense:")) return kit.redirectResponse("/clients/admin/bank?notice=invalid");
     const filing = await filingContext(store);
     let filed = 0;
     for (const id of ids) {

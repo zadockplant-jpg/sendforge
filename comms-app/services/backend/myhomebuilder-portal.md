@@ -213,6 +213,41 @@ outside Stripe:
 - **Limits:** an invoice with payments toward it cannot be voided, and its total cannot be edited
   below what has been paid. Deleting it deletes its payments, and they come out of the books.
 
+- **Payments already received on a new invoice:** the invoice editor's Payments already received
+  lists a deposit or earlier payments (amount, how, reference, date; Add another payment adds a
+  row). Less than the total leaves the rest due; the total marks the invoice paid (the last
+  payment settles it). More than the total is refused, keeping what was typed. An existing
+  invoice's payments are added and removed on its page.
+
+## Job expenses
+
+**Add expense** beside New invoice, New quote and Add payment (`expenses.js`, migration
+`20261007_myhomebuilder_portal_expenses.js`) records a cost of that client portal's job: the date,
+who it was paid to, what for, the kind (Materials, Equipment rental, Permits and fees, Other job
+costs), the amount, what paid it (a bank account from Banking, the owner's own money, or not paid
+yet), and an optional receipt (PDF or photo). The panel lists the job's expenses with their total,
+each with its receipt and a trash button that asks first. Clients never see expenses.
+
+- **Books:** Dr the job cost account, tagged with the job (the Books page's Jobs table), Cr the
+  bank account's books account, Owner contributions or Accounts payable. Deleting reverses it.
+- **Banking:** a withdrawal of the same amount from that bank account is suggested as the expense
+  (Recorded expenses). Filing it there posts nothing more, so the cost counts once; deleting the
+  expense unfiles the withdrawal.
+
+## Upload document
+
+The client portal and the crew portal each have **Upload document** near the top and at their
+documents. Clients' uploads go under Uploaded by you. Crew choose what it is: a certificate of
+insurance (Insurance), a license or certification (Onboarding), or other.
+
+## The Back button
+
+Every form answers with a redirect when it succeeds. A page that answers a form directly (a problem
+to fix, or a step such as "code sent") loads `/clients/portal/history.js` (its policy allows
+`script-src 'self'`), which turns its place in the browser's history into a plain visit, so Back
+never asks to resubmit. Opened with GET, a form's address redirects to the page it belongs to
+(`pageFor` in handler.js) instead of answering 405.
+
 ## Books
 
 The admin panel's **Books** page (`/clients/admin/books`, `books.js`) holds the portal's
