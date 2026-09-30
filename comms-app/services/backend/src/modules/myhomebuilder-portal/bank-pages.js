@@ -97,7 +97,8 @@ function accountCards(accounts, counts) {
           ${stripe && active ? `<div class="admin-manage">
             <form method="post" action="${base}/refresh"><button class="button button-solid button-small" type="submit">Refresh</button></form>
             <form method="post" action="${base}/disconnect"><button class="portal-logout-button" type="submit">Disconnect</button></form>
-          </div>` : ""}
+          </div>
+          <p class="portal-security-note">Disconnecting stops new transactions. Those already here stay in the books.</p>` : ""}
         </section>`;
   }).join("");
 }
@@ -105,7 +106,7 @@ function accountCards(accounts, counts) {
 function linkCard({ stripeReady, settingsUrl }) {
   return `<section class="admin-card">
           <h2>Link a bank account</h2>
-          <p class="admin-meta">Sign in to your bank on Stripe's secure page. Stripe then sends the account's transactions here about once a day, up to 180 days back. The portal never sees your bank sign-in.</p>
+          <p class="admin-meta">Sign in to your bank on Stripe's secure page. Stripe then shares the account's transactions (dates, amounts and descriptions) here about once a day, up to 180 days back. They are used only to keep My Home Builder's books, and are never sold or shared. The portal never sees your bank sign-in.</p>
           ${stripeReady
             ? '<form method="post" action="/clients/admin/bank/link"><button class="button button-solid" type="submit">Link with Stripe</button></form>'
             : '<p class="portal-error">Stripe is not set up for the portal yet. Upload a statement instead.</p>'}
