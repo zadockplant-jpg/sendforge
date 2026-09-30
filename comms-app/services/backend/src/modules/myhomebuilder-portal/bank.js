@@ -543,7 +543,9 @@ async function startLink(context, store, url) {
     return kit.redirectResponse(session.url);
   } catch (error) {
     const message = error instanceof Error ? error.message.replace(/^Stripe request failed: /u, "") : "Stripe could not be reached";
-    return bankPage(context, store, url, { status: { text: `Stripe did not open the bank link: ${message}`, tone: "error", link: FINANCIAL_CONNECTIONS_SETTINGS }, code: 502 });
+    // Shown as the page's notice with a 200: Cloudflare replaces a 502 with its own error page.
+    console.error(JSON.stringify({ message: "stripe bank link refused", error: message }));
+    return bankPage(context, store, url, { status: { text: `Stripe did not open the bank link: ${message}`, tone: "error", link: FINANCIAL_CONNECTIONS_SETTINGS } });
   }
 }
 
@@ -555,7 +557,7 @@ async function finishLink(context, store, url) {
   try {
     found = await linkedBankAccount(env, sessionId);
   } catch (error) {
-    return bankPage(context, store, url, { status: { text: `Stripe could not confirm the bank link: ${error instanceof Error ? error.message.replace(/^Stripe request failed: /u, "") : "try again"}`, tone: "error" }, code: 502 });
+    return bankPage(context, store, url, { status: { text: `Stripe could not confirm the bank link: ${error instanceof Error ? error.message.replace(/^Stripe request failed: /u, "") : "try again"}`, tone: "error" } });
   }
   if (!found) return kit.redirectResponse("/clients/admin/bank?notice=bank-link-incomplete");
   const accounts = await listBankAccounts(store);

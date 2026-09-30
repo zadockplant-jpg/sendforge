@@ -1636,7 +1636,8 @@ export async function handlePortalRequest(context) {
       const delivery = await sendEmail(env, { to: adminCodeEmail(env), ...message, category: "admin-code" });
       if (!delivery.ok) {
         await deleteAdminChallenge(store, challengeId);
-        return htmlResponse(adminRequestPage({ codeTo, state: "send-failed", authenticated }), 502);
+        // 500, not 502: Cloudflare replaces a 502 with its own error page.
+        return htmlResponse(adminRequestPage({ codeTo, state: "send-failed", authenticated }), 500);
       }
       await record(store, { actor: "visitor", action: "admin.code-requested", ip: requestIp(context.request), summary: `Admin code emailed to ${adminCodeEmail(env)}` });
       return htmlResponse(adminRequestPage({ codeTo, state: "sent", authenticated }));

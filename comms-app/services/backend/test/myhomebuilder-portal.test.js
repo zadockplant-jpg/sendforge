@@ -2576,7 +2576,7 @@ test("a bank account links through Stripe's hosted page, its transactions arrive
   // Stripe's own refusal is shown with the settings link.
   stripe.bank.linkError = "Your account must be registered for Financial Connections to access transactions.";
   const refused = await request("/clients/admin/bank/link", form({}, adminCookie));
-  assert.equal(refused.status, 502);
+  assert.equal(refused.status, 200, "shown as the page's notice: Cloudflare replaces a 502 with its own page");
   const refusedPage = await refused.text();
   assert.match(refusedPage, /Stripe did not open the bank link: Your account must be registered/u);
   assert.match(refusedPage, /href="https:\/\/dashboard\.stripe\.com\/settings\/financial-connections"/u);
