@@ -107,7 +107,7 @@ import {
 } from "./billing.js";
 import { formatDate, money } from "./format.js";
 import { isPdf, signDocument } from "./pdf.js";
-import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record } from "./books.js";
+import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record, verifyActivityLog } from "./books.js";
 import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
 import { CREW_SECTIONS } from "./labor.js";
 import { handleAdminLabor, handleCrew } from "./crew.js";
@@ -1403,8 +1403,8 @@ async function handleBooks(context, store, pathname, url) {
     return new Response(ledger ? ledgerCsv(report, names) : activityCsv(report, names), { status: 200, headers });
   }
   if (pathname !== "/clients/admin/books") return notFoundResponse(null, true);
-  const check = await checkBooks(store);
-  return htmlResponse(adminBooksPage({ report, check, clients, today: todayInMichigan(), notice: noticeFromQuery(url) }));
+  const [check, log] = await Promise.all([checkBooks(store), verifyActivityLog(store)]);
+  return htmlResponse(adminBooksPage({ report, check, log, clients, today: todayInMichigan(), notice: noticeFromQuery(url) }));
 }
 
 async function handleAdminTemplates(context, store, id, action) {

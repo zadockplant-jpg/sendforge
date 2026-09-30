@@ -1302,7 +1302,7 @@ function bookPeriods(today) {
 }
 
 // The Books page. `report` from books.js booksReport, `check` from checkBooks.
-export function adminBooksPage({ report, check, clients, today, notice = null }) {
+export function adminBooksPage({ report, check, log = null, clients, today, notice = null }) {
   const names = new Map(clients.map((client) => [client.slug, client.name]));
   const query = (extra = {}) => {
     const params = new URLSearchParams();
@@ -1476,9 +1476,31 @@ export function adminBooksPage({ report, check, clients, today, notice = null })
           <a class="portal-secondary-link" href="/clients/admin/books/activity.csv${query()}">Download the activity (CSV)</a>
         </div>
         <p class="admin-meta">Everything done by the admin, clients, crew and Stripe, newest first.</p>
+        ${logSeal(log)}
         ${activity}
       </section>
     </div>`, { title: "Books" });
+}
+
+// Whether the activity log is as it was written (books.js verifyActivityLog). Invoices and the
+// books can be edited; the log cannot, so it shows who did what.
+function logSeal(log) {
+  if (!log) return "";
+  const count = log.total.toLocaleString("en-US");
+  if (!log.intact) {
+    const where = log.broken.at ? ` (${dateTimeText(log.broken.at)}${log.broken.summary ? ` · ${escapeHtml(log.broken.summary)}` : ""})` : "";
+    return `<section class="books-check books-check-off books-log-seal" aria-label="Activity log check">
+          <h3>The activity log was altered.</h3>
+          <p>Entry #${log.broken.seq.toLocaleString("en-US")}${where} no longer matches its seal, so the log from there on is not as it was recorded. Download the activity to keep a copy, and find out who has access to the portal's database.</p>
+        </section>`;
+  }
+  if (!log.protected) {
+    return `<section class="books-check books-check-off books-log-seal" aria-label="Activity log check">
+          <h3>The activity log's protection is switched off.</h3>
+          <p>All ${count} entries still match their seals, but the database would now let entries be changed. It has to be switched back on in the database (migration 20261006_myhomebuilder_portal_activity_seal).</p>
+        </section>`;
+  }
+  return `<p class="books-log-seal books-log-ok">Permanent record: entries are added but can never be changed or deleted. All ${count} entries check out${log.latest ? ` · latest seal #${log.latest.seq.toLocaleString("en-US")} <code>${escapeHtml(log.latest.seal.slice(0, 12))}</code>` : ""}.</p>`;
 }
 
 // Confirms deleting a quote or invoice, saying what goes with it. `partner` is the quote an

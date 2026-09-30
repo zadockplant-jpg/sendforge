@@ -30,6 +30,7 @@ const { up: booksTables } = await import("../src/db/migrations/20260930_myhomebu
 const { up: stripeEvents } = await import("../src/db/migrations/20261003_myhomebuilder_portal_stripe_events.js");
 const { up: laborTables } = await import("../src/db/migrations/20261004_myhomebuilder_portal_labor.js");
 const { up: bankTables } = await import("../src/db/migrations/20261005_myhomebuilder_portal_banking.js");
+const { up: sealActivity } = await import("../src/db/migrations/20261006_myhomebuilder_portal_activity_seal.js");
 const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
@@ -175,6 +176,7 @@ let renumbered = [];
 let backfilled = [];
 let migratedClients = [];
 let migratedBilling = [];
+let sealedBefore = [];
 
 // Projects and payments as they were before project email lists, for the fourth migration.
 async function insertLegacyProjects() {
@@ -228,6 +230,12 @@ before(async () => {
   await stripeEvents(db);
   await laborTables(db);
   await bankTables(db);
+  await db("mhb_activity").insert([
+    { actor: "admin", action: "legacy.one", summary: "Written before the seal", at: "2026-09-01T12:00:00Z" },
+    { actor: "client", action: "legacy.two", summary: "Also before the seal", at: "2026-09-02T12:00:00Z", data: JSON.stringify({ n: 2 }) }
+  ]);
+  await sealActivity(db);
+  sealedBefore = await db("mhb_activity").orderBy("chain_seq").select("action", "chain_seq", "chain_hash");
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -238,7 +246,9 @@ before(async () => {
 });
 
 beforeEach(async () => {
+  await db.raw("ALTER TABLE mhb_activity DISABLE TRIGGER USER");
   await db.raw(`TRUNCATE ${MHB_TABLES.join(", ")}`);
+  await db.raw("ALTER TABLE mhb_activity ENABLE TRIGGER USER");
   email.delivered.length = 0;
   email.failures.length = 0;
   stripe.created.length = 0;
@@ -1415,7 +1425,7 @@ test("the Books page totals, lists and downloads the books for every client port
   assert.match(ledgerText, /\r\n2026-08-10,\d+,issue,Muskegon Addition,Invoice 1,1100,Accounts receivable,1000\.00,,Invoice 1 · Framing,portal,,/u);
   assert.match(ledgerText, /,'=Smith Residence,Invoice 2,/u, "a cell that would run as a formula is quoted");
   const activity = await (await request(`/clients/admin/books/activity.csv?client=${smith}`, { headers: { Cookie: adminCookie } })).text();
-  assert.ok(activity.startsWith("Time,Who,Action,Client portal,Document,Amount,What happened,IP address\r\n"));
+  assert.ok(activity.startsWith("Entry,Time,Who,Action,Client portal,Document,Amount,What happened,IP address,Seal\r\n"));
   assert.match(activity, /,admin,invoice\.created,'=Smith Residence,Invoice 2,3000\.00,"Created Invoice 2 · Deck · \$3,000\.00",/u);
   assert.equal((await request("/clients/admin/books/ledger.csv")).status, 303, "only the admin can download the books");
 });
@@ -2574,4 +2584,63 @@ test("a bank account links through Stripe's hosted page, its transactions arrive
   assert.equal((await request(`/clients/admin/bank/accounts/${account.id}/disconnect`, form({}, adminCookie))).headers.get("Location"), "/clients/admin/bank?notice=disconnected");
   assert.deepEqual(stripe.bank.disconnected, ["fca_test_1"]);
   assert.equal((await request("/clients/admin/bank", { headers: { Cookie: await loginAsClient() } })).headers.get("Location"), "/clients");
+});
+
+// ---------- The activity log cannot be changed ----------
+
+test("entries already in the activity log are sealed in the order they were added", () => {
+  assert.deepEqual(sealedBefore.map((row) => [row.action, Number(row.chain_seq)]), [["legacy.one", 1], ["legacy.two", 2]]);
+  assert.ok(sealedBefore.every((row) => /^[0-9a-f]{64}$/u.test(row.chain_hash)));
+  assert.notEqual(sealedBefore[0].chain_hash, sealedBefore[1].chain_hash);
+});
+
+test("the activity log only grows: changes, deletions and clearing are refused, and the Books page vouches for it", async () => {
+  const adminCookie = await loginAsAdmin();
+  await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
+  const entries = await db("mhb_activity").orderBy("chain_seq").select("id", "chain_seq", "chain_hash");
+  assert.ok(entries.length >= 3);
+  assert.deepEqual(entries.map((row) => Number(row.chain_seq)), entries.map((_, index) => index + 1), "numbered in order, no gaps");
+
+  const refused = async (attempt) => assert.rejects(attempt, /activity log cannot be changed or deleted/u);
+  await refused(() => db("mhb_activity").where({ id: entries[0].id }).update({ summary: "Nothing happened here" }));
+  await refused(() => db("mhb_activity").where({ id: entries[0].id }).del());
+  await refused(() => db("mhb_activity").del());
+  await refused(() => db.raw("TRUNCATE mhb_activity"));
+  assert.equal(Number((await db("mhb_activity").count({ n: "*" }).first()).n), entries.length);
+
+  const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(books, new RegExp(`Permanent record: entries are added but can never be changed or deleted\\. All ${entries.length} entries check out · latest seal #${entries.length}`, "u"));
+  const download = await (await request("/clients/admin/books/activity.csv", { headers: { Cookie: adminCookie } })).text();
+  assert.match(download, /^Entry,Time,Who,Action,Client portal,Document,Amount,What happened,IP address,Seal/u);
+  assert.ok(download.includes(entries.at(-1).chain_hash), "each entry's seal is in the download");
+});
+
+test("an entry changed or removed while the protection is off is found, and so is the protection being off", async () => {
+  const adminCookie = await loginAsAdmin();
+  await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
+  await postInvoice(adminCookie, { title: "Siding", amount: "2,000" });
+  const books = async () => (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  const entries = await db("mhb_activity").orderBy("chain_seq").select("id", "chain_seq", "summary");
+  const target = entries[2];
+
+  await db.raw("ALTER TABLE mhb_activity DISABLE TRIGGER mhb_activity_no_change");
+  assert.match(await books(), /The activity log's protection is switched off\./u);
+  await db("mhb_activity").where({ id: target.id }).update({ summary: "Nothing happened here" });
+  await db.raw("ALTER TABLE mhb_activity ENABLE TRIGGER mhb_activity_no_change");
+  let page = await books();
+  assert.match(page, /The activity log was altered\./u);
+  assert.match(page, new RegExp(`Entry #3 \\(.*Nothing happened here\\) no longer matches its seal`, "u"));
+
+  // Put back exactly as it was, it checks out again; a removed entry leaves a gap that is found.
+  await db.raw("ALTER TABLE mhb_activity DISABLE TRIGGER mhb_activity_no_change");
+  await db("mhb_activity").where({ id: target.id }).update({ summary: target.summary });
+  assert.match(await books(), /protection is switched off/u);
+  await db.raw("ALTER TABLE mhb_activity ENABLE TRIGGER mhb_activity_no_change");
+  assert.match(await books(), /Permanent record/u);
+  await db.raw("ALTER TABLE mhb_activity DISABLE TRIGGER mhb_activity_no_change");
+  await db("mhb_activity").where({ id: entries[1].id }).del();
+  await db.raw("ALTER TABLE mhb_activity ENABLE TRIGGER mhb_activity_no_change");
+  page = await books();
+  assert.match(page, /The activity log was altered\./u);
+  assert.match(page, /Entry #3 /u, "the first entry after the gap no longer matches");
 });

@@ -208,6 +208,15 @@ bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tabl
     payments for a paid invoice, payments for a deleted invoice or for an amount the invoice
     does not total, refunds (and refunds that failed), and disputes opened, updated, won or lost
   - the portal's own: invoice numbers re-sorted by date
+- **The activity log cannot be changed.** Invoices and the books can be edited; the log is how
+  anything done is traced, so it only grows. Migration
+  `20261006_myhomebuilder_portal_activity_seal.js` makes Postgres refuse any UPDATE, DELETE or
+  TRUNCATE of `mhb_activity`, and seals each entry as it is added: `chain_seq` numbers entries in
+  order and `chain_hash` is the SHA-256 of the previous seal and the entry's fields
+  (`mhb_activity_row_hash`). The Books page re-checks every seal (`verifyActivityLog`) and says
+  whether all entries check out, which entry first stopped matching if one was changed or removed
+  while the protection was off, and whether the protection is on. The activity download includes
+  each entry's number and seal, so a saved copy can later be compared with the log.
 - **Journal** (`mhb_journal_entries` and `mhb_journal_lines`) is double-entry: each entry's
   debits equal its credits, and each line is one or the other. The chart of accounts
   (`mhb_accounts`):

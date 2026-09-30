@@ -330,6 +330,8 @@ export async function syncBankBooks(trx, txn, { reason = "changed", activityId =
 }
 
 // ---------- Activity ----------
+// The log only grows: Postgres refuses to change, delete or clear it, and seals each entry to the
+// one before (20261006_myhomebuilder_portal_activity_seal.js). Nothing here updates it.
 
 async function insertActivity(db, event) {
   const rows = await db("mhb_activity").insert({
@@ -535,7 +537,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
     (() => {
       const query = store.db("mhb_activity").orderBy([{ column: "at", order: "desc" }, { column: "id", order: "desc" }]).limit(5000);
       if (slug) query.where({ client_slug: slug });
-      return query.select("id", "at", "actor", "action", "client_slug", "item_id", "item_kind", "item_number", "amount_cents", "summary", "ip").timeout(QUERY_TIMEOUT_MS);
+      return query.select("id", "at", "actor", "action", "client_slug", "item_id", "item_kind", "item_number", "amount_cents", "summary", "ip", "chain_seq", "chain_hash").timeout(QUERY_TIMEOUT_MS);
     })()
   ]);
   const items = new Map(itemRows.map((row) => [row.id, data(row)]));
@@ -661,7 +663,9 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
       itemExists: Boolean(row.item_id && items.get(row.item_id)),
       amountCents: row.amount_cents === null || row.amount_cents === undefined ? null : Number(row.amount_cents),
       summary: row.summary,
-      ip: row.ip || ""
+      ip: row.ip || "",
+      seq: Number(row.chain_seq),
+      seal: row.chain_hash
     }))
   };
 }
@@ -698,9 +702,40 @@ export function ledgerCsv(report, clientNames) {
 }
 
 export function activityCsv(report, clientNames) {
-  const rows = [["Time", "Who", "Action", "Client portal", "Document", "Amount", "What happened", "IP address"]];
+  const rows = [["Entry", "Time", "Who", "Action", "Client portal", "Document", "Amount", "What happened", "IP address", "Seal"]];
   for (const entry of report.activity) {
-    rows.push([entry.at, entry.actor, entry.action, clientNames.get(entry.clientSlug) || entry.clientSlug || "", entry.itemLabel, entry.amountCents === null ? "" : dollars(entry.amountCents) || "0.00", entry.summary, entry.ip]);
+    rows.push([entry.seq, entry.at, entry.actor, entry.action, clientNames.get(entry.clientSlug) || entry.clientSlug || "", entry.itemLabel, entry.amountCents === null ? "" : dollars(entry.amountCents) || "0.00", entry.summary, entry.ip, entry.seal]);
   }
   return csv(rows);
+}
+
+// Whether the activity log is as it was written: every entry's seal is recomputed in order (a
+// changed entry, or a gap where one was removed, breaks it), and the protection that stops changes
+// is switched on. `broken` is the first entry that no longer matches.
+export async function verifyActivityLog(store) {
+  const result = await store.db.raw(`
+    SELECT count(*)::int AS total, max(chain_seq) AS last_seq, min(chain_seq) FILTER (WHERE broken) AS first_broken
+    FROM (
+      SELECT chain_seq,
+        chain_hash IS DISTINCT FROM mhb_activity_row_hash(lag(chain_hash) OVER (ORDER BY chain_seq), a)
+          OR chain_seq <> row_number() OVER (ORDER BY chain_seq) AS broken
+      FROM mhb_activity a
+    ) checked`).timeout(30000);
+  const summary = result.rows[0];
+  const triggers = (await store.db.raw(
+    "SELECT tgname, tgenabled::text AS tgenabled FROM pg_trigger WHERE tgrelid = 'mhb_activity'::regclass AND tgname IN ('mhb_activity_seal', 'mhb_activity_no_change', 'mhb_activity_no_truncate')"
+  ).timeout(QUERY_TIMEOUT_MS)).rows;
+  const last = summary.last_seq === null ? null : await store.db("mhb_activity").where({ chain_seq: summary.last_seq }).first("chain_seq", "chain_hash").timeout(QUERY_TIMEOUT_MS);
+  let broken = null;
+  if (summary.first_broken !== null) {
+    const row = await store.db("mhb_activity").where({ chain_seq: summary.first_broken }).first("chain_seq", "at", "summary").timeout(QUERY_TIMEOUT_MS);
+    broken = row ? { seq: Number(row.chain_seq), at: row.at instanceof Date ? row.at.toISOString() : row.at, summary: row.summary } : { seq: Number(summary.first_broken) };
+  }
+  return {
+    total: Number(summary.total),
+    intact: broken === null,
+    protected: triggers.length === 3 && triggers.every((trigger) => trigger.tgenabled !== "D"),
+    broken,
+    latest: last ? { seq: Number(last.chain_seq), seal: last.chain_hash } : null
+  };
 }
