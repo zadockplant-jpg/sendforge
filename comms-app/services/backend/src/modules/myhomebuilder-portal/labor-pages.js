@@ -293,6 +293,7 @@ function signatureBlock({ attestation, note = "", signerName = "", button }) {
             <input id="sign-consent" name="consent" type="checkbox" value="yes" required>
             <span>I agree to sign electronically and understand that my electronic signature is as valid as a handwritten one.</span>
           </label>
+          <p class="portal-security-note">How electronic records and signatures work, and how to get paper copies: <a class="portal-inline-link" href="/legal/#electronic-signatures" target="_blank" rel="noopener">Legal and privacy</a></p>
           <button class="button button-solid" type="submit">${escapeHtml(button)}</button>`;
 }
 

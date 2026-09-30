@@ -150,7 +150,10 @@ export function pageShell(content, { authenticated = false, admin = false, crew 
   <footer class="site-footer">
     <div class="site-width portal-footer-inner">
       <p>© ${new Date().getUTCFullYear()} My Home Builder LLC</p>
-      <a href="/#contact">Contact My Home Builder</a>
+      <div class="portal-footer-links">
+        <a href="/legal/">Legal and privacy</a>
+        <a href="/#contact">Contact My Home Builder</a>
+      </div>
     </div>
   </footer>
 </body>
@@ -594,6 +597,7 @@ export function signPage({ document, party, actionPath, backPath, error = "", ad
           <input id="sign-consent" name="consent" type="checkbox" value="yes" required>
           <span>I agree to sign this document electronically and understand that my electronic signature is as valid as a handwritten one.</span>
         </label>
+        <p class="portal-security-note">How electronic records and signatures work, and how to get paper copies: <a class="portal-inline-link" href="/legal/#electronic-signatures" target="_blank" rel="noopener">Legal and privacy</a></p>
         <button class="button button-solid" type="submit">Apply signature</button>
       </form>
     </div>`, { authenticated, admin, crew, scripts: ["/clients/portal/sign.js"], title: `Sign ${document.name}` });
