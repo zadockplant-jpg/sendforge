@@ -1,6 +1,6 @@
 // Pages for labor: the crew portal (sign-in, paperwork, hours and invoices, lien waivers) and the
 // admin Labor pages. crew.js decides what each shows.
-import { dateText, escapeAttribute, pageShell } from "./pages.js";
+import { dateText, escapeAttribute, pageShell, photoFields, photoGrid } from "./pages.js";
 import { escapeHtml, money } from "./format.js";
 import { moneyInput } from "./billing.js";
 import { FORMS, PAPERWORK } from "./forms.js";
@@ -159,7 +159,28 @@ function historyRows(entries, clients) {
       </table>`;
 }
 
-export function crewHomePage({ worker, entries, clients, documents, schedule = [], notes = null, today, secureReady, status = null }) {
+// Photos: Add photos to one of the active jobs' galleries, with a note, and the photos they added.
+// `jobNames`: every client portal, so a photo on a job no longer active still names it.
+function crewPhotosSection(photos, clients, jobNames) {
+  const options = clients.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.name)}</option>`).join("");
+  return `<section class="portal-section" aria-labelledby="crew-photos-heading">
+        <h2 id="crew-photos-heading">Photos</h2>
+        <form class="portal-form portal-upload photo-upload crew-send" id="add-photos" action="/clients/crew/photos" method="post" enctype="multipart/form-data">
+          <h3>Add photos</h3>
+          <label for="crew-photos-job">Job
+            <select id="crew-photos-job" name="job" required><option value="" selected disabled>Choose a job</option>${options}</select>
+          </label>
+          ${photoFields("crew-photos")}
+          <button class="button button-solid" type="submit">Add photos</button>
+        </form>
+        ${photoGrid(photos, {
+    href: (photo) => `/clients/crew/photos/${encodeURIComponent(photo.id)}`,
+    meta: (photo) => `${escapeHtml(jobName(jobNames, photo.clientSlug))} · ${dateText(photo.createdAt)}`
+  })}
+      </section>`;
+}
+
+export function crewHomePage({ worker, entries, clients, documents, schedule = [], notes = null, photos = [], jobNames = clients, today, secureReady, status = null }) {
   const employee = worker.kind === "employee";
   const sendForm = employee
     ? `<form class="portal-form crew-send" action="/clients/crew/hours" method="post">
@@ -248,6 +269,7 @@ export function crewHomePage({ worker, entries, clients, documents, schedule = [
         ${paperworkRows(worker, documents, { secureReady })}
         ${coiForm}
       </section>
+      ${crewPhotosSection(photos, clients, jobNames)}
       <section class="portal-section" aria-labelledby="send-heading">
         <h2 id="send-heading">${employee ? "Hours" : "Invoices"}</h2>
         ${sendForm}

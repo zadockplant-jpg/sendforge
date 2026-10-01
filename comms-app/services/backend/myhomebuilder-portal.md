@@ -200,7 +200,8 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   addresses and records) is made from the name, with -2, -3 and so on when the name is taken.
 - **The project login is optional.** A project created without one is **admin only** (shown as
   "Admin only" in the list). It is not client facing until the selected project's **Client
-  login** field is saved. Saving a new login there replaces the old one.
+  login** field is saved. Saving a new login there replaces the old one. Several projects can
+  share one login (see Several projects under one login).
 - **The client login shows in plain text** in that field, so a client's access is never lost.
   Besides its hash, each login is kept sealed in `mhb_secure` (`client-login:<slug>`, secure.js,
   AES-256-GCM). A login saved before this is not on file: the field asks for it again. The
@@ -302,6 +303,53 @@ on a project shown read only.
 The client portal and the crew portal each have **Upload document** near the top and at their
 documents. Clients' uploads go under Uploaded by you. Crew choose what it is: a certificate of
 insurance (Insurance), a license or certification (Onboarding), or other.
+
+## Photo gallery
+
+Clients, crew and the admin add photos with a note to a project's gallery. Migration
+`20261010_myhomebuilder_portal_photos.js` creates `mhb_photos`; each photo's file is in `mhb_files`
+under `photos/<slug>/<id>/<name>`.
+
+- **Adding:** several photos at once share one note (up to 500 characters). Only JPEG, PNG, WebP and
+  GIF, up to 20 MB each, are kept: the file's first bytes decide, not the type the browser sends. If
+  any file in a batch is not an image, none is added. Up to 20 photos per upload. The whole request
+  is also capped by the router's body limit (`MAX_BODY_BYTES` in `index.js`, 21 MB today).
+  - Client: **Gallery** beside **Upload document** (`POST /clients/photos`). Not on a read-only
+    project.
+  - Crew: **Add photos** in the crew portal (`POST /clients/crew/photos`), to one of the active
+    jobs. Crew see the photos they added, with their notes, and open only those
+    (`/clients/crew/photos/<id>`).
+  - Admin: **Gallery** on the project's panel, under Documents (`POST
+    /clients/admin/clients/<slug>/photos`), with every photo, its note, who added it and when.
+- **What the client sees:** the photos shown appear at the very top of the client portal home,
+  above Project resources, each opening the full image (`/clients/photos/<id>`, served inline).
+  Nothing renders when none are shown. A read-only project still shows them.
+- **Shown or hidden:** each photo starts shown. On the panel, each has a **Shown** checkbox, and one
+  checkbox, **Show photos in the client portal** (`photosVisible` on the project, on by default),
+  shows or hides them all. Both save as soon as they are clicked. A hidden photo is dimmed on the
+  panel, and its address answers 404 to the client.
+- **Deleting:** the trash button asks first, then removes the photo and its file.
+- Adding, showing, hiding and deleting photos are recorded in the activity log.
+
+## Several projects under one login
+
+On a project's panel, **Projects under this login** (under Client login, shown once the project
+has a login) has a checkbox for each other project. The Muskegon project, whose login comes from
+`MHB_CLIENT_PORTAL_PASSWORD`, is never grouped.
+
+- **Grouping:** checked projects join this project's login group. They take its `loginGroup` id,
+  its login hash and its sealed login, so the panel shows the same login on each. A project checked
+  from another group moves; a group left with one project ends.
+- **Ungrouping:** a project unchecked from the group is left with no login, admin only, until it
+  is given its own. A client session for it no longer opens it.
+- **Changing the login:** a new login saved on any project in the group changes it for all of them.
+  A login is refused when it opens a project outside the group (or the Muskegon project); one shared
+  inside the group is not.
+- **Signing in:** the shared login opens the first project of the group by name.
+- **Switching:** the client portal lists the group's projects at the top. Choosing one posts to
+  `/clients/switch`, which checks it is in the same group (and still has the same login), signs the
+  client in to it and returns to `/clients`. Read only stays per project.
+- The admin's client list shows "Shared login" on each grouped project.
 
 ## The Back button
 

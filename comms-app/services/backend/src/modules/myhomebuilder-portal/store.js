@@ -278,6 +278,41 @@ export async function getFile(store, key) {
   };
 }
 
+// ---------- Photos (the gallery) ----------
+
+// A project's photos, newest first (mhb_photos, 20261010_myhomebuilder_portal_photos.js).
+export async function listPhotos(store, slug) {
+  const rows = await store.db("mhb_photos").where({ client_slug: slug }).orderBy("created_at", "desc").select("data").timeout(QUERY_TIMEOUT_MS);
+  return rows.map(data);
+}
+
+// The photos a crew member added, on any job, newest first.
+export async function listWorkerPhotos(store, workerId) {
+  const rows = await store.db("mhb_photos").whereRaw("data->>'workerId' = ?", [String(workerId)]).orderBy("created_at", "desc").select("data").timeout(QUERY_TIMEOUT_MS);
+  return rows.map(data);
+}
+
+export async function getPhoto(store, id) {
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{8,32}$/u.test(id)) return null;
+  return data(await store.db("mhb_photos").where({ id }).first().timeout(QUERY_TIMEOUT_MS));
+}
+
+export async function putPhoto(store, photo) {
+  await store.db("mhb_photos")
+    .insert({ id: photo.id, client_slug: photo.clientSlug, data: JSON.stringify(photo), created_at: photo.createdAt })
+    .onConflict("id")
+    .merge({ data: JSON.stringify(photo), updated_at: store.db.fn.now() })
+    .timeout(QUERY_TIMEOUT_MS);
+}
+
+// Deletes a photo and its file.
+export async function deletePhoto(store, photo) {
+  await store.db.transaction(async (trx) => {
+    await trx("mhb_photos").where({ id: photo.id }).del().timeout(QUERY_TIMEOUT_MS);
+    if (photo.file?.key) await trx("mhb_files").where({ key: photo.file.key }).del().timeout(QUERY_TIMEOUT_MS);
+  });
+}
+
 // ---------- Automatic email log ----------
 
 // Claims an automatic email before it is sent. Returns { claimed: true } for the one caller that

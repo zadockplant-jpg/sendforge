@@ -60,6 +60,10 @@ export async function putSecureJson(store, env, key, value) {
   await putSecure(store, env, key, Buffer.from(JSON.stringify(value), "utf8"));
 }
 
+export async function deleteSecure(store, key) {
+  await store.db("mhb_secure").where({ key }).del().timeout(QUERY_TIMEOUT_MS);
+}
+
 export async function getSecureJson(store, env, key) {
   const bytes = await getSecure(store, env, key);
   return bytes ? JSON.parse(Buffer.from(bytes).toString("utf8")) : null;

@@ -31,12 +31,14 @@ import {
   deleteSentEmails,
   deleteAdminChallenge,
   deleteBilling,
+  deletePhoto,
   deleteTemplate,
   getBilling,
   getBillingById,
   getClient,
   getDocument,
   getFile,
+  getPhoto,
   getSentEmail,
   getShareLink,
   getTemplate,
@@ -44,6 +46,7 @@ import {
   listBilling,
   listClients,
   listDocuments,
+  listPhotos,
   listRecipients,
   listTemplates,
   moveBilling,
@@ -54,6 +57,7 @@ import {
   putClient,
   putDocument,
   putFile,
+  putPhoto,
   putSentEmail,
   putShareLink,
   putTemplate,
@@ -117,7 +121,7 @@ import { isPdf, signDocument } from "./pdf.js";
 import { activityCsv, booksReport, checkBooks, correctBooks, jobBook, ledgerCsv, record, verifyActivityLog } from "./books.js";
 import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
 import { CREW_SECTIONS, listWorkers } from "./labor.js";
-import { getSecureJson, putSecureJson, secureReady } from "./secure.js";
+import { deleteSecure, getSecureJson, putSecureJson, secureReady } from "./secure.js";
 import { handleAdminLabor, handleCrew } from "./crew.js";
 import { handleAdminBank, listBankAccounts, unfileExpenseMatch } from "./bank.js";
 import { handleAdminTeam } from "./team.js";
@@ -147,6 +151,10 @@ const MAX_FORM_BYTES = 4096;
 const MAX_BILLING_FORM_BYTES = 64 * 1024;
 const MAX_SIGN_FORM_BYTES = 512 * 1024;
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+// The gallery: several photos at once (each up to MAX_UPLOAD_BYTES) sharing one note.
+const MAX_PHOTOS_PER_UPLOAD = 20;
+const MAX_PHOTO_BATCH_BYTES = 100 * 1024 * 1024;
+const MAX_PHOTO_NOTE = 500;
 const MAX_WEBHOOK_BYTES = 256 * 1024;
 const PROJECT_PATH = "/clients/muskegon-addition";
 const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,64}$/u;
@@ -322,7 +330,14 @@ const NOTICES = {
   "books-balanced": { text: "The books already balance; nothing needed correcting." },
   "delete-processing": { text: "A bank payment for this invoice is still processing, so it can be deleted once the payment finishes.", tone: "error" },
   "name-required": { text: "Enter your name to accept the quote.", tone: "error" },
-  "files-not-configured": { text: "File storage is not configured, so documents cannot be stored yet.", tone: "error" }
+  "files-not-configured": { text: "File storage is not configured, so documents cannot be stored yet.", tone: "error" },
+  "photos-added": { text: "Photos added." },
+  "photos-invalid": { text: "Choose JPEG, PNG, WebP or GIF photos up to 20 MB each, with a note under 500 characters.", tone: "error" },
+  "photo-deleted": { text: "Photo deleted." },
+  "gallery-saved": { text: "Saved." },
+  "group-saved": { text: "Saved." },
+  "group-needs-login": { text: "Save a client login for this project first.", tone: "error" },
+  "switch-invalid": { text: "That project is not under your login.", tone: "error" }
 };
 
 function noticeFromQuery(url) {
@@ -363,15 +378,42 @@ function decodeSignatureImage(value) {
   }
 }
 
-async function resolveLogin(env, store, suppliedPassword) {
-  if (typeof suppliedPassword !== "string" || !suppliedPassword) return null;
-  if (await constantTimeMatches(suppliedPassword, env.CLIENT_PORTAL_PASSWORD)) return DEFAULT_CLIENT_SLUG;
-  if (!store) return null;
-  for (const client of await listClients(store)) {
-    if (!client.passwordHash || client.active === false) continue;
-    if (await verifyPassword(suppliedPassword, client.passwordHash)) return client.slug;
+// The projects a typed login opens, by name: the Muskegon project's (its secret), or each project
+// whose login hash it matches. Projects under one login share a hash, which is checked once.
+async function loginOwners(env, store, suppliedPassword, { first = false } = {}) {
+  if (typeof suppliedPassword !== "string" || !suppliedPassword) return [];
+  const owners = [];
+  if (await constantTimeMatches(suppliedPassword, env.CLIENT_PORTAL_PASSWORD)) {
+    owners.push(DEFAULT_CLIENT_SLUG);
+    if (first) return owners;
   }
-  return null;
+  if (!store) return owners;
+  const checked = new Map();
+  for (const client of await listClients(store)) {
+    if (!client.passwordHash || client.active === false || owners.includes(client.slug)) continue;
+    if (!checked.has(client.passwordHash)) checked.set(client.passwordHash, await verifyPassword(suppliedPassword, client.passwordHash));
+    if (!checked.get(client.passwordHash)) continue;
+    owners.push(client.slug);
+    if (first) return owners;
+  }
+  return owners;
+}
+
+// The project a login opens: with several under one login, the first by name.
+async function resolveLogin(env, store, suppliedPassword) {
+  return (await loginOwners(env, store, suppliedPassword, { first: true }))[0] || null;
+}
+
+// Projects under one login share `loginGroup`, the same login hash and the same sealed login.
+function loginGroupOf(clients, client) {
+  if (!client?.loginGroup) return client ? [client] : [];
+  return clients.filter((entry) => entry.loginGroup === client.loginGroup);
+}
+
+// The projects a client can switch between: those under the same login (and still opened by it).
+function switchableProjects(clients, client) {
+  if (!client?.loginGroup || !client.passwordHash) return [];
+  return clients.filter((entry) => entry.loginGroup === client.loginGroup && entry.passwordHash === client.passwordHash && entry.active !== false && !entry.managedBySecret);
 }
 
 // ---------- Quotes and invoices ----------
@@ -1076,6 +1118,71 @@ async function documentDownload(store, document) {
   return fileResponse(object, name, document.contentType);
 }
 
+// ---------- Photos (the gallery) ----------
+
+// What an image really is, from its first bytes (the type a browser sends is not trusted):
+// JPEG, PNG, GIF or WebP, or "" for anything else.
+function imageType(bytes) {
+  const ascii = (start, end) => String.fromCharCode(...bytes.subarray(start, end));
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((value, index) => bytes[index] === value)) return "image/png";
+  if (bytes.length >= 6 && (ascii(0, 6) === "GIF87a" || ascii(0, 6) === "GIF89a")) return "image/gif";
+  if (bytes.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp";
+  return "";
+}
+
+// Adds the photos chosen in a form (`photos`, several at once) to a project's gallery, sharing the
+// form's `note`. Every file must be an image within the limits, or none is added. Photos start
+// shown; the admin hides them one by one or all at once. `uploader`: uploadedBy (client, crew or
+// admin), uploaderName, and for crew workerId.
+async function storePhotos(store, project, form, { uploadedBy, uploaderName, workerId = null, ip = "" }) {
+  if (!store.files) return { error: "files-not-configured" };
+  const files = form.getAll("photos").filter((file) => file && typeof file.arrayBuffer === "function" && file.size > 0);
+  const note = String(form.get("note") || "").replaceAll(/\r\n?/gu, "\n").trim();
+  if (!files.length || files.length > MAX_PHOTOS_PER_UPLOAD || note.length > MAX_PHOTO_NOTE) return { error: "photos-invalid" };
+  const ready = [];
+  for (const file of files) {
+    if (file.size > MAX_UPLOAD_BYTES) return { error: "photos-invalid" };
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const type = imageType(bytes);
+    if (!type) return { error: "photos-invalid" };
+    ready.push({ name: safeFileName(file.name || "photo"), bytes, type });
+  }
+  const photos = [];
+  for (const { name, bytes, type } of ready) {
+    const id = randomId(12);
+    const key = `photos/${project.slug}/${id}/${name}`;
+    await putFile(store, key, bytes, type);
+    const now = new Date().toISOString();
+    const photo = {
+      id, clientSlug: project.slug, file: { key, name, type, size: bytes.byteLength }, note, uploadedBy, uploaderName,
+      ...(workerId ? { workerId } : {}), hidden: false, createdAt: now, updatedAt: now
+    };
+    await putPhoto(store, photo);
+    photos.push(photo);
+  }
+  const who = uploadedBy === "admin" ? "Added" : uploadedBy === "client" ? "The client added" : `${uploaderName} added`;
+  const shortNote = note.length > 120 ? `${note.slice(0, 117)}…` : note;
+  await record(store, {
+    actor: uploadedBy, ip, action: "photo.added", clientSlug: project.slug, data: { photoIds: photos.map((photo) => photo.id), ...(workerId ? { workerId } : {}) },
+    summary: `${who} ${photos.length === 1 ? "a photo" : `${photos.length} photos`} to the gallery of ${project.name}${shortNote ? `: “${shortNote.replaceAll("\n", " ")}”` : ""}`
+  });
+  return { photos };
+}
+
+// A photo opens in the browser (inline) rather than downloading.
+async function photoResponse(store, photo) {
+  const object = photo?.file?.key ? await getFile(store, photo.file.key) : null;
+  if (!object) return null;
+  const response = fileResponse(object, photo.file.name, photo.file.type);
+  response.headers.set("Content-Disposition", response.headers.get("Content-Disposition").replace(/^attachment/u, "inline"));
+  return response;
+}
+
+function photoTitle(photo) {
+  return photo.note ? `“${photo.note.length > 60 ? `${photo.note.slice(0, 57)}…` : photo.note}”`.replaceAll("\n", " ") : photo.file?.name || "a photo";
+}
+
 // ---------- Admin: quotes, invoices and templates ----------
 
 function editorValuesFromItem(item) {
@@ -1621,6 +1728,15 @@ async function keepLogin(env, store, slug, login) {
   }
 }
 
+// A project with no login (or a login not known in plain text) keeps no sealed copy.
+async function forgetLogin(store, slug) {
+  try {
+    await deleteSecure(store, loginKey(slug));
+  } catch (error) {
+    console.error(JSON.stringify({ message: "client login not forgotten", slug, error: error instanceof Error ? error.message : "Unknown error" }));
+  }
+}
+
 async function keptLogin(env, store, client) {
   if (!client) return null;
   if (client.managedBySecret) return env.CLIENT_PORTAL_PASSWORD || null;
@@ -1703,7 +1819,10 @@ const KIT = {
   decodeSignatureImage,
   decodeSegment,
   requestIp,
-  safeFileName
+  safeFileName,
+  storePhotos,
+  photoResponse,
+  MAX_PHOTO_BATCH_BYTES
 };
 
 // ---------- The Back button ----------
@@ -1794,7 +1913,9 @@ async function routePortalRequest(context) {
     const session = await readClientSession(context.request, sessionSecret, DEFAULT_CLIENT_SLUG);
     const admin = await hasAdminSession(context.request, sessionSecret);
     const client = session ? await getClient(store, session.slug) : null;
-    const authenticated = Boolean(session && client);
+    // A project with no login (admin only, such as one taken out from under a shared login) is not
+    // opened by a client session.
+    const authenticated = Boolean(session && client && (client.managedBySecret || client.passwordHash));
 
     if (isRead && (pathname === "/clients" || pathname === "/clients/login")) {
       const destination = safeProjectDestination(url.searchParams.get("next"));
@@ -1802,10 +1923,17 @@ async function routePortalRequest(context) {
       if (authenticated && pathname === "/clients/login") return redirectResponse("/clients");
       if (!authenticated) return htmlResponse(loginPage(false, destination));
 
-      const [billing, documents, book] = store
-        ? await Promise.all([listBilling(store, client.slug), client.readOnly ? [] : listDocuments(store, client.slug), client.readOnly ? jobBook(store, client.slug) : null])
-        : [[], [], null];
-      return htmlResponse(portalHomePage({ client, billing, documents, storeReady: Boolean(store), admin, notice: noticeFromQuery(url), book }));
+      // Photos shown in the portal: all of them unless the admin hid them, less any hidden one by one.
+      const [billing, documents, book, photos, projects] = store
+        ? await Promise.all([
+          listBilling(store, client.slug),
+          client.readOnly ? [] : listDocuments(store, client.slug),
+          client.readOnly ? jobBook(store, client.slug) : null,
+          client.photosVisible === false ? [] : listPhotos(store, client.slug).then((list) => list.filter((photo) => !photo.hidden)),
+          client.loginGroup ? listClients(store).then((clients) => switchableProjects(clients, client)) : []
+        ])
+        : [[], [], null, [], []];
+      return htmlResponse(portalHomePage({ client, billing, documents, storeReady: Boolean(store), admin, notice: noticeFromQuery(url), book, photos, projects: projects.length > 1 ? projects : [] }));
     }
 
     if (method === "POST" && pathname === "/clients/login") {
@@ -1823,6 +1951,34 @@ async function routePortalRequest(context) {
 
     if (pathname === "/clients/login" || pathname === "/clients/logout") {
       return methodNotAllowedResponse(pathname === "/clients/login" ? ["GET", "HEAD", "POST"] : ["POST"]);
+    }
+
+    // Projects under one login: the client switches to another of them, which signs them in to it.
+    if (pathname === "/clients/switch") {
+      if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+      if (!authenticated) return redirectResponse("/clients");
+      const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+      const wanted = String(form?.get("project") || "");
+      const target = switchableProjects(await listClients(store), client).find((entry) => entry.slug === wanted && entry.slug !== client.slug);
+      if (!target) return redirectResponse("/clients?notice=switch-invalid");
+      await record(store, { actor: "client", action: "client.switched", clientSlug: target.slug, ip: requestIp(context.request), summary: `Switched from ${client.name} to ${target.name} under their shared login` });
+      return redirectResponse("/clients", await createClientSession(sessionSecret, target.slug));
+    }
+
+    // The gallery: the client adds photos with a note, and opens the photos shown in their portal.
+    if (pathname === "/clients/photos" || pathname.startsWith("/clients/photos/")) {
+      if (!authenticated) return redirectResponse("/clients");
+      if (pathname === "/clients/photos") {
+        if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+        if (client.readOnly) return redirectResponse("/clients?notice=read-only");
+        const form = await readBoundedMultipart(context.request, MAX_PHOTO_BATCH_BYTES);
+        const result = form ? await storePhotos(store, client, form, { uploadedBy: "client", uploaderName: "Client", ip: requestIp(context.request) }) : { error: "photos-invalid" };
+        return redirectResponse(`/clients?notice=${result.error || "photos-added"}`);
+      }
+      if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+      const photo = await getPhoto(store, decodeSegment(pathname.slice("/clients/photos/".length)));
+      if (!photo || photo.clientSlug !== client.slug || photo.hidden || client.photosVisible === false) return notFoundResponse(session, admin);
+      return (await photoResponse(store, photo)) || notFoundResponse(session, admin);
     }
 
     if (isRead && (pathname === PROJECT_PATH || pathname.startsWith(`${PROJECT_PATH}/`))) {
@@ -1920,7 +2076,7 @@ async function routePortalRequest(context) {
         }
         const clients = await listClients(store);
         const selected = clients.find((entry) => entry.slug === requested) || null;
-        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin] = await Promise.all([
+        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin, photos] = await Promise.all([
           selected ? listBilling(store, selected.slug) : [],
           selected ? listDocuments(store, selected.slug) : [],
           listTemplates(store),
@@ -1928,11 +2084,12 @@ async function routePortalRequest(context) {
           selected ? listExpenses(store, selected.slug) : [],
           selected ? listBankAccounts(store) : [],
           selected ? expensePaidTo(store) : [],
-          keptLogin(env, store, selected)
+          keptLogin(env, store, selected),
+          selected ? listPhotos(store, selected.slug) : []
         ]);
         return scriptedHtmlResponse(adminDashboardPage({
           clients, selected, billing, documents, templates, recipients, readiness, notice, authenticated, newClient, clientError, typedEmails,
-          expenses, payers: paidWithOptions(accounts), paidTo, selectedLogin, today: todayInMichigan()
+          expenses, payers: paidWithOptions(accounts), paidTo, selectedLogin, photos, today: todayInMichigan()
         }), status);
       };
 
@@ -2006,7 +2163,7 @@ async function routePortalRequest(context) {
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${clientPassword ? "client-added" : "client-added-private"}`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|access|payments|expenses)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|group|access|payments|expenses|photos|gallery)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -2081,19 +2238,123 @@ async function routePortalRequest(context) {
         }
 
         // The project's client login: set it to make an admin-only project client facing, or
-        // change it. Each login opens exactly one portal.
+        // change it. Each login opens one portal, or the projects under it (a login group), and
+        // a new login on any of those changes it for all of them.
         if (area === "login" && !id && !action) {
           if (method !== "POST") return methodNotAllowedResponse(["POST"]);
           if (target.managedBySecret) return redirectResponse(`${back}&notice=invalid`);
           const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
           const login = String(form?.get("login") || "");
           if (login.length < 10 || login.length > 120) return redirectResponse(`${back}&notice=login-invalid`);
-          const owner = await resolveLogin(env, store, login);
-          if (owner && owner !== slug) return redirectResponse(`${back}&notice=login-taken`);
-          await putClient(store, { ...target, passwordHash: await hashPassword(login) });
-          await keepLogin(env, store, slug, login);
-          await record(store, { actor: "admin", action: "client.login-saved", clientSlug: slug, ip: requestIp(context.request), summary: `${target.passwordHash ? "Changed the client login for" : "Gave a client login to"} ${target.name}` });
+          const members = loginGroupOf(await listClients(store), target);
+          const memberSlugs = new Set(members.map((member) => member.slug));
+          if ((await loginOwners(env, store, login)).some((owner) => !memberSlugs.has(owner))) return redirectResponse(`${back}&notice=login-taken`);
+          const passwordHash = await hashPassword(login);
+          for (const member of members) {
+            await putClient(store, { ...member, passwordHash });
+            await keepLogin(env, store, member.slug, login);
+            await record(store, {
+              actor: "admin", action: "client.login-saved", clientSlug: member.slug, ip: requestIp(context.request),
+              summary: `${member.passwordHash ? "Changed the client login for" : "Gave a client login to"} ${member.name}${members.length > 1 ? ` (shared with ${members.filter((other) => other.slug !== member.slug).map((other) => other.name).join(", ")})` : ""}`
+            });
+          }
           return redirectResponse(`${back}&notice=login-saved`);
+        }
+
+        // Projects under this login: the projects checked share this project's login (one login
+        // group: the same `loginGroup`, login hash and sealed login). A project unchecked from the
+        // group is left with no login, admin only, until it is given its own. The Muskegon project
+        // (its login is a secret in Render) is never grouped.
+        if (area === "group" && !id && !action) {
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          if (target.managedBySecret) return redirectResponse(`${back}&notice=invalid`);
+          const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+          if (!form) return redirectResponse(`${back}&notice=invalid`);
+          const clients = await listClients(store);
+          const eligible = new Map(clients.filter((entry) => entry.slug !== slug && !entry.managedBySecret).map((entry) => [entry.slug, entry]));
+          const chosen = [...new Set(form.getAll("projects").map(String))];
+          if (chosen.some((entry) => !eligible.has(entry))) return redirectResponse(`${back}&notice=project-invalid`);
+          if (chosen.length && !target.passwordHash) return redirectResponse(`${back}&notice=group-needs-login`);
+          const groupId = target.loginGroup || randomId(9);
+          const ip = requestIp(context.request);
+          const login = await keptLogin(env, store, target);
+          const current = target.loginGroup ? clients.filter((entry) => entry.loginGroup === target.loginGroup && entry.slug !== slug) : [];
+          const joining = chosen.map((entry) => eligible.get(entry)).filter((entry) => !target.loginGroup || entry.loginGroup !== target.loginGroup);
+          const leaving = current.filter((entry) => !chosen.includes(entry.slug));
+          // Groups a joining project leaves behind.
+          const leftBehind = new Set(joining.map((entry) => entry.loginGroup).filter((group) => group && group !== groupId));
+          for (const entry of joining) {
+            await putClient(store, { ...entry, loginGroup: groupId, passwordHash: target.passwordHash });
+            if (login) await keepLogin(env, store, entry.slug, login);
+            else await forgetLogin(store, entry.slug);
+            await record(store, { actor: "admin", action: "client.login-grouped", clientSlug: entry.slug, ip, summary: `Put ${entry.name} under the client login of ${target.name}` });
+          }
+          for (const entry of leaving) {
+            const { loginGroup: _group, ...rest } = entry;
+            await putClient(store, { ...rest, passwordHash: null });
+            await forgetLogin(store, entry.slug);
+            await record(store, { actor: "admin", action: "client.login-ungrouped", clientSlug: entry.slug, ip, summary: `Took ${entry.name} out from under the client login of ${target.name}; it is admin only until it is given its own login` });
+          }
+          if ((chosen.length > 0) !== Boolean(target.loginGroup)) {
+            const { loginGroup: _group, ...rest } = target;
+            await putClient(store, chosen.length ? { ...target, loginGroup: groupId } : rest);
+          }
+          // A group left with one project is no longer a group.
+          if (leftBehind.size) {
+            const after = await listClients(store);
+            for (const group of leftBehind) {
+              const left = after.filter((other) => other.loginGroup === group);
+              if (left.length !== 1) continue;
+              const { loginGroup: _group, ...rest } = left[0];
+              await putClient(store, rest);
+            }
+          }
+          return redirectResponse(`${back}&notice=group-saved`);
+        }
+
+        // The gallery's master switch: Show photos in the client portal (all of them, or none).
+        if (area === "gallery" && !id && !action) {
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+          if (!form) return redirectResponse(`${back}&notice=invalid`);
+          const photosVisible = form.get("shown") === "yes";
+          if (photosVisible !== (target.photosVisible !== false)) {
+            await putClient(store, { ...target, photosVisible });
+            await record(store, { actor: "admin", action: photosVisible ? "photos.shown" : "photos.hidden", clientSlug: slug, ip: requestIp(context.request), summary: `${photosVisible ? "Showed the photos in" : "Hid all photos from"} ${target.name}'s client portal` });
+          }
+          return redirectResponse(`${back}&notice=gallery-saved#gallery`);
+        }
+
+        // The gallery: add photos with a note, open one, show or hide one, delete one.
+        if (area === "photos") {
+          if (!id && !action) {
+            if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+            const form = await readBoundedMultipart(context.request, MAX_PHOTO_BATCH_BYTES);
+            const result = form ? await storePhotos(store, target, form, { uploadedBy: "admin", uploaderName: "My Home Builder", ip: requestIp(context.request) }) : { error: "photos-invalid" };
+            return redirectResponse(`${back}&notice=${result.error || "photos-added#gallery"}`);
+          }
+          const photo = await getPhoto(store, id);
+          if (!photo || photo.clientSlug !== slug) return notFoundResponse(session, admin);
+          if (!action) {
+            if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+            return (await photoResponse(store, photo)) || notFoundResponse(session, admin);
+          }
+          if (action !== "shown" && action !== "delete") return notFoundResponse(session, admin);
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          const ip = requestIp(context.request);
+          if (action === "shown") {
+            const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+            if (!form) return redirectResponse(`${back}&notice=invalid`);
+            const hidden = form.get("shown") !== "yes";
+            if (hidden !== Boolean(photo.hidden)) {
+              await putPhoto(store, { ...photo, hidden, updatedAt: new Date().toISOString() });
+              await record(store, { actor: "admin", action: hidden ? "photo.hidden" : "photo.shown", clientSlug: slug, ip, data: { photoId: photo.id }, summary: `${hidden ? "Hid" : "Showed"} the photo ${photoTitle(photo)} ${hidden ? "from" : "in"} ${target.name}'s client portal` });
+            }
+            return redirectResponse(`${back}&notice=gallery-saved#gallery`);
+          }
+          await deletePhoto(store, photo);
+          await record(store, { actor: "admin", action: "photo.deleted", clientSlug: slug, ip, data: { photoId: photo.id }, summary: `Deleted the photo ${photoTitle(photo)} from the gallery of ${target.name}` });
+          return redirectResponse(`${back}&notice=photo-deleted#gallery`);
         }
 
         // Display all data to client portal (read only): the client sees every figure and can

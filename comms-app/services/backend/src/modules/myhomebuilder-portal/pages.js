@@ -345,6 +345,37 @@ function documentSections(documents, { basePath, viewer }) {
         ${documentRows(group, { basePath, viewer })}`).join("\n        ");
 }
 
+// The gallery's photos as tiles (the image itself, cropped to fit), each opening the full image,
+// with its note. `meta` is a line under it (who added it and when, or the job); `extra` adds
+// controls (the admin's Shown checkbox and trash button).
+export const PHOTO_ACCEPT = "image/jpeg,image/png,image/webp,image/gif";
+
+export function photoGrid(photos, { href, meta = () => "", extra = () => "" }) {
+  if (!photos.length) return "";
+  const tiles = photos.map((photo) => {
+    const path = href(photo);
+    const note = photo.note || "";
+    const line = meta(photo);
+    return `<li class="photo-card${photo.hidden ? " is-hidden" : ""}">
+            <a class="photo-link" href="${escapeAttribute(path)}"><img src="${escapeAttribute(path)}" alt="${escapeAttribute(note ? note.slice(0, 120) : "Project photo")}" loading="lazy" decoding="async"></a>
+            ${note ? `<p class="photo-note">${escapeHtml(note)}</p>` : ""}
+            ${line ? `<small class="photo-meta">${line}</small>` : ""}
+            ${extra(photo)}
+          </li>`;
+  }).join("");
+  return `<ul class="photo-grid">${tiles}</ul>`;
+}
+
+// Add photos: several at once, sharing one note.
+export function photoFields(prefix) {
+  return `<label for="${prefix}-files">Photos
+            <input id="${prefix}-files" name="photos" type="file" accept="${PHOTO_ACCEPT}" multiple required>
+          </label>
+          <label for="${prefix}-note">Note (optional)
+            <textarea id="${prefix}-note" name="note" maxlength="500" rows="3"></textarea>
+          </label>`;
+}
+
 function noticeMarkup(notice) {
   if (!notice) return "";
   const tone = notice.tone === "error" ? "portal-error" : "portal-notice";
@@ -379,9 +410,27 @@ function grossFigures(totals) {
       </dl>`;
 }
 
-export function portalHomePage({ client, billing, documents, storeReady, admin = false, notice = null, book = null }) {
+// `photos`: the gallery's photos shown in this portal. `projects`: the projects under the client's
+// login (a login group), for switching between them; empty when the login opens one project.
+export function portalHomePage({ client, billing, documents, storeReady, admin = false, notice = null, book = null, photos = [], projects = [] }) {
   // Display all data to client portal (read only): every figure, and nothing to do or download.
   const readOnly = Boolean(client.readOnly);
+  const shownPhotos = client.photosVisible === false ? [] : photos.filter((photo) => !photo.hidden);
+  const switcher = projects.length > 1
+    ? `<nav class="project-switch" aria-label="Your projects">
+        <form action="/clients/switch" method="post">
+          ${projects.map((project) => (project.slug === client.slug
+    ? `<span class="project-switch-current" aria-current="page">${escapeHtml(project.name)}</span>`
+    : `<button type="submit" name="project" value="${escapeAttribute(project.slug)}">${escapeHtml(project.name)}</button>`)).join("\n          ")}
+        </form>
+      </nav>`
+    : "";
+  const gallery = shownPhotos.length
+    ? `<section class="portal-section photo-gallery" aria-labelledby="photos-heading">
+        <h2 class="visually-hidden" id="photos-heading">Photos</h2>
+        ${photoGrid(shownPhotos, { href: (photo) => `/clients/photos/${encodeURIComponent(photo.id)}` })}
+      </section>`
+    : "";
   const projectSection = client.projectPath
     ? `<section class="portal-section" aria-labelledby="projects-heading">
         <h2 id="projects-heading">Project resources</h2>
@@ -405,6 +454,7 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
     : '<p class="portal-notice">Quotes, invoices and documents are being set up for this portal and will appear here soon.</p>';
 
   return pageShell(`<div class="site-width portal-shell">
+      ${switcher}
       <section>
         <p class="portal-kicker">Client portal</p>
         <h1 class="portal-heading">${escapeHtml(client.name)}</h1>
@@ -413,6 +463,7 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
         ${noticeMarkup(notice)}
         ${setupNote}
       </section>
+      ${gallery}
       ${projectSection}
       <section class="portal-section" aria-labelledby="billing-heading">
         <h2 id="billing-heading">Quotes and invoices</h2>
@@ -422,14 +473,21 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
       <section class="portal-section" aria-labelledby="documents-heading">
         <h2 id="documents-heading">Documents</h2>
         ${readOnly ? '<p class="portal-empty">Document view disabled for completed projects</p>' : documentSections(documents, { basePath: "/clients/documents", viewer: "client" })}
-        ${storeReady && !readOnly ? `<form class="portal-form portal-upload" id="upload-document" action="/clients/documents/upload" method="post" enctype="multipart/form-data">
+        ${storeReady && !readOnly ? `<div class="portal-uploads">
+        <form class="portal-form portal-upload" id="upload-document" action="/clients/documents/upload" method="post" enctype="multipart/form-data">
           <h3>Upload document</h3>
           <p>Share plans, photos, permits or signed paperwork with My Home Builder. PDF, images and common office files up to 20 MB.</p>
           <label for="client-upload">Choose a file
             <input id="client-upload" name="file" type="file" required>
           </label>
           <button class="button button-solid" type="submit">Upload document</button>
-        </form>` : ""}
+        </form>
+        <form class="portal-form portal-upload photo-upload" id="upload-photos" action="/clients/photos" method="post" enctype="multipart/form-data">
+          <h3>Gallery</h3>
+          ${photoFields("client-photos")}
+          <button class="button button-solid" type="submit">Add photos</button>
+        </form>
+        </div>` : ""}
       </section>
       <div class="portal-account-actions">
         <p>Finished for now? Log out to close this client session.</p>
@@ -995,13 +1053,79 @@ export function adminDocumentsPage({ clients, documents, notice = null }) {
     </div>`, { title: "Documents" });
 }
 
+// Projects under this login: a checkbox for each other project (not the Muskegon project, whose
+// login is set in Render), checked when it shares this project's login. Shown once the project
+// has a login of its own.
+function loginGroupForm(selected, clients, base) {
+  if (selected.managedBySecret || !selected.passwordHash) return "";
+  const others = clients.filter((client) => client.slug !== selected.slug && !client.managedBySecret);
+  if (!others.length) return "";
+  const boxes = others.map((client) => {
+    const id = `login-group-${client.slug}`;
+    const grouped = Boolean(selected.loginGroup) && client.loginGroup === selected.loginGroup;
+    return `<label class="portal-check" for="${escapeAttribute(id)}">
+                <input id="${escapeAttribute(id)}" name="projects" type="checkbox" value="${escapeAttribute(client.slug)}"${grouped ? " checked" : ""}>
+                <span>${escapeHtml(client.name)}</span>
+              </label>`;
+  }).join("\n              ");
+  return `<form class="admin-inline-form admin-save-row admin-login-group" action="${base}/group" method="post">
+            <button class="icon-save" type="submit" aria-label="Save projects under this login" title="Save">${SAVE_ICON}</button>
+            <fieldset>
+              <legend>Projects under this login</legend>
+              ${boxes}
+            </fieldset>
+          </form>`;
+}
+
+// The project's gallery: the master switch, the photos (each with its Shown checkbox and trash
+// button) and Add photos.
+function adminGallery(selected, photos, base) {
+  const meta = (photo) => `${escapeHtml(photo.uploaderName || (photo.uploadedBy === "client" ? "Client" : "My Home Builder"))} · ${dateText(photo.createdAt)}`;
+  const extra = (photo) => {
+    const path = `${base}/photos/${encodeURIComponent(photo.id)}`;
+    return `<div class="photo-actions">
+              <form class="photo-shown" action="${path}/shown" method="post">
+                <label class="portal-check" for="photo-shown-${escapeAttribute(photo.id)}">
+                  <input id="photo-shown-${escapeAttribute(photo.id)}" name="shown" type="checkbox" value="yes"${photo.hidden ? "" : " checked"} data-autosubmit>
+                  <span>Shown</span>
+                </label>
+                <button class="portal-logout-button" type="submit" data-autosubmit-button>Save</button>
+              </form>
+              <form method="post" action="${path}/delete" data-confirm="Delete this photo? This can't be undone.">
+                <button class="billing-trash" type="submit" aria-label="Delete photo" title="Delete">${TRASH_ICON}</button>
+              </form>
+            </div>`;
+  };
+  return `<div class="admin-subhead admin-gallery-head" id="gallery">
+          <h3>Gallery</h3>
+          <form class="gallery-master" action="${base}/gallery" method="post">
+            <label class="portal-check" for="photos-visible">
+              <input id="photos-visible" name="shown" type="checkbox" value="yes"${selected.photosVisible === false ? "" : " checked"} data-autosubmit>
+              <span>Show photos in the client portal</span>
+            </label>
+            <button class="portal-logout-button" type="submit" data-autosubmit-button>Save</button>
+          </form>
+        </div>
+        ${photos.length ? photoGrid(photos, { href: (photo) => `${base}/photos/${encodeURIComponent(photo.id)}`, meta, extra }) : '<p class="portal-empty">No photos yet.</p>'}
+        <form class="portal-form admin-form photo-upload" action="${base}/photos" method="post" enctype="multipart/form-data">
+          <h3>Add photos</h3>
+          ${photoFields("admin-photos")}
+          <button class="button button-solid" type="submit">Add photos</button>
+        </form>`;
+}
+
 // `selectedLogin` is the selected project's client login in plain text, when it is on file.
-export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, expenses = [], payers = [], paidTo = [], selectedLogin = null, today = todayInMichigan() }) {
+export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, expenses = [], payers = [], paidTo = [], selectedLogin = null, photos = [], today = todayInMichigan() }) {
+  const groupSizes = new Map();
+  for (const client of clients) {
+    if (client.loginGroup) groupSizes.set(client.loginGroup, (groupSizes.get(client.loginGroup) || 0) + 1);
+  }
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
     const emails = clientEmails(client);
     const adminOnly = !client.passwordHash && !client.managedBySecret;
-    const detail = [adminOnly ? "Admin only" : "", client.readOnly ? "Read only" : "", emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].filter(Boolean).join(" · ");
+    const shared = Boolean(client.loginGroup) && groupSizes.get(client.loginGroup) > 1;
+    const detail = [adminOnly ? "Admin only" : "", shared ? "Shared login" : "", client.readOnly ? "Read only" : "", emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].filter(Boolean).join(" · ");
     return `<li><a class="admin-client-link${current ? " is-current" : ""}" href="/clients/admin?client=${encodeURIComponent(client.slug)}"${current ? ' aria-current="page"' : ""}>
         <strong>${escapeHtml(client.name)}</strong><small>${detail}</small></a></li>`;
   }).join("");
@@ -1033,6 +1157,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
               <input id="client-login" name="login" type="text" minlength="10" maxlength="120" autocomplete="off" required value="${escapeAttribute(selectedLogin || "")}" placeholder="${selected.passwordHash ? "Set, but not on file. Type it again to show it here." : "None, so only you can see this project. Type one to share it."}">
             </label>
           </form>`}
+          ${loginGroupForm(selected, clients, base)}
         </div>
 
         <div class="admin-section-head">
@@ -1073,6 +1198,8 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           </label>
           <button class="button button-solid" type="submit">Share with client</button>
         </form>
+
+        ${adminGallery(selected, photos, base)}
         <form class="admin-access" action="${base}/access" method="post">
           <label class="portal-check" for="client-read-only">
             <input id="client-read-only" name="readOnly" type="checkbox" value="yes"${selected.readOnly ? " checked" : ""} data-autosubmit>

@@ -9,7 +9,7 @@
 //
 // handler.js passes `kit`: its response helpers and document functions.
 import { randomId, hashPassword, verifyPassword, readBoundedForm, readBoundedMultipart } from "./security.js";
-import { getClient, getDocument, getFile, listClients, listDocuments, putFile } from "./store.js";
+import { getClient, getDocument, getFile, getPhoto, listClients, listDocuments, listWorkerPhotos, putFile } from "./store.js";
 import { adminEmail, clientSender, crewBillMessage, crewLinkMessage, isValidEmail, sendEmail } from "./email.js";
 import { MAX_TOTAL_CENTS, addDays, isValidDate, moneyInput, parseMoney, todayInMichigan } from "./billing.js";
 import { money } from "./format.js";
@@ -73,6 +73,9 @@ const CREW_NOTICES = {
   uploaded: { text: "Uploaded and shared with My Home Builder." },
   signed: { text: "Your signature was applied. A signed copy is now on file." },
   "upload-failed": { text: "That file could not be uploaded. Use a PDF or photo under 20 MB.", tone: "error" },
+  "photos-added": { text: "Photos added." },
+  "photos-invalid": { text: "Choose JPEG, PNG, WebP or GIF photos up to 20 MB each, with a note under 500 characters.", tone: "error" },
+  "photo-job-invalid": { text: "Choose the job the photos are from.", tone: "error" },
   "not-open": { text: "That is no longer waiting for you.", tone: "info" },
   "note-added": TEAM_NOTICES["note-added"],
   "note-updated": TEAM_NOTICES["note-updated"],
@@ -240,14 +243,17 @@ async function paperworkPdf(store, env, worker, key, kit) {
 async function crewHome(context, store, worker, { status = null, code = 200 } = {}) {
   const { kit, env } = context;
   // Everyone sees their upcoming schedule; team leaders also see Important notes.
-  const [entries, clients, documents, schedule, notes] = await Promise.all([
+  // Their photos name their jobs, including any job no longer active.
+  const [entries, allClients, documents, schedule, notes, photos] = await Promise.all([
     listLabor(store, { workerId: worker.id, limit: 100 }),
-    activeClients(store),
+    listClients(store),
     listDocuments(store, crewSlug(worker.id)),
     upcomingFor(store, worker.id),
-    worker.teamLeader ? listNotes(store) : null
+    worker.teamLeader ? listNotes(store) : null,
+    listWorkerPhotos(store, worker.id)
   ]);
-  return kit.htmlResponse(crewHomePage({ worker, entries, clients, documents, schedule, notes, today: todayInMichigan(), secureReady: secureReady(env), status }), code);
+  const clients = allClients.filter((client) => client.active !== false);
+  return kit.htmlResponse(crewHomePage({ worker, entries, clients, documents, schedule, notes, photos, jobNames: allClients, today: todayInMichigan(), secureReady: secureReady(env), status }), code);
 }
 
 async function signedInWorker(context, store) {
@@ -605,6 +611,26 @@ export async function handleCrew(context, store, pathname, url) {
 
   const documentMatch = pathname.match(/^\/clients\/crew\/documents\/([^/]+)(?:\/(sign))?$/u);
   if (documentMatch) return handleCrewDocument(context, store, worker, kit.decodeSegment(documentMatch[1]), documentMatch[2] || "", method);
+
+  // Add photos: to one of the active jobs' galleries, with a note. Crew open only the photos they
+  // added.
+  if (pathname === "/clients/crew/photos") {
+    if (method !== "POST") return kit.methodNotAllowedResponse(["POST"]);
+    const form = await readBoundedMultipart(context.request, kit.MAX_PHOTO_BATCH_BYTES);
+    if (!form) return kit.redirectResponse("/clients/crew?notice=photos-invalid");
+    const job = (await activeClients(store)).find((client) => client.slug === String(form.get("job") || ""));
+    if (!job) return kit.redirectResponse("/clients/crew?notice=photo-job-invalid");
+    const result = await kit.storePhotos(store, job, form, { uploadedBy: "crew", uploaderName: worker.name, workerId: worker.id, ip: kit.requestIp(context.request) });
+    return kit.redirectResponse(`/clients/crew?notice=${result.error ? "photos-invalid" : "photos-added"}`);
+  }
+
+  const photoMatch = pathname.match(new RegExp(`^/clients/crew/photos/${ID}$`, "u"));
+  if (photoMatch) {
+    if (!isRead) return kit.methodNotAllowedResponse(["GET", "HEAD"]);
+    const photo = await getPhoto(store, photoMatch[1]);
+    if (!photo || photo.uploadedBy !== "crew" || photo.workerId !== worker.id) return kit.notFound();
+    return (await kit.photoResponse(store, photo)) || kit.notFound();
+  }
 
   return kit.notFound();
 }

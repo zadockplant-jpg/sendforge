@@ -34,6 +34,7 @@ const { up: sealActivity } = await import("../src/db/migrations/20261006_myhomeb
 const { up: expenseTables } = await import("../src/db/migrations/20261007_myhomebuilder_portal_expenses.js");
 const { up: teamTables } = await import("../src/db/migrations/20261008_myhomebuilder_portal_notes_schedule.js");
 const { up: jobBookChanges } = await import("../src/db/migrations/20261009_myhomebuilder_portal_job_books.js");
+const { up: photoTables } = await import("../src/db/migrations/20261010_myhomebuilder_portal_photos.js");
 const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
@@ -172,7 +173,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses", "mhb_notes", "mhb_schedule"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses", "mhb_notes", "mhb_schedule", "mhb_photos"];
 let server;
 let base;
 let renumbered = [];
@@ -242,6 +243,7 @@ before(async () => {
   await expenseTables(db);
   await teamTables(db);
   await jobBookChanges(db);
+  await photoTables(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -3278,4 +3280,350 @@ test("each job has its own book, and the Books ledger shows one job per row, the
   const after = await books();
   assert.match(after, /<dt>Overhead<\/dt><dd>\$100\.00<\/dd>/u);
   assert.doesNotMatch(after, /The books do not balance/u);
+});
+
+// ---------- The photo gallery ----------
+
+// Tiny images, by their real first bytes: the gallery reads the bytes, not the type sent.
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82]);
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1]);
+const WEBP = new Uint8Array([...Buffer.from("RIFF"), 26, 0, 0, 0, ...Buffer.from("WEBPVP8 ")]);
+const GIF = new Uint8Array([...Buffer.from("GIF89a"), 1, 0, 1, 0, 0, 0]);
+
+// Photos and a note, as the Add photos forms send them (`photos`, several at once).
+function photoForm(fields, files, cookies = "") {
+  const body = new FormData();
+  for (const [name, value] of Object.entries(fields)) body.append(name, value);
+  for (const file of files) body.append("photos", new File([file.bytes], file.name, { type: file.type }));
+  return { method: "POST", headers: cookies ? { Cookie: cookies } : {}, body };
+}
+
+async function photoRecords() {
+  return (await db("mhb_photos").orderBy("created_at").select("data")).map((row) => json(row.data));
+}
+
+async function photoRecord(id) {
+  const row = await db("mhb_photos").where({ id }).first();
+  return row ? json(row.data) : null;
+}
+
+test("the gallery takes photos with a note from the client, the crew and the admin, and keeps only real images", async () => {
+  const clientCookie = await loginAsClient();
+  const home = await (await request("/clients", { headers: { Cookie: clientCookie } })).text();
+  assert.match(home, /<form class="portal-form portal-upload" id="upload-document"[^>]*>[\s\S]*?<\/form>\s*<form class="portal-form portal-upload photo-upload" id="upload-photos" action="\/clients\/photos" method="post" enctype="multipart\/form-data">\s*<h3>Gallery<\/h3>/u, "beside Upload document");
+  assert.match(home, /<input id="client-photos-files" name="photos" type="file" accept="image\/jpeg,image\/png,image\/webp,image\/gif" multiple required>/u);
+  assert.match(home, /<textarea id="client-photos-note" name="note" maxlength="500" rows="3"><\/textarea>/u);
+  assert.match(home, /<button class="button button-solid" type="submit">Add photos<\/button>/u);
+  assert.doesNotMatch(home, /class="photo-grid"|photos-heading/u, "no photos, no gallery");
+
+  // Several photos at once, sharing the note.
+  const added = await request("/clients/photos", photoForm({ note: "Kitchen wall\r\nbefore drywall" }, [{ bytes: PNG, name: "wall.png", type: "image/png" }, { bytes: JPEG, name: "corner.jpg", type: "image/jpeg" }], clientCookie));
+  assert.equal(added.headers.get("Location"), "/clients?notice=photos-added");
+  const photos = await photoRecords();
+  assert.deepEqual(photos.map((photo) => [photo.file.name, photo.file.type, photo.file.size, photo.note, photo.uploadedBy, photo.hidden, photo.clientSlug]).sort(), [
+    ["corner.jpg", "image/jpeg", JPEG.length, "Kitchen wall\nbefore drywall", "client", false, "muskegon-addition"],
+    ["wall.png", "image/png", PNG.length, "Kitchen wall\nbefore drywall", "client", false, "muskegon-addition"]
+  ]);
+  for (const photo of photos) assert.equal(photo.file.key, `photos/muskegon-addition/${photo.id}/${photo.file.name}`);
+  assert.equal((await db("mhb_files").where("key", "like", "photos/%").select("key")).length, 2);
+
+  // The bytes decide: a PDF or an SVG sent as a photo is refused, with the photos sent beside it.
+  const pdf = await samplePdf();
+  const refusals = [
+    [{ note: "" }, [{ bytes: JPEG, name: "fine.jpg", type: "image/jpeg" }, { bytes: pdf, name: "plan.jpg", type: "image/jpeg" }]],
+    [{ note: "" }, [{ bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'), name: "logo.svg", type: "image/svg+xml" }]],
+    [{ note: "x".repeat(501) }, [{ bytes: PNG, name: "long.png", type: "image/png" }]],
+    [{ note: "Nothing chosen" }, []]
+  ];
+  for (const [fields, files] of refusals) {
+    assert.equal((await request("/clients/photos", photoForm(fields, files, clientCookie))).headers.get("Location"), "/clients?notice=photos-invalid");
+  }
+  assert.equal((await photoRecords()).length, 2);
+  assert.match(await (await request("/clients?notice=photos-invalid", { headers: { Cookie: clientCookie } })).text(), /Choose JPEG, PNG, WebP or GIF photos up to 20 MB each, with a note under 500 characters\./u);
+
+  // At the very top of the client's home, above Project resources, each opening the full image.
+  const after = await (await request("/clients", { headers: { Cookie: clientCookie } })).text();
+  const wall = photos.find((photo) => photo.file.name === "wall.png");
+  assert.ok(after.indexOf('class="photo-grid"') > after.indexOf("</h1>"));
+  assert.ok(after.indexOf('class="photo-grid"') < after.indexOf("Project resources"));
+  assert.match(after, new RegExp(`<a class="photo-link" href="/clients/photos/${wall.id}"><img src="/clients/photos/${wall.id}" alt="Kitchen wall\\nbefore drywall" loading="lazy" decoding="async"></a>\\s*<p class="photo-note">Kitchen wall\\nbefore drywall</p>`, "u"));
+  const image = await request(`/clients/photos/${wall.id}`, { headers: { Cookie: clientCookie } });
+  assert.equal(image.status, 200);
+  assert.equal(image.headers.get("Content-Type"), "image/png");
+  assert.equal(image.headers.get("Content-Disposition"), 'inline; filename="wall.png"');
+  assert.match(image.headers.get("Cache-Control"), /no-store/u);
+  assert.deepEqual(new Uint8Array(await image.arrayBuffer()), PNG);
+  assert.equal((await request(`/clients/photos/${wall.id}`)).headers.get("Location"), "/clients", "a client session is needed");
+  assert.equal((await request("/clients/photos/not-a-photo-id", { headers: { Cookie: clientCookie } })).status, 404);
+
+  // The admin adds photos in the project's Gallery, beside Documents.
+  const adminCookie = await loginAsAdmin();
+  const fromAdmin = await request("/clients/admin/clients/muskegon-addition/photos", photoForm({ note: "Framing done" }, [{ bytes: WEBP, name: "framing.webp", type: "application/octet-stream" }], adminCookie));
+  assert.equal(fromAdmin.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=photos-added#gallery");
+  const framing = (await photoRecords()).find((photo) => photo.uploadedBy === "admin");
+  assert.equal(framing.file.type, "image/webp");
+  assert.equal(framing.uploaderName, "My Home Builder");
+  const adminImage = await request(`/clients/admin/clients/muskegon-addition/photos/${framing.id}`, { headers: { Cookie: adminCookie } });
+  assert.equal(adminImage.status, 200);
+  assert.equal(adminImage.headers.get("Content-Type"), "image/webp");
+  assert.equal((await request(`/clients/admin/clients/muskegon-addition/photos/${framing.id}`)).headers.get("Location"), "/clients", "admin only");
+  assert.match((await request("/clients/admin/clients/muskegon-addition/photos", photoForm({ note: "" }, [{ bytes: pdf, name: "x.png", type: "image/png" }], adminCookie))).headers.get("Location"), /notice=photos-invalid$/u);
+
+  const panel = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(panel, /<h3>Documents<\/h3>[\s\S]*<div class="admin-subhead admin-gallery-head" id="gallery">\s*<h3>Gallery<\/h3>/u);
+  assert.match(panel, /<form class="gallery-master" action="\/clients\/admin\/clients\/muskegon-addition\/gallery" method="post">\s*<label class="portal-check" for="photos-visible">\s*<input id="photos-visible" name="shown" type="checkbox" value="yes" checked data-autosubmit>\s*<span>Show photos in the client portal<\/span>/u);
+  assert.equal((panel.match(/<span>Shown<\/span>/gu) || []).length, 3);
+  assert.match(panel, new RegExp(`<form class="photo-shown" action="/clients/admin/clients/muskegon-addition/photos/${wall.id}/shown" method="post">\\s*<label class="portal-check" for="photo-shown-${wall.id}">\\s*<input id="photo-shown-${wall.id}" name="shown" type="checkbox" value="yes" checked data-autosubmit>`, "u"));
+  assert.match(panel, new RegExp(`<form method="post" action="/clients/admin/clients/muskegon-addition/photos/${wall.id}/delete" data-confirm="Delete this photo\\? This can't be undone\\.">\\s*<button class="billing-trash"`, "u"));
+  assert.match(panel, /<p class="photo-note">Framing done<\/p>\s*<small class="photo-meta">My Home Builder · [A-Z][a-z]{2} \d{1,2}, \d{4}<\/small>/u);
+  assert.match(panel, /<small class="photo-meta">Client · /u);
+  assert.match(panel, /<form class="portal-form admin-form photo-upload" action="\/clients\/admin\/clients\/muskegon-addition\/photos" method="post" enctype="multipart\/form-data">\s*<h3>Add photos<\/h3>/u);
+
+  // The crew add photos to an active job, and see the ones they added.
+  const { worker, cookie } = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com" });
+  const crewHome = await (await request("/clients/crew", { headers: { Cookie: cookie } })).text();
+  assert.match(crewHome, /<h2 id="crew-photos-heading">Photos<\/h2>\s*<form class="portal-form portal-upload photo-upload crew-send" id="add-photos" action="\/clients\/crew\/photos" method="post" enctype="multipart\/form-data">\s*<h3>Add photos<\/h3>\s*<label for="crew-photos-job">Job\s*<select id="crew-photos-job" name="job" required><option value="" selected disabled>Choose a job<\/option><option value="muskegon-addition">Muskegon Addition<\/option><\/select>/u);
+  const crewPost = (fields, files = [{ bytes: GIF, name: "footings.gif", type: "image/gif" }]) => request("/clients/crew/photos", photoForm(fields, files, cookie));
+  assert.equal((await crewPost({ job: "nowhere", note: "" })).headers.get("Location"), "/clients/crew?notice=photo-job-invalid");
+  assert.equal((await crewPost({ note: "" })).headers.get("Location"), "/clients/crew?notice=photo-job-invalid", "a job is required");
+  assert.equal((await crewPost({ job: "muskegon-addition", note: "" }, [{ bytes: new Uint8Array([1, 2, 3]), name: "tool.gif", type: "image/gif" }])).headers.get("Location"), "/clients/crew?notice=photos-invalid");
+  assert.equal((await crewPost({ job: "muskegon-addition", note: "Footings poured" })).headers.get("Location"), "/clients/crew?notice=photos-added");
+  const footings = (await photoRecords()).find((photo) => photo.uploadedBy === "crew");
+  assert.deepEqual([footings.clientSlug, footings.workerId, footings.uploaderName, footings.file.type, footings.note], ["muskegon-addition", worker.id, "Sam Ortiz", "image/gif", "Footings poured"]);
+  const mine = await (await request("/clients/crew", { headers: { Cookie: cookie } })).text();
+  assert.match(mine, new RegExp(`<a class="photo-link" href="/clients/crew/photos/${footings.id}">`, "u"));
+  assert.match(mine, /<p class="photo-note">Footings poured<\/p>\s*<small class="photo-meta">Muskegon Addition · /u);
+  assert.doesNotMatch(mine, /Kitchen wall|Framing done/u, "crew see only the photos they added");
+  assert.equal((await request(`/clients/crew/photos/${footings.id}`, { headers: { Cookie: cookie } })).headers.get("Content-Type"), "image/gif");
+  assert.equal((await request(`/clients/crew/photos/${wall.id}`, { headers: { Cookie: cookie } })).status, 404);
+  const other = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com" });
+  assert.equal((await request(`/clients/crew/photos/${footings.id}`, { headers: { Cookie: other.cookie } })).status, 404);
+  assert.match(await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text(), /<p class="photo-note">Footings poured<\/p>\s*<small class="photo-meta">Sam Ortiz · /u);
+  assert.match(await (await request("/clients", { headers: { Cookie: clientCookie } })).text(), /Footings poured/u, "shown in the client portal");
+
+  // Each addition is in the activity log.
+  const log = await db("mhb_activity").where({ action: "photo.added" }).orderBy("id").select("actor", "client_slug", "summary");
+  assert.deepEqual(log.map((row) => [row.actor, row.client_slug]), [["client", "muskegon-addition"], ["admin", "muskegon-addition"], ["crew", "muskegon-addition"]]);
+  assert.equal(log[0].summary, "The client added 2 photos to the gallery of Muskegon Addition: “Kitchen wall before drywall”");
+  assert.equal(log[1].summary, "Added a photo to the gallery of Muskegon Addition: “Framing done”");
+  assert.equal(log[2].summary, "Sam Ortiz added a photo to the gallery of Muskegon Addition: “Footings poured”");
+});
+
+test("photos are shown or hidden in the client portal all at once or one by one, deleted, and not taken from a read-only portal", async () => {
+  const clientCookie = await loginAsClient();
+  const adminCookie = await loginAsAdmin();
+  const base = "/clients/admin/clients/muskegon-addition";
+  await request(`${base}/photos`, photoForm({ note: "Porch and deck" }, [{ bytes: PNG, name: "porch.png", type: "image/png" }, { bytes: JPEG, name: "deck.jpg", type: "image/jpeg" }], adminCookie));
+  const [deck, porch] = (await photoRecords()).sort((left, right) => left.file.name.localeCompare(right.file.name));
+  const home = async () => (await request("/clients", { headers: { Cookie: clientCookie } })).text();
+  const open = async (photo, cookie = clientCookie) => (await request(`/clients/photos/${photo.id}`, { headers: { Cookie: cookie } })).status;
+  const panel = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(await home(), new RegExp(`/clients/photos/${porch.id}[\\s\\S]*/clients/photos/${deck.id}|/clients/photos/${deck.id}[\\s\\S]*/clients/photos/${porch.id}`, "u"));
+
+  // One photo hidden, then shown again.
+  const hidden = await request(`${base}/photos/${porch.id}/shown`, form({}, adminCookie));
+  assert.equal(hidden.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=gallery-saved#gallery");
+  assert.equal((await photoRecord(porch.id)).hidden, true);
+  const withoutPorch = await home();
+  assert.doesNotMatch(withoutPorch, new RegExp(porch.id, "u"));
+  assert.match(withoutPorch, new RegExp(deck.id, "u"));
+  assert.equal(await open(porch), 404);
+  assert.equal(await open(deck), 200);
+  assert.equal((await request(`${base}/photos/${porch.id}`, { headers: { Cookie: adminCookie } })).status, 200, "the admin still sees it");
+  const dimmed = await panel();
+  assert.match(dimmed, new RegExp(`<li class="photo-card is-hidden">\\s*<a class="photo-link" href="${base}/photos/${porch.id}">`, "u"));
+  assert.match(dimmed, new RegExp(`<input id="photo-shown-${porch.id}" name="shown" type="checkbox" value="yes" data-autosubmit>`, "u"));
+  await request(`${base}/photos/${porch.id}/shown`, form({ shown: "yes" }, adminCookie));
+  assert.equal((await photoRecord(porch.id)).hidden, false);
+  assert.equal(await open(porch), 200);
+
+  // Every photo hidden with the one checkbox: nothing renders at the top of the client portal.
+  const off = await request(`${base}/gallery`, form({}, adminCookie));
+  assert.equal(off.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=gallery-saved#gallery");
+  assert.equal((await projectRecord()).photosVisible, false);
+  assert.doesNotMatch(await home(), /class="photo-grid"|photos-heading/u);
+  assert.equal(await open(deck), 404);
+  assert.match(await panel(), /<input id="photos-visible" name="shown" type="checkbox" value="yes" data-autosubmit>/u);
+  await request(`${base}/gallery`, form({ shown: "yes" }, adminCookie));
+  assert.equal((await projectRecord()).photosVisible, true);
+  assert.equal(await open(deck), 200);
+  const changes = (await db("mhb_activity").whereIn("action", ["photo.hidden", "photo.shown", "photos.hidden", "photos.shown"]).orderBy("id").select("action")).map((row) => row.action);
+  assert.deepEqual(changes, ["photo.hidden", "photo.shown", "photos.hidden", "photos.shown"]);
+
+  // Another project's client, and another project's admin address, do not reach them.
+  const pine = await addPortal(adminCookie, "Pine Street");
+  assert.equal(await open(deck, await loginAsClient("pine-street-login-2026")), 404);
+  assert.equal((await request(`/clients/admin/clients/${pine}/photos/${deck.id}`, { headers: { Cookie: adminCookie } })).status, 404);
+
+  // Deleting (the trash asks first) removes the photo and its file.
+  const deleted = await request(`${base}/photos/${deck.id}/delete`, form({}, adminCookie));
+  assert.equal(deleted.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=photo-deleted#gallery");
+  assert.equal(await photoRecord(deck.id), null);
+  assert.equal(await db("mhb_files").where({ key: deck.file.key }).first(), undefined);
+  assert.equal(await open(deck), 404);
+  assert.match((await db("mhb_activity").where({ action: "photo.deleted" }).first()).summary, /^Deleted the photo “Porch and deck” from the gallery of Muskegon Addition$/u);
+
+  // A read-only portal still shows its photos, but takes none.
+  await request(`${base}/access`, form({ readOnly: "yes" }, adminCookie));
+  const readOnly = await home();
+  assert.match(readOnly, new RegExp(`/clients/photos/${porch.id}`, "u"));
+  assert.doesNotMatch(readOnly, /id="upload-photos"|Add photos/u);
+  const refused = await request("/clients/photos", photoForm({ note: "" }, [{ bytes: PNG, name: "late.png", type: "image/png" }], clientCookie));
+  assert.equal(refused.headers.get("Location"), "/clients?notice=read-only");
+  assert.equal((await photoRecords()).length, 1);
+
+  // The forms' addresses, opened again, go to their pages.
+  const back = async (path, cookie) => (await request(path, { headers: { Cookie: cookie } })).headers.get("Location");
+  assert.equal(await back("/clients/photos", clientCookie), "/clients");
+  assert.equal(await back("/clients/crew/photos", ""), "/clients/crew");
+  assert.equal(await back(`${base}/photos/${porch.id}/shown`, adminCookie), "/clients/admin?client=muskegon-addition");
+  assert.equal(await back(`${base}/gallery`, adminCookie), "/clients/admin?client=muskegon-addition");
+});
+
+// ---------- Several projects under one login ----------
+
+test("several projects share one login: it opens the first by name, and the client switches between them", async () => {
+  const adminCookie = await loginAsAdmin();
+  const birch = await addPortal(adminCookie, "Birch Cottage");
+  const alder = await addPortal(adminCookie, "Alder House");
+  const cedar = await addPortal(adminCookie, "Cedar Barn");
+  const panel = async (slug) => (await request(`/clients/admin?client=${slug}`, { headers: { Cookie: adminCookie } })).text();
+
+  // Under the Client login field: a checkbox for each other project, but not the Muskegon project.
+  const birchPanel = await panel(birch);
+  assert.match(birchPanel, /<label for="client-login">Client login[\s\S]*?<\/form>\s*<form class="admin-inline-form admin-save-row admin-login-group" action="\/clients\/admin\/clients\/birch-cottage\/group" method="post">\s*<button class="icon-save" type="submit" aria-label="Save projects under this login" title="Save">[\s\S]*?<\/button>\s*<fieldset>\s*<legend>Projects under this login<\/legend>/u);
+  assert.match(birchPanel, /<label class="portal-check" for="login-group-alder-house">\s*<input id="login-group-alder-house" name="projects" type="checkbox" value="alder-house">\s*<span>Alder House<\/span>/u);
+  assert.match(birchPanel, /<input id="login-group-cedar-barn" name="projects" type="checkbox" value="cedar-barn">/u);
+  assert.doesNotMatch(birchPanel, /id="login-group-(muskegon-addition|birch-cottage)"/u);
+  assert.doesNotMatch(await panel("muskegon-addition"), /Projects under this login/u);
+
+  // Alder House goes under Birch Cottage's login.
+  const grouped = await request(`/clients/admin/clients/${birch}/group`, form({ projects: alder }, adminCookie));
+  assert.equal(grouped.headers.get("Location"), "/clients/admin?client=birch-cottage&notice=group-saved");
+  const birchRecord = await projectRecord(birch);
+  const alderRecord = await projectRecord(alder);
+  assert.ok(birchRecord.loginGroup);
+  assert.equal(alderRecord.loginGroup, birchRecord.loginGroup);
+  assert.equal(alderRecord.passwordHash, birchRecord.passwordHash);
+  assert.equal((await projectRecord(cedar)).loginGroup, undefined);
+  const alderPanel = await panel(alder);
+  assert.match(alderPanel, /id="client-login" name="login" type="text"[^>]*value="birch-cottage-login-2026"/u, "the same login, kept sealed for each");
+  assert.match(alderPanel, /<input id="login-group-birch-cottage" name="projects" type="checkbox" value="birch-cottage" checked>/u);
+  assert.match(alderPanel, /<input id="login-group-cedar-barn" name="projects" type="checkbox" value="cedar-barn">/u);
+  assert.match(alderPanel, /<strong>Alder House<\/strong><small>Shared login · No email on file<\/small>/u);
+  assert.match(alderPanel, /<strong>Birch Cottage<\/strong><small>Shared login · No email on file<\/small>/u);
+  assert.match(alderPanel, /<strong>Cedar Barn<\/strong><small>No email on file<\/small>/u);
+  assert.equal((await request("/clients/login", form({ password: "alder-house-login-2026" }))).status, 401, "Alder House's own login was replaced");
+  assert.ok(await db("mhb_activity").where({ action: "client.login-grouped", client_slug: alder }).first());
+
+  // The shared login opens the first project by name, with the others at the top to switch to.
+  const cookie = await loginAsClient("birch-cottage-login-2026");
+  const home = await (await request("/clients", { headers: { Cookie: cookie } })).text();
+  assert.match(home, /<h1 class="portal-heading">Alder House<\/h1>/u);
+  assert.match(home, /<div class="site-width portal-shell">\s*<nav class="project-switch" aria-label="Your projects">\s*<form action="\/clients\/switch" method="post">\s*<span class="project-switch-current" aria-current="page">Alder House<\/span>\s*<button type="submit" name="project" value="birch-cottage">Birch Cottage<\/button>\s*<\/form>\s*<\/nav>/u);
+  assert.doesNotMatch(home, /Cedar Barn/u);
+  const switched = await request("/clients/switch", form({ project: birch }, cookie));
+  assert.equal(switched.status, 303);
+  assert.equal(switched.headers.get("Location"), "/clients");
+  const birchCookie = cookieValue(switched);
+  const birchHome = await (await request("/clients", { headers: { Cookie: birchCookie } })).text();
+  assert.match(birchHome, /<h1 class="portal-heading">Birch Cottage<\/h1>/u);
+  assert.match(birchHome, /<button type="submit" name="project" value="alder-house">Alder House<\/button>\s*<span class="project-switch-current" aria-current="page">Birch Cottage<\/span>/u);
+  assert.ok(await db("mhb_activity").where({ action: "client.switched", client_slug: birch }).first());
+
+  // Never to a project outside the group.
+  for (const project of [cedar, "muskegon-addition", "no-such-project", alder.toUpperCase(), ""]) {
+    const refused = await request("/clients/switch", form({ project }, cookie));
+    assert.equal(refused.headers.get("Location"), "/clients?notice=switch-invalid");
+    assert.equal(refused.headers.get("Set-Cookie"), null);
+  }
+  assert.match(await (await request("/clients?notice=switch-invalid", { headers: { Cookie: cookie } })).text(), /That project is not under your login\./u);
+  const cedarCookie = await loginAsClient("cedar-barn-login-2026");
+  assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: cedarCookie } })).text(), /project-switch/u, "a login with one project has no switcher");
+  assert.equal((await request("/clients/switch", form({ project: birch }, cedarCookie))).headers.get("Location"), "/clients?notice=switch-invalid");
+  assert.equal((await request("/clients/switch", form({ project: birch }))).headers.get("Location"), "/clients", "a session is needed");
+  assert.equal((await request("/clients/switch", { headers: { Cookie: cookie } })).headers.get("Location"), "/clients", "opened again, it goes to the portal");
+
+  // Read only stays per project.
+  await request(`/clients/admin/clients/${birch}/access`, form({ readOnly: "yes" }, adminCookie));
+  assert.match(await (await request("/clients", { headers: { Cookie: birchCookie } })).text(), /Everything on this project, read only\./u);
+  assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: cookie } })).text(), /read only\./u);
+});
+
+test("a shared login changes for every project under it, is refused when another project has it, and a project taken out is admin only", async () => {
+  const adminCookie = await loginAsAdmin();
+  const birch = await addPortal(adminCookie, "Birch Cottage");
+  const alder = await addPortal(adminCookie, "Alder House");
+  const cedar = await addPortal(adminCookie, "Cedar Barn");
+  const dock = await addPortal(adminCookie, "Dock House");
+  const panel = async (slug) => (await request(`/clients/admin?client=${slug}`, { headers: { Cookie: adminCookie } })).text();
+  const saveLogin = async (slug, login) => (await request(`/clients/admin/clients/${slug}/login`, form({ login }, adminCookie))).headers.get("Location");
+  const group = async (slug, projects) => (await request(`/clients/admin/clients/${slug}/group`, form(projects.length ? { projects } : {}, adminCookie))).headers.get("Location");
+  const opens = async (login) => {
+    const response = await request("/clients/login", form({ password: login }));
+    if (response.status !== 303) return null;
+    return (await (await request("/clients", { headers: { Cookie: cookieValue(response) } })).text()).match(/<h1 class="portal-heading">([^<]+)<\/h1>/u)[1];
+  };
+  assert.equal(await group(birch, [alder, cedar]), `/clients/admin?client=${birch}&notice=group-saved`);
+
+  // A login another project opens is still refused; the group's own login is not.
+  assert.match(await saveLogin(alder, "dock-house-login-2026"), /notice=login-taken$/u);
+  assert.match(await saveLogin(alder, process.env.MHB_CLIENT_PORTAL_PASSWORD), /notice=login-taken$/u);
+  assert.match(await saveLogin(alder, "birch-cottage-login-2026"), /notice=login-saved$/u);
+  assert.match(await saveLogin(dock, "birch-cottage-login-2026"), /notice=login-taken$/u);
+  const reused = await request("/clients/admin/clients", form({ name: "Elm Loft", password: "birch-cottage-login-2026" }, adminCookie));
+  assert.equal(reused.status, 400);
+  assert.match(await reused.text(), /That project login already opens another client portal/u);
+
+  // A new login saved on any project under it changes it for all of them.
+  assert.match(await saveLogin(cedar, "lakeside-trio-2026"), /notice=login-saved$/u);
+  assert.equal(new Set(await Promise.all([birch, alder, cedar].map(async (slug) => (await projectRecord(slug)).passwordHash))).size, 1);
+  for (const slug of [birch, alder, cedar]) assert.match(await panel(slug), /id="client-login" name="login" type="text"[^>]*value="lakeside-trio-2026"/u);
+  assert.equal(await opens("birch-cottage-login-2026"), null);
+  assert.equal(await opens("lakeside-trio-2026"), "Alder House");
+  assert.equal(await opens("dock-house-login-2026"), "Dock House");
+  assert.equal((await db("mhb_activity").where({ action: "client.login-saved" }).whereIn("client_slug", [birch, alder, cedar]).select("id")).length, 6);
+
+  // Unchecked, a project is left with no login (admin only) until it is given its own.
+  const cookie = await loginAsClient("lakeside-trio-2026");
+  const cedarCookie = cookieValue(await request("/clients/switch", form({ project: cedar }, cookie)));
+  assert.equal(await group(birch, [alder]), `/clients/admin?client=${birch}&notice=group-saved`);
+  const cedarRecord = await projectRecord(cedar);
+  assert.equal(cedarRecord.passwordHash, null);
+  assert.equal(cedarRecord.loginGroup, undefined);
+  assert.equal(await db("mhb_secure").where({ key: `client-login:${cedar}` }).first(), undefined);
+  const cedarPanel = await panel(cedar);
+  assert.match(cedarPanel, /<strong>Cedar Barn<\/strong><small>Admin only · No email on file<\/small>/u);
+  assert.match(cedarPanel, /value="" placeholder="None, so only you can see this project\. Type one to share it\."/u);
+  assert.doesNotMatch(cedarPanel, /Projects under this login/u, "it needs a login of its own first");
+  assert.match(await (await request("/clients", { headers: { Cookie: cedarCookie } })).text(), /Private project access/u, "its client session no longer opens it");
+  assert.equal((await request("/clients/switch", form({ project: cedar }, cookie))).headers.get("Location"), "/clients?notice=switch-invalid");
+  assert.ok(await db("mhb_activity").where({ action: "client.login-ungrouped", client_slug: cedar }).first());
+  assert.equal(await opens("lakeside-trio-2026"), "Alder House", "the others still share it");
+  assert.match(await group(cedar, [birch]), /notice=group-needs-login$/u);
+  assert.match(await saveLogin(cedar, "cedar-barn-again-2026"), /notice=login-saved$/u);
+  assert.equal(await opens("cedar-barn-again-2026"), "Cedar Barn");
+
+  // Unchecking the last one ends the group; the project keeps its login.
+  assert.equal(await group(birch, []), `/clients/admin?client=${birch}&notice=group-saved`);
+  assert.equal((await projectRecord(birch)).loginGroup, undefined);
+  assert.equal((await projectRecord(alder)).passwordHash, null);
+  assert.equal(await opens("lakeside-trio-2026"), "Birch Cottage");
+  assert.doesNotMatch(await panel(birch), /Shared login/u);
+
+  // Checked on another project's panel, a project moves under that login, and a group left with
+  // one project ends.
+  await saveLogin(alder, "alder-house-again-2026");
+  await group(birch, [alder]);
+  assert.equal(await group(dock, [alder]), `/clients/admin?client=${dock}&notice=group-saved`);
+  assert.equal((await projectRecord(alder)).loginGroup, (await projectRecord(dock)).loginGroup);
+  assert.equal((await projectRecord(birch)).loginGroup, undefined);
+  assert.equal(await opens("lakeside-trio-2026"), "Birch Cottage");
+  assert.equal(await opens("dock-house-login-2026"), "Alder House");
+
+  // The Muskegon project is never grouped.
+  assert.match(await group(birch, ["muskegon-addition"]), /notice=project-invalid$/u);
+  assert.match(await group(birch, ["no-such-project"]), /notice=project-invalid$/u);
+  assert.match(await group("muskegon-addition", [birch]), /notice=invalid$/u);
+  assert.equal((await request(`/clients/admin/clients/${birch}/group`, { headers: { Cookie: adminCookie } })).headers.get("Location"), `/clients/admin?client=${birch}`);
 });
