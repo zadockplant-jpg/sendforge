@@ -35,6 +35,7 @@ const { up: expenseTables } = await import("../src/db/migrations/20261007_myhome
 const { up: teamTables } = await import("../src/db/migrations/20261008_myhomebuilder_portal_notes_schedule.js");
 const { up: jobBookChanges } = await import("../src/db/migrations/20261009_myhomebuilder_portal_job_books.js");
 const { up: photoTables } = await import("../src/db/migrations/20261010_myhomebuilder_portal_photos.js");
+const { up: renderTables } = await import("../src/db/migrations/20261011_myhomebuilder_portal_renders.js");
 const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
@@ -173,7 +174,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses", "mhb_notes", "mhb_schedule", "mhb_photos"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses", "mhb_notes", "mhb_schedule", "mhb_photos", "mhb_renders"];
 let server;
 let base;
 let renumbered = [];
@@ -244,6 +245,7 @@ before(async () => {
   await teamTables(db);
   await jobBookChanges(db);
   await photoTables(db);
+  await renderTables(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -425,14 +427,14 @@ test("rejects an incorrect login, and a correct one opens the Muskegon project",
 
   const home = await (await request("/clients", { headers: { Cookie: cookie } })).text();
   assert.match(home, /Muskegon Addition Selections/u);
-  assert.match(home, /href="\/clients\/muskegon-addition\/material-render\/\?scene=kitchen"/u);
+  assert.match(home, /href="\/clients\/designer\/"/u);
 
   const tampered = `${cookie.slice(0, -1)}${cookie.endsWith("a") ? "b" : "a"}`;
   assert.match(await (await request("/clients", { headers: { Cookie: tampered } })).text(), /Private project access/u);
 });
 
 test("grants the Muskegon project files only to a signed-in client, with protective headers", async () => {
-  for (const path of ["/clients/muskegon-addition/", "/clients/muskegon-addition/material-render/assets/index-test.js"]) {
+  for (const path of ["/clients/muskegon-addition/", "/clients/muskegon-addition/assets/selections.js"]) {
     const anonymous = await request(path);
     assert.equal(anonymous.status, 303, path);
     assert.equal(anonymous.headers.get("Location"), `/clients?next=${encodeURIComponent(path)}`, path);
@@ -440,9 +442,9 @@ test("grants the Muskegon project files only to a signed-in client, with protect
   }
 
   const cookie = await loginAsClient();
-  const grant = await request("/clients/muskegon-addition/material-render/assets/scenes/kitchen-base-corrected.png", { headers: { Cookie: cookie } });
+  const grant = await request("/clients/muskegon-addition/renders/prebuilt/kitchen-01-white-vialactea.webp", { headers: { Cookie: cookie } });
   assert.equal(grant.status, 200);
-  assert.equal(grant.headers.get("X-MHB-Asset"), "/clients/muskegon-addition/material-render/assets/scenes/kitchen-base-corrected.png");
+  assert.equal(grant.headers.get("X-MHB-Asset"), "/clients/muskegon-addition/renders/prebuilt/kitchen-01-white-vialactea.webp");
   assert.match(grant.headers.get("Content-Security-Policy"), /script-src 'self'/u);
   assert.match(grant.headers.get("Content-Security-Policy"), /worker-src 'self' blob:/u);
   assert.match(grant.headers.get("Cache-Control"), /no-store/u);
@@ -450,12 +452,13 @@ test("grants the Muskegon project files only to a signed-in client, with protect
 
   const root = await request("/clients/muskegon-addition", { headers: { Cookie: cookie } });
   assert.equal(root.headers.get("X-MHB-Asset"), "/clients/muskegon-addition/");
-  const post = await request("/clients/muskegon-addition/material-render/", { method: "POST", headers: { Cookie: cookie } });
+  const post = await request("/clients/muskegon-addition/assets/selections.js", { method: "POST", headers: { Cookie: cookie } });
   assert.equal(post.status, 405);
 });
 
 test("returns a client to the exact protected deep link and never to another destination", async () => {
-  const destination = "/clients/muskegon-addition/material-render/?scene=kitchen&design=shared-test";
+  const destination = "/clients/designer/?scene=kitchen&design=shared-test";
+  assert.equal((await request(destination)).headers.get("Location"), `/clients?next=${encodeURIComponent(destination)}`, "a signed-out visitor signs in first");
   const loginPage = await (await request(`/clients?next=${encodeURIComponent(destination)}`)).text();
   assert.match(loginPage, /scene=kitchen&amp;design=shared-test/u);
   const login = await request("/clients/login", form({ password: process.env.MHB_CLIENT_PORTAL_PASSWORD, next: destination }));
@@ -3626,4 +3629,122 @@ test("a shared login changes for every project under it, is refused when another
   assert.match(await group(birch, ["no-such-project"]), /notice=project-invalid$/u);
   assert.match(await group("muskegon-addition", [birch]), /notice=invalid$/u);
   assert.equal((await request(`/clients/admin/clients/${birch}/group`, { headers: { Cookie: adminCookie } })).headers.get("Location"), `/clients/admin?client=${birch}`);
+});
+
+// ---------- The live material designer ----------
+
+// A tiny valid PNG of the given size (gray), for the designer's render uploads.
+async function pngBytes(width, height) {
+  const { deflateSync, crc32 } = await import("node:zlib");
+  const chunk = (type, body) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(body.length);
+    const typed = Buffer.concat([Buffer.from(type, "ascii"), body]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(typed) >>> 0);
+    return Buffer.concat([length, typed, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const rows = Buffer.alloc((width * 3 + 1) * height, 128);
+  for (let y = 0; y < height; y += 1) rows[y * (width * 3 + 1)] = 0;
+  return new Uint8Array(Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", header), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]));
+}
+
+function renderPackage(overrides = {}) {
+  return {
+    version: 1, name: "Kitchen", room: "kitchen", width: 32, height: 24, metersPerUnit: 1.6,
+    camera: { width: 32, height: 24, focal: 30, cx: 16, cy: 12, up: [0, -1, 0], d1: [1, 0, 0], d2: [0, 0, 1], source: "assumed" },
+    regions: [
+      { category: "floor", orientation: "level", normal: [0, -1, 0], offset: -1, axes: [[1, 0, 0], [0, 0, 1]] },
+      { category: "cabinet", orientation: "along-d1", normal: [0, 0, 1], offset: 3, axes: [[1, 0, 0], [0, -1, 0]] },
+      { category: "keep", orientation: "free", normal: null, offset: null, axes: null }
+    ],
+    ...overrides
+  };
+}
+
+async function renderForm(cookie, { pack = renderPackage(), width = 32, height = 24, labelsSize = [width, height] } = {}) {
+  const body = new FormData();
+  body.append("package", JSON.stringify(pack));
+  body.append("image", new File([await pngBytes(width, height)], "render.png", { type: "image/png" }));
+  body.append("labels", new File([await pngBytes(...labelsSize)], "surfaces.png", { type: "image/png" }));
+  return { method: "POST", headers: { Cookie: cookie, Accept: "application/json" }, body };
+}
+
+test("the designer opens for a signed-in client or the admin, allows WebAssembly, and the old address redirects", async () => {
+  assert.equal((await request("/clients/designer/")).headers.get("Location"), "/clients?next=%2Fclients%2Fdesigner%2F");
+  const clientCookie = await loginAsClient();
+  const bare = await request("/clients/designer?scene=kitchen", { headers: { Cookie: clientCookie } });
+  assert.equal(bare.headers.get("Location"), "/clients/designer/?scene=kitchen", "the app's address keeps its trailing slash");
+  const page = await request("/clients/designer/", { headers: { Cookie: clientCookie } });
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get("X-MHB-Asset"), "/clients/designer/");
+  assert.match(page.headers.get("Content-Security-Policy"), /script-src 'self' 'wasm-unsafe-eval'/u);
+  assert.match(page.headers.get("Content-Security-Policy"), /worker-src 'self' blob:/u);
+  const asset = await request("/clients/designer/models/slimsam-77/vision_encoder.onnx", { headers: { Cookie: clientCookie } });
+  assert.equal(asset.headers.get("X-MHB-Asset"), "/clients/designer/models/slimsam-77/vision_encoder.onnx");
+  assert.equal((await request("/clients/muskegon-addition/material-render/?scene=bathroom", { headers: { Cookie: clientCookie } })).headers.get("Location"), "/clients/designer/?scene=bathroom");
+  const home = await (await request("/clients", { headers: { Cookie: clientCookie } })).text();
+  assert.match(home, /<a class="button button-solid" href="\/clients\/designer\/">Open live designer<\/a>/u);
+
+  const adminCookie = await loginAsAdmin();
+  assert.equal((await request("/clients/designer/?project=muskegon-addition", { headers: { Cookie: adminCookie } })).headers.get("X-MHB-Asset"), "/clients/designer/");
+  assert.match(await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text(), /<a class="portal-secondary-link" href="\/clients\/designer\/\?project=muskegon-addition">Designer<\/a>/u);
+});
+
+test("the admin adds, saves and deletes a project's designer renders, and each client sees only their own", async () => {
+  const adminCookie = await loginAsAdmin();
+  const api = "/clients/designer/api";
+  const added = await request(`${api}/renders?project=muskegon-addition`, await renderForm(adminCookie));
+  assert.equal(added.status, 201, await added.clone().text());
+  const { id } = await added.json();
+  assert.match(id, /^[A-Za-z0-9_-]{8,32}$/u);
+
+  // What is refused: a mismatched surface map, a package that does not fit, an unknown category.
+  assert.equal((await request(`${api}/renders?project=muskegon-addition`, await renderForm(adminCookie, { labelsSize: [16, 16] }))).status, 400);
+  assert.equal((await request(`${api}/renders?project=muskegon-addition`, await renderForm(adminCookie, { pack: renderPackage({ width: 40 }) }))).status, 400);
+  assert.equal((await request(`${api}/renders?project=muskegon-addition`, await renderForm(adminCookie, { pack: renderPackage({ regions: [{ category: "roof", orientation: "level", normal: null, offset: null, axes: null }] }) }))).status, 400);
+
+  const clientCookie = await loginAsClient();
+  const scenes = await (await request(`${api}/scenes`, { headers: { Cookie: clientCookie } })).json();
+  assert.equal(scenes.admin, false);
+  assert.equal(scenes.builtins, true, "Muskegon keeps its two calibrated rooms");
+  assert.deepEqual(scenes.renders.map((render) => [render.id, render.name, render.room]), [[id, "Kitchen", "kitchen"]]);
+  assert.equal(scenes.renders[0].package.regions.length, 3);
+  const image = await request(scenes.renders[0].image, { headers: { Cookie: clientCookie } });
+  assert.equal(image.status, 200);
+  assert.equal(image.headers.get("Content-Type"), "image/png");
+  assert.equal(Buffer.from(await image.arrayBuffer()).subarray(1, 4).toString("ascii"), "PNG");
+  assert.equal((await request(`${api}/renders?project=muskegon-addition`, await renderForm(clientCookie))).status, 403, "clients cannot change renders");
+
+  // Another project's client sees none of it.
+  const other = await addPortal(adminCookie, "Lakeview Cabin");
+  const otherCookie = cookieValue(await request("/clients/login", form({ password: `${other}-login-2026` })));
+  const otherScenes = await (await request(`${api}/scenes`, { headers: { Cookie: otherCookie } })).json();
+  assert.deepEqual([otherScenes.builtins, otherScenes.renders.length, otherScenes.project.slug], [false, 0, other]);
+  assert.equal((await request(`${api}/renders/${id}/image`, { headers: { Cookie: otherCookie } })).status, 404);
+  assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: otherCookie } })).text(), /Open live designer/u);
+  await request(`${api}/renders?project=${other}`, await renderForm(adminCookie, { pack: renderPackage({ name: "Cabin kitchen" }) }));
+  const cabinHome = await (await request("/clients", { headers: { Cookie: otherCookie } })).text();
+  assert.match(cabinHome, /<h3>Live material designer<\/h3>/u);
+  assert.match(cabinHome, /href="\/clients\/designer\/">Open live designer<\/a>/u);
+
+  // Saving the reviewed surfaces again keeps the id; deleting takes the render and its files.
+  const saved = await request(`${api}/renders/${id}?project=muskegon-addition`, await renderForm(adminCookie, { pack: renderPackage({ name: "Kitchen, reviewed" }) }));
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).id, id);
+  const adminScenes = await (await request(`${api}/scenes?project=muskegon-addition`, { headers: { Cookie: adminCookie } })).json();
+  assert.equal(adminScenes.admin, true);
+  assert.equal(adminScenes.renders[0].name, "Kitchen, reviewed");
+  assert.match(adminScenes.renders[0].image, /\?project=muskegon-addition$/u);
+  const removed = await request(`${api}/renders/${id}/delete?project=muskegon-addition`, { method: "POST", headers: { Cookie: adminCookie, Accept: "application/json" } });
+  assert.equal(removed.status, 200);
+  assert.equal((await (await request(`${api}/scenes`, { headers: { Cookie: clientCookie } })).json()).renders.length, 0);
+  assert.equal(await db("mhb_files").where("key", "like", `renders/muskegon-addition/${id}/%`).first(), undefined);
+  const logged = (await db("mhb_activity").whereLike("action", "render.%").orderBy("id").select("action")).map((row) => row.action);
+  assert.deepEqual(logged, ["render.added", "render.added", "render.saved", "render.deleted"]);
 });

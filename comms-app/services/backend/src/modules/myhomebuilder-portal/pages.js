@@ -412,7 +412,7 @@ function grossFigures(totals) {
 
 // `photos`: the gallery's photos shown in this portal. `projects`: the projects under the client's
 // login (a login group), for switching between them; empty when the login opens one project.
-export function portalHomePage({ client, billing, documents, storeReady, admin = false, notice = null, book = null, photos = [], projects = [] }) {
+export function portalHomePage({ client, billing, documents, storeReady, admin = false, notice = null, book = null, photos = [], projects = [], designer = false }) {
   // Display all data to client portal (read only): every figure, and nothing to do or download.
   const readOnly = Boolean(client.readOnly);
   const shownPhotos = client.photosVisible === false ? [] : photos.filter((photo) => !photo.hidden);
@@ -441,13 +441,27 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
             <p>Open the current visual selections and rendered views for the Muskegon addition project.</p>
           </div>
           <div class="client-project-action">
-            <a class="button button-solid" href="${escapeAttribute(client.projectPath)}/material-render/?scene=kitchen">Open live designer</a>
+            <a class="button button-solid" href="/clients/designer/">Open live designer</a>
             <a class="portal-secondary-link" href="${escapeAttribute(client.projectPath)}/">Review fixed room looks</a>
             <small>Both views remain securely inside your private client session.</small>
           </div>
         </article>
       </section>`
-    : "";
+    : designer
+      ? `<section class="portal-section" aria-labelledby="projects-heading">
+        <h2 id="projects-heading">Project resources</h2>
+        <article class="client-project-card">
+          <div class="client-project-copy">
+            <span class="client-project-status">Available for review</span>
+            <h3>Live material designer</h3>
+            <p>Try finishes on your project's renders.</p>
+          </div>
+          <div class="client-project-action">
+            <a class="button button-solid" href="/clients/designer/">Open live designer</a>
+          </div>
+        </article>
+      </section>`
+      : "";
 
   const setupNote = storeReady
     ? ""
@@ -1135,7 +1149,10 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
       const base = `/clients/admin/clients/${encodeURIComponent(selected.slug)}`;
       return `<section class="admin-panel" aria-labelledby="selected-heading">
         <div class="admin-panel-head">
-          <h2 id="selected-heading">${escapeHtml(selected.name)}</h2>
+          <div class="admin-subhead admin-title-row">
+            <h2 id="selected-heading">${escapeHtml(selected.name)}</h2>
+            <a class="portal-secondary-link" href="/clients/designer/?project=${encodeURIComponent(selected.slug)}">Designer</a>
+          </div>
           <form class="admin-inline-form admin-save-row" action="${base}/profile" method="post">
             <button class="icon-save" type="submit" aria-label="Save client email" title="Save">${SAVE_ICON}</button>
             ${emailsField({ id: "client-emails", name: "emails", label: "Client email", addresses: clientEmails(selected), typed: typedEmails })}

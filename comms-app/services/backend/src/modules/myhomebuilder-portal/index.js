@@ -125,7 +125,7 @@ myhomebuilderPortalRouter.use(
     const hits = await hitRateLimit(store, `mhb:${signIn ? "sign-in" : "post"}:${ip}`, 60);
     if (hits > (signIn ? SIGN_IN_LIMIT : POST_LIMIT)) return page(res, 429, "Too many requests.", "Please wait a minute and try again.");
     // The backend-wide admin write switch also pauses changes made in this admin panel.
-    if (req.path.startsWith("/clients/admin/") && !ADMIN_SESSION_PATHS.has(req.path) && !adminWritesEnabled()) {
+    if ((req.path.startsWith("/clients/admin/") || req.path.startsWith("/clients/designer/api/")) && !ADMIN_SESSION_PATHS.has(req.path) && !adminWritesEnabled()) {
       return page(res, 423, "Admin changes are paused.", "Changes are temporarily turned off. Please try again later.");
     }
     next();

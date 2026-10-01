@@ -550,6 +550,31 @@ accounts.
   at once (crew work is paid one at a time).
 - The balance check and **Post corrections** cover filed transactions like invoices and labor.
 
+## Live material designer
+
+Every project has the live material designer at `/clients/designer/` (`designer.js`, migration
+`20261011_myhomebuilder_portal_renders.js`).
+
+- **The app:** a static build from the separate `build-material-render-from-image` repository
+  (`site/clients/designer/`). For a signed-in client (their project) or the admin
+  (`?project=slug`), the backend answers with an `X-MHB-Asset` grant and the Function serves the
+  file. Its policy adds `'wasm-unsafe-eval'`: the surface model runs on WebAssembly.
+- **Renders** (`mhb_renders`): the admin uses **Load render** in the designer (Designer link on
+  the project panel).
+  - The admin's browser finds the surfaces, the camera and each surface's plane; the admin
+    confirms the labels (floor, walls, cabinets…); and the designer saves three things: the
+    render PNG, its surface map PNG and the package.
+  - The renders API is under `/clients/designer/api/`:
+    - `scenes`: the project's renders, plus Muskegon's two calibrated rooms;
+    - `renders/<id>/image` and `renders/<id>/labels`;
+    - for the admin only: `renders` POST (add), `renders/<id>` POST (save again) and
+      `renders/<id>/delete`.
+  - The package is checked against the PNG sizes and the known categories.
+  - The admin write switch pauses these changes too, and each change is in the activity log.
+- **For clients:** a project with renders shows **Live material designer** under Project
+  resources, and the client tries finishes on them. The old Muskegon address
+  (`/clients/muskegon-addition/material-render/`) redirects to the designer.
+
 ## PDF signing library
 
 `vendor/pdf-lib.js` is pdf-lib 1.17.1 bundled into one ES module, so the module adds no npm

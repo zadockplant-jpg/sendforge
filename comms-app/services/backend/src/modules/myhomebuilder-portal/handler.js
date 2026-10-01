@@ -125,6 +125,7 @@ import { deleteSecure, getSecureJson, putSecureJson, secureReady } from "./secur
 import { handleAdminLabor, handleCrew } from "./crew.js";
 import { handleAdminBank, listBankAccounts, unfileExpenseMatch } from "./bank.js";
 import { handleAdminTeam } from "./team.js";
+import { DESIGNER_PATH, handleDesigner, hasRenders } from "./designer.js";
 import { categoryName, deleteExpense, getExpense, listAllExpenses, listExpenses, paidToSuggestions, paidWithOptions, putExpense, resolveCategory } from "./expenses.js";
 import {
   adminBillingPage,
@@ -243,7 +244,9 @@ function safeProjectDestination(value) {
     const destination = new URL(value, "https://portal.invalid");
     if (destination.origin !== "https://portal.invalid") return "";
     if (destination.username || destination.password || destination.hash) return "";
-    if (destination.pathname !== PROJECT_PATH && !destination.pathname.startsWith(`${PROJECT_PATH}/`)) return "";
+    // The Muskegon project's files, or the designer's page (a shared design link).
+    const project = destination.pathname === PROJECT_PATH || destination.pathname.startsWith(`${PROJECT_PATH}/`);
+    if (!project && destination.pathname !== "/clients/designer/") return "";
     return `${destination.pathname}${destination.search}`;
   } catch {
     return "";
@@ -1820,6 +1823,7 @@ const KIT = {
   decodeSegment,
   requestIp,
   safeFileName,
+  loginLocation,
   storePhotos,
   photoResponse,
   MAX_PHOTO_BATCH_BYTES
@@ -1924,16 +1928,17 @@ async function routePortalRequest(context) {
       if (!authenticated) return htmlResponse(loginPage(false, destination));
 
       // Photos shown in the portal: all of them unless the admin hid them, less any hidden one by one.
-      const [billing, documents, book, photos, projects] = store
+      const [billing, documents, book, photos, projects, designer] = store
         ? await Promise.all([
           listBilling(store, client.slug),
           client.readOnly ? [] : listDocuments(store, client.slug),
           client.readOnly ? jobBook(store, client.slug) : null,
           client.photosVisible === false ? [] : listPhotos(store, client.slug).then((list) => list.filter((photo) => !photo.hidden)),
-          client.loginGroup ? listClients(store).then((clients) => switchableProjects(clients, client)) : []
+          client.loginGroup ? listClients(store).then((clients) => switchableProjects(clients, client)) : [],
+          client.projectPath ? true : hasRenders(store, client.slug)
         ])
-        : [[], [], null, [], []];
-      return htmlResponse(portalHomePage({ client, billing, documents, storeReady: Boolean(store), admin, notice: noticeFromQuery(url), book, photos, projects: projects.length > 1 ? projects : [] }));
+        : [[], [], null, [], [], false];
+      return htmlResponse(portalHomePage({ client, billing, documents, storeReady: Boolean(store), admin, notice: noticeFromQuery(url), book, photos, projects: projects.length > 1 ? projects : [], designer }));
     }
 
     if (method === "POST" && pathname === "/clients/login") {
@@ -1979,6 +1984,15 @@ async function routePortalRequest(context) {
       const photo = await getPhoto(store, decodeSegment(pathname.slice("/clients/photos/".length)));
       if (!photo || photo.clientSlug !== client.slug || photo.hidden || client.photosVisible === false) return notFoundResponse(session, admin);
       return (await photoResponse(store, photo)) || notFoundResponse(session, admin);
+    }
+
+    // The live material designer (every project) and its renders API.
+    if (pathname === DESIGNER_PATH || pathname.startsWith(`${DESIGNER_PATH}/`)) {
+      return handleDesigner({ ...context, kit: KIT }, store, pathname, url, { client, authenticated, admin });
+    }
+    // The designer used to live inside the Muskegon project's files.
+    if (pathname === `${PROJECT_PATH}/material-render` || pathname.startsWith(`${PROJECT_PATH}/material-render/`)) {
+      return redirectResponse(`${DESIGNER_PATH}/${url.search}`);
     }
 
     if (isRead && (pathname === PROJECT_PATH || pathname.startsWith(`${PROJECT_PATH}/`))) {
