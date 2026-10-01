@@ -152,6 +152,7 @@ export function expiredClientSession() {
   return expiredCookieLine(CLIENT_COOKIE);
 }
 
+// `signedInAt` (Unix seconds) is when the session began: its expiry less its lifetime.
 export async function readClientSession(request, secret, defaultSlug) {
   const token = readCookie(request, CLIENT_COOKIE);
   const parts = token.split(".");
@@ -162,7 +163,7 @@ export async function readClientSession(request, secret, defaultSlug) {
     const expiry = Number(expiryText);
     if (!isValidSlug(slug) || !Number.isSafeInteger(expiry) || expiry <= now || !signature) return null;
     const expected = await hmacSign(secret, `mhb-client-portal:v2:${slug}:${expiry}`);
-    return (await constantTimeMatches(signature, expected)) ? { slug } : null;
+    return (await constantTimeMatches(signature, expected)) ? { slug, signedInAt: expiry - CLIENT_SESSION_TTL_SECONDS } : null;
   }
 
   if (parts.length === 2) {
@@ -170,7 +171,7 @@ export async function readClientSession(request, secret, defaultSlug) {
     const expiry = Number(expiryText);
     if (!Number.isSafeInteger(expiry) || expiry <= now || !signature) return null;
     const expected = await hmacSign(secret, `mhb-client-portal:v1:${expiry}`);
-    return (await constantTimeMatches(signature, expected)) ? { slug: defaultSlug } : null;
+    return (await constantTimeMatches(signature, expected)) ? { slug: defaultSlug, signedInAt: expiry - CLIENT_SESSION_TTL_SECONDS } : null;
   }
 
   return null;

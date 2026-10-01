@@ -86,8 +86,11 @@ export function adminNotesPage({ notes, status = null }) {
 
 // ---------- The schedule ----------
 
+// A job goes by its label: a project inside a client portal has the portal's name first.
 function jobName(clients, slug) {
-  return slug ? clients.find((client) => client.slug === slug)?.name || slug : "";
+  if (!slug) return "";
+  const client = clients.find((entry) => entry.slug === slug);
+  return client ? client.label || client.name : slug;
 }
 
 function crewNames(entry, workers) {
@@ -103,7 +106,7 @@ export function scheduleFields({ entry = null, clients, workers, action, date = 
             <label for="schedule-job">Job
               <select id="schedule-job" name="job">
                 <option value=""${value.clientSlug ? "" : " selected"}>No job (a note for the day)</option>
-                ${clients.map((client) => `<option value="${escapeAttribute(client.slug)}"${client.slug === value.clientSlug ? " selected" : ""}>${escapeHtml(client.name)}</option>`).join("")}
+                ${clients.filter((client) => !client.archivedAt || client.slug === value.clientSlug).map((client) => `<option value="${escapeAttribute(client.slug)}"${client.slug === value.clientSlug ? " selected" : ""}>${escapeHtml(client.label || client.name)}</option>`).join("")}
               </select>
             </label>
             <div class="schedule-when">
@@ -210,7 +213,7 @@ export function crewScheduleSection({ entries, clients }) {
     const when = entry.endsOn && entry.endsOn !== entry.startsOn ? `${dateText(entry.startsOn)} to ${dateText(entry.endsOn)}` : dateText(entry.startsOn);
     return `<tr>
           <td data-label="When">${when}${entry.time ? `<small>${escapeHtml(entry.time)}</small>` : ""}</td>
-          <td data-label="Job">${escapeHtml(client?.name || (entry.clientSlug ? entry.clientSlug : "Note"))}${client?.siteAddress ? `<small>${escapeHtml(client.siteAddress)}</small>` : ""}</td>
+          <td data-label="Job">${escapeHtml(client?.label || client?.name || (entry.clientSlug ? entry.clientSlug : "Note"))}${client?.siteAddress ? `<small>${escapeHtml(client.siteAddress)}</small>` : ""}</td>
           <td data-label="Notes">${entry.notes ? escapeHtml(entry.notes).replaceAll("\n", "<br>") : ""}</td>
         </tr>`;
   }).join("");

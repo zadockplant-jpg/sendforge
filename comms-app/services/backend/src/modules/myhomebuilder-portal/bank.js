@@ -78,8 +78,8 @@ function payableExpenses(expenses, { amountCents, ledger }) {
 function expenseName(expense, clients) {
   const what = expense.vendor || expense.description;
   if (!expense.clientSlug) return `Overhead expense · ${what}`;
-  const job = clients.find((client) => client.slug === expense.clientSlug)?.name || expense.clientSlug;
-  return `Expense on ${job} · ${what}`;
+  const client = clients.find((entry) => entry.slug === expense.clientSlug);
+  return `Expense on ${client ? client.label || client.name : expense.clientSlug} · ${what}`;
 }
 
 // What `value` files the transaction to: { target, account, clientSlug, laborId, expenseId, name },
@@ -96,7 +96,7 @@ export function resolveTarget(value, { clients, labor, amountCents, expenses = [
   if (job) {
     const client = clients.find((entry) => entry.slug === job[1]);
     const cost = JOB_COSTS.find(([code]) => code === job[2]);
-    return client && cost ? { target, account: cost[0], clientSlug: client.slug, name: `${client.name} · ${cost[1]}` } : null;
+    return client && cost ? { target, account: cost[0], clientSlug: client.slug, name: `${client.label || client.name} · ${cost[1]}` } : null;
   }
   const overhead = target.match(/^overhead:(\d{4})$/u);
   if (overhead) {
@@ -121,7 +121,8 @@ export function targetGroups({ clients, labor, amountCents, expenses = [], ledge
   const crew = payableLabor(labor, amountCents);
   if (crew.length) groups.push({ label: "Pay crew", options: crew.map((entry) => [`labor:${entry.id}`, `${laborLabel(entry)} · ${money(entry.amountCents)}${entry.status === "paid" ? " (paid by hand)" : ""}`]) });
   for (const client of clients) {
-    groups.push({ label: client.name, options: JOB_COSTS.map(([code, name]) => [`job:${client.slug}:${code}`, `${client.name} · ${name}`]) });
+    const job = client.label || client.name;
+    groups.push({ label: job, options: JOB_COSTS.map(([code, name]) => [`job:${client.slug}:${code}`, `${job} · ${name}`]) });
   }
   groups.push({ label: "Overhead", options: OVERHEAD.map(([code, name]) => [`overhead:${code}`, name]) });
   return groups;

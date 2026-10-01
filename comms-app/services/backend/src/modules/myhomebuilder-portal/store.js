@@ -50,26 +50,45 @@ async function cleanup(store) {
 
 // ---------- Clients ----------
 
-export async function getClient(store, slug, defaultSlug = DEFAULT_CLIENT_SLUG) {
+// A client portal can hold projects: each project names its portal in `parentSlug`. A project's
+// `label` puts the portal's name first ("Smith Residence · Deck") so job lists stay clear; it is
+// worked out on reading and never saved.
+function labelOf(client, parentName) {
+  return client.parentSlug && parentName ? `${parentName} · ${client.name}` : client.name;
+}
+
+async function readClient(store, slug, defaultSlug) {
   const stored = store ? data(await store.db("mhb_clients").where({ slug }).first().timeout(QUERY_TIMEOUT_MS)) : null;
   if (stored) return { ...(slug === defaultSlug ? defaultClient(slug) : {}), ...stored };
   return slug === defaultSlug ? defaultClient(slug) : null;
 }
 
+export async function getClient(store, slug, defaultSlug = DEFAULT_CLIENT_SLUG) {
+  const client = await readClient(store, slug, defaultSlug);
+  if (!client) return null;
+  const parent = client.parentSlug ? await readClient(store, client.parentSlug, defaultSlug) : null;
+  return { ...client, label: labelOf(client, parent?.name) };
+}
+
 export async function listClients(store, defaultSlug = DEFAULT_CLIENT_SLUG) {
   const clients = new Map([[defaultSlug, defaultClient(defaultSlug)]]);
-  if (!store) return [...clients.values()];
-  for (const row of await store.db("mhb_clients").select("slug", "data").timeout(QUERY_TIMEOUT_MS)) {
-    clients.set(row.slug, { ...(clients.get(row.slug) || {}), ...data(row) });
+  if (store) {
+    for (const row of await store.db("mhb_clients").select("slug", "data").timeout(QUERY_TIMEOUT_MS)) {
+      clients.set(row.slug, { ...(clients.get(row.slug) || {}), ...data(row) });
+    }
   }
-  return [...clients.values()].sort((left, right) => left.name.localeCompare(right.name));
+  const all = [...clients.values()];
+  const names = new Map(all.map((client) => [client.slug, client.name]));
+  return all.map((client) => ({ ...client, label: labelOf(client, names.get(client.parentSlug)) }))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export async function putClient(store, client) {
+  const { label: _label, ...record } = client;
   await store.db("mhb_clients")
-    .insert({ slug: client.slug, data: JSON.stringify(client) })
+    .insert({ slug: record.slug, data: JSON.stringify(record) })
     .onConflict("slug")
-    .merge({ data: JSON.stringify(client), updated_at: store.db.fn.now() })
+    .merge({ data: JSON.stringify(record), updated_at: store.db.fn.now() })
     .timeout(QUERY_TIMEOUT_MS);
 }
 
@@ -79,6 +98,13 @@ export async function putClient(store, client) {
 export async function listBilling(store, slug) {
   const rows = await store.db("mhb_billing").where({ client_slug: slug }).orderBy("created_at", "desc").select("data").timeout(QUERY_TIMEOUT_MS);
   return rows.map(data).sort((left, right) => issuedDate(right).localeCompare(issuedDate(left)) || String(right.createdAt).localeCompare(String(left.createdAt)));
+}
+
+// Several projects' quotes and invoices at once (a client portal's projects, for their totals).
+export async function listBillingFor(store, slugs) {
+  if (!slugs.length) return [];
+  const rows = await store.db("mhb_billing").whereIn("client_slug", slugs).select("data").timeout(QUERY_TIMEOUT_MS);
+  return rows.map(data);
 }
 
 // Serializes renumbering, so two requests cannot hand out the same numbers.

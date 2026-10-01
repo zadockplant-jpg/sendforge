@@ -44,6 +44,7 @@ import {
   getTemplate,
   listAllDocuments,
   listBilling,
+  listBillingFor,
   listClients,
   listDocuments,
   listPhotos,
@@ -118,7 +119,7 @@ import {
 } from "./billing.js";
 import { formatDate, money } from "./format.js";
 import { isPdf, signDocument } from "./pdf.js";
-import { activityCsv, booksReport, checkBooks, correctBooks, jobBook, ledgerCsv, record, verifyActivityLog } from "./books.js";
+import { activityCsv, booksReport, checkBooks, correctBooks, jobBook, jobTotals, ledgerCsv, record, verifyActivityLog } from "./books.js";
 import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
 import { CREW_SECTIONS, listWorkers } from "./labor.js";
 import { deleteSecure, getSecureJson, putSecureJson, secureReady } from "./secure.js";
@@ -128,6 +129,7 @@ import { handleAdminTeam } from "./team.js";
 import { DESIGNER_PATH, handleDesigner, hasRenders } from "./designer.js";
 import { categoryName, deleteExpense, getExpense, listAllExpenses, listExpenses, paidToSuggestions, paidWithOptions, putExpense, resolveCategory } from "./expenses.js";
 import {
+  adminArchivePage,
   adminBillingPage,
   adminBooksPage,
   adminDashboardPage,
@@ -135,6 +137,7 @@ import {
   adminAddPaymentPage,
   adminDocumentsPage,
   adminJobBookPage,
+  adminPhotoDatePage,
   adminRequestPage,
   adminTemplatesPage,
   billingDeletePage,
@@ -142,6 +145,7 @@ import {
   billingEditorPage,
   loginPage,
   messagePage,
+  photoDate,
   portalHomePage,
   serviceUnavailablePage,
   sharedBillingPage,
@@ -337,10 +341,17 @@ const NOTICES = {
   "photos-added": { text: "Photos added." },
   "photos-invalid": { text: "Choose JPEG, PNG, WebP or GIF photos up to 20 MB each, with a note under 500 characters.", tone: "error" },
   "photo-deleted": { text: "Photo deleted." },
+  "photo-date-invalid": { text: "Enter the photo's date as a date, or use Delete date to show none.", tone: "error" },
   "gallery-saved": { text: "Saved." },
-  "group-saved": { text: "Saved." },
-  "group-needs-login": { text: "Save a client login for this project first.", tone: "error" },
-  "switch-invalid": { text: "That project is not under your login.", tone: "error" }
+  "switch-invalid": { text: "That project is not under your login.", tone: "error" },
+  "project-added": { text: "Project added. It uses this client portal's login and starts with its client emails." },
+  archived: { text: "Sent to archive. It is left out of the books and the client portal screen, and the client cannot open it. Archive, at the bottom of the admin panel, restores it." },
+  restored: { text: "Restored. It is back on the client portal screen and in the books." },
+  "restore-parent-first": { text: "That project's client portal is in the archive too. Restore the client portal first.", tone: "error" },
+  "inside-saved": { text: "It is a project in that client portal now, and uses that portal's client login." },
+  "inside-saved-private": { text: "It is a project in that client portal now. That portal has no client login yet, so only you can see it." },
+  "inside-secret": { text: "This project's login is set in Render, so it stays a client portal of its own. Other portals can go inside it.", tone: "error" },
+  "own-saved": { text: "It is a client portal of its own now. It has no client login yet, so only you can see it." }
 };
 
 function noticeFromQuery(url) {
@@ -381,42 +392,92 @@ function decodeSignatureImage(value) {
   }
 }
 
-// The projects a typed login opens, by name: the Muskegon project's (its secret), or each project
-// whose login hash it matches. Projects under one login share a hash, which is checked once.
-async function loginOwners(env, store, suppliedPassword, { first = false } = {}) {
-  if (typeof suppliedPassword !== "string" || !suppliedPassword) return [];
-  const owners = [];
-  if (await constantTimeMatches(suppliedPassword, env.CLIENT_PORTAL_PASSWORD)) {
-    owners.push(DEFAULT_CLIENT_SLUG);
-    if (first) return owners;
-  }
-  if (!store) return owners;
-  const checked = new Map();
-  for (const client of await listClients(store)) {
-    if (!client.passwordHash || client.active === false || owners.includes(client.slug)) continue;
-    if (!checked.has(client.passwordHash)) checked.set(client.passwordHash, await verifyPassword(suppliedPassword, client.passwordHash));
-    if (!checked.get(client.passwordHash)) continue;
-    owners.push(client.slug);
-    if (first) return owners;
-  }
-  return owners;
+// ---------- Client portals and their projects ----------
+// A client portal can hold projects: a project names its client portal in `parentSlug` (one level
+// deep). A project has no login of its own; it uses its client portal's, so one login opens the
+// portal and every project in it. Client portals that shared one login before projects existed
+// (a `loginGroup` holding the same hash) still open together. A portal or project in the archive
+// (`archivedAt`, with `active: false`) opens for no one.
+
+// The client portal a project is in, or the portal itself.
+function rootOf(clients, client) {
+  if (!client) return null;
+  return client.parentSlug ? clients.find((entry) => entry.slug === client.parentSlug && !entry.parentSlug) || null : client;
 }
 
-// The project a login opens: with several under one login, the first by name.
+function projectsOf(clients, root) {
+  return clients.filter((entry) => entry.parentSlug === root.slug);
+}
+
+function hasLogin(root) {
+  return Boolean(root && (root.managedBySecret || root.passwordHash));
+}
+
+// The client portals a login opens together: the portal, or every portal of its login group.
+function loginRoots(clients, root) {
+  if (!root.loginGroup || !root.passwordHash || root.managedBySecret) return [root];
+  return clients.filter((entry) => !entry.parentSlug && entry.loginGroup === root.loginGroup && entry.passwordHash === root.passwordHash);
+}
+
+// A session that began before its project moved to another client portal (or out on its own)
+// no longer opens it, so the move never carries an old sign-in into another client's projects.
+function signedInBefore(session, changedAt) {
+  return Boolean(changedAt) && session.signedInAt < Math.floor(Date.parse(changedAt) / 1000);
+}
+
+// The projects a typed login opens: each client portal whose login it is (the Muskegon project's
+// secret, or a matching hash), by name, each followed by the projects inside it. Portals under
+// one login group share a hash, which is checked once. Archived ones are left out unless asked
+// for (a new login must not be one an archived portal still has).
+async function loginOwners(env, store, suppliedPassword, { first = false, includeArchived = false } = {}) {
+  if (typeof suppliedPassword !== "string" || !suppliedPassword) return [];
+  const clients = await listClients(store);
+  const usable = (client) => includeArchived || client.active !== false;
+  const roots = clients.filter((client) => !client.parentSlug && usable(client));
+  const opened = [];
+  const muskegon = roots.find((client) => client.managedBySecret);
+  if (muskegon && (await constantTimeMatches(suppliedPassword, env.CLIENT_PORTAL_PASSWORD))) opened.push(muskegon);
+  if (!(first && opened.length)) {
+    const checked = new Map();
+    for (const client of roots) {
+      if (!client.passwordHash || client.managedBySecret) continue;
+      if (!checked.has(client.passwordHash)) checked.set(client.passwordHash, await verifyPassword(suppliedPassword, client.passwordHash));
+      if (!checked.get(client.passwordHash)) continue;
+      opened.push(client);
+      if (first) break;
+    }
+  }
+  return opened.flatMap((root) => [root.slug, ...projectsOf(clients, root).filter(usable).map((project) => project.slug)]);
+}
+
+// The project a login opens first: its client portal (with several portals, the first by name).
 async function resolveLogin(env, store, suppliedPassword) {
   return (await loginOwners(env, store, suppliedPassword, { first: true }))[0] || null;
 }
 
-// Projects under one login share `loginGroup`, the same login hash and the same sealed login.
-function loginGroupOf(clients, client) {
-  if (!client?.loginGroup) return client ? [client] : [];
-  return clients.filter((entry) => entry.loginGroup === client.loginGroup);
+// The projects a client can switch between: everything their login opens, still in use.
+function switchableProjects(clients, client) {
+  const root = rootOf(clients, client);
+  if (!root || root.active === false || !hasLogin(root)) return [];
+  return loginRoots(clients, root)
+    .filter((entry) => entry.active !== false)
+    .flatMap((entry) => [entry, ...projectsOf(clients, entry).filter((project) => project.active !== false)]);
 }
 
-// The projects a client can switch between: those under the same login (and still opened by it).
-function switchableProjects(clients, client) {
-  if (!client?.loginGroup || !client.passwordHash) return [];
-  return clients.filter((entry) => entry.loginGroup === client.loginGroup && entry.passwordHash === client.passwordHash && entry.active !== false && !entry.managedBySecret);
+// A project's address id, made from its name: -2, -3 and so on when another project has it.
+async function freeSlug(store, slug) {
+  const stem = slug.slice(0, 58).replace(/-+$/u, "");
+  let free = slug;
+  for (let number = 2; free === DEFAULT_CLIENT_SLUG || (await getClient(store, free)); number += 1) free = `${stem}-${number}`;
+  return free;
+}
+
+// A login group left with one client portal is no longer a group.
+async function endLoneGroup(store, group) {
+  const left = (await listClients(store)).filter((entry) => entry.loginGroup === group);
+  if (left.length !== 1) return;
+  const { loginGroup: _group, ...rest } = left[0];
+  await putClient(store, rest);
 }
 
 // ---------- Quotes and invoices ----------
@@ -1404,12 +1465,15 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     }
     const links = { ...shareLinks(origin, item), today };
     const receipt = item.status === "paid" ? await getSentEmail(store, sentKey(item, "receipt")) : null;
-    const [recipients, projects] = await Promise.all([listRecipients(store), listClients(store)]);
+    const [recipients, projects] = await Promise.all([listRecipients(store), listClients(store).then((list) => list.filter((entry) => !entry.archivedAt))]);
     return scriptedHtmlResponse(adminBillingPage({ client: target, item, links, receipt, recipients, projects, readiness, notice, typed }), status);
   };
 
-  // The other project named by a Copy or Send form, or null.
-  const otherProject = async (toSlug) => (toSlug !== slug && isValidSlug(toSlug) ? getClient(store, toSlug) : null);
+  // The other project named by a Copy or Send form (not one in the archive), or null.
+  const otherProject = async (toSlug) => {
+    const project = toSlug !== slug && isValidSlug(toSlug) ? await getClient(store, toSlug) : null;
+    return project && !project.archivedAt ? project : null;
+  };
 
   // Reads the addresses typed into a Send to field. Returns them, or the page explaining the problem.
   const typedAddresses = async (field) => {
@@ -1637,8 +1701,11 @@ async function handleBooks(context, store, pathname, url) {
   const method = context.request.method;
   const isRead = method === "GET" || method === "HEAD";
   const clients = await listClients(store);
-  const names = new Map(clients.map((client) => [client.slug, client.name]));
-  const slug = names.has(url.searchParams.get("client")) ? url.searchParams.get("client") : "";
+  // A project goes by its label (its client portal's name first). Client portals in the archive
+  // are left out of the books, so they are not offered as jobs.
+  const names = new Map(clients.map((client) => [client.slug, client.label]));
+  const jobs = clients.filter((client) => !client.archivedAt);
+  const slug = jobs.some((client) => client.slug === url.searchParams.get("client")) ? url.searchParams.get("client") : "";
   const day = (value) => (/^\d{4}-\d{2}-\d{2}$/u.test(value || "") ? value : "");
   const from = day(url.searchParams.get("from"));
   const to = day(url.searchParams.get("to"));
@@ -1657,12 +1724,12 @@ async function handleBooks(context, store, pathname, url) {
       const payers = paidWithOptions(await listBankAccounts(store));
       if (id === "new") {
         if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
-        return scriptedHtmlResponse(adminAddExpensePage({ jobs: clients, payers, today: todayInMichigan(), paidTo: await expensePaidTo(store), notice: noticeFromQuery(url) }));
+        return scriptedHtmlResponse(adminAddExpensePage({ jobs, payers, today: todayInMichigan(), paidTo: await expensePaidTo(store), notice: noticeFromQuery(url) }));
       }
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
       const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 8192);
       const job = String(form?.get("job") || "");
-      const target = job ? clients.find((client) => client.slug === job) : null;
+      const target = job ? jobs.find((client) => client.slug === job) : null;
       const result = !form || (job && !target) ? "invalid" : await addExpense({ store, target, form, payers, ip: requestIp(context.request) });
       return redirectResponse(`/clients/admin/books?notice=${result}`);
     }
@@ -1917,9 +1984,12 @@ async function routePortalRequest(context) {
     const session = await readClientSession(context.request, sessionSecret, DEFAULT_CLIENT_SLUG);
     const admin = await hasAdminSession(context.request, sessionSecret);
     const client = session ? await getClient(store, session.slug) : null;
-    // A project with no login (admin only, such as one taken out from under a shared login) is not
-    // opened by a client session.
-    const authenticated = Boolean(session && client && (client.managedBySecret || client.passwordHash));
+    const clientRoot = client?.parentSlug ? await getClient(store, client.parentSlug) : client;
+    // A client session opens its project while the project and its client portal are in use (not
+    // in the archive) and the portal has a login: a project with no login (admin only) is not
+    // opened. Nor is one by a session that began before it moved to another client portal.
+    const authenticated = Boolean(session && client && client.active !== false && clientRoot && !clientRoot.parentSlug && clientRoot.active !== false
+      && hasLogin(clientRoot) && !signedInBefore(session, client.loginChangedAt));
 
     if (isRead && (pathname === "/clients" || pathname === "/clients/login")) {
       const destination = safeProjectDestination(url.searchParams.get("next"));
@@ -1934,7 +2004,7 @@ async function routePortalRequest(context) {
           client.readOnly ? [] : listDocuments(store, client.slug),
           client.readOnly ? jobBook(store, client.slug) : null,
           client.photosVisible === false ? [] : listPhotos(store, client.slug).then((list) => list.filter((photo) => !photo.hidden)),
-          client.loginGroup ? listClients(store).then((clients) => switchableProjects(clients, client)) : [],
+          listClients(store).then((clients) => switchableProjects(clients, client)),
           client.projectPath ? true : hasRenders(store, client.slug)
         ])
         : [[], [], null, [], [], false];
@@ -1958,7 +2028,7 @@ async function routePortalRequest(context) {
       return methodNotAllowedResponse(pathname === "/clients/login" ? ["GET", "HEAD", "POST"] : ["POST"]);
     }
 
-    // Projects under one login: the client switches to another of them, which signs them in to it.
+    // A client portal's projects: the client switches to another of them, which signs them in to it.
     if (pathname === "/clients/switch") {
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
       if (!authenticated) return redirectResponse("/clients");
@@ -2080,7 +2150,7 @@ async function routePortalRequest(context) {
     if (pathname === "/clients/admin" || pathname.startsWith("/clients/admin/")) {
       if (!admin) return redirectResponse("/clients");
 
-      const dashboard = async ({ requested, notice = noticeFromQuery(url), newClient = null, clientError = "", typedEmails = null, status = 200 }) => {
+      const dashboard = async ({ requested, notice = noticeFromQuery(url), newClient = null, clientError = "", typedEmails = null, newProject = null, projectError = "", status = 200 }) => {
         // Invoice numbers follow the invoice dates (the same date: the order they were entered).
         // Anything saved before that rule, or changed outside the portal, is put in order here.
         const moved = store ? await renumberInvoices(store) : [];
@@ -2090,7 +2160,14 @@ async function routePortalRequest(context) {
         }
         const clients = await listClients(store);
         const selected = clients.find((entry) => entry.slug === requested) || null;
-        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin, photos] = await Promise.all([
+        // The client portal the selected project is in (or the portal itself) and its projects: the
+        // portal first, then the projects inside it. Archived ones are left out, except the one
+        // open, unless the whole client portal is in the archive.
+        const root = rootOf(clients, selected) || selected;
+        const family = root ? [root, ...projectsOf(clients, root)] : [];
+        const projects = root?.archivedAt ? family : family.filter((entry) => !entry.archivedAt || entry.slug === selected.slug);
+        const counted = root?.archivedAt ? projects : projects.filter((entry) => !entry.archivedAt);
+        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin, photos, projectBilling, projectBooks] = await Promise.all([
           selected ? listBilling(store, selected.slug) : [],
           selected ? listDocuments(store, selected.slug) : [],
           listTemplates(store),
@@ -2098,12 +2175,14 @@ async function routePortalRequest(context) {
           selected ? listExpenses(store, selected.slug) : [],
           selected ? listBankAccounts(store) : [],
           selected ? expensePaidTo(store) : [],
-          keptLogin(env, store, selected),
-          selected ? listPhotos(store, selected.slug) : []
+          keptLogin(env, store, root),
+          selected ? listPhotos(store, selected.slug) : [],
+          listBillingFor(store, counted.map((entry) => entry.slug)),
+          jobTotals(store, projects.map((entry) => entry.slug))
         ]);
         return scriptedHtmlResponse(adminDashboardPage({
-          clients, selected, billing, documents, templates, recipients, readiness, notice, authenticated, newClient, clientError, typedEmails,
-          expenses, payers: paidWithOptions(accounts), paidTo, selectedLogin, photos, today: todayInMichigan()
+          clients, selected, root, projects, counted, projectBilling, projectBooks, billing, documents, templates, recipients, readiness, notice, authenticated,
+          newClient, clientError, typedEmails, newProject, projectError, expenses, payers: paidWithOptions(accounts), paidTo, selectedLogin, photos, today: todayInMichigan()
         }), status);
       };
 
@@ -2116,9 +2195,17 @@ async function routePortalRequest(context) {
       if (pathname === "/clients/admin/bank" || pathname.startsWith("/clients/admin/bank/")) return handleAdminBank({ ...context, kit: KIT }, store, pathname, url);
       if (/^\/clients\/admin\/(schedule|notes)(\/|$)/u.test(pathname)) return handleAdminTeam({ ...context, kit: KIT }, store, pathname, url);
 
+      // The archive (Archive, in the admin panel's footer): client portals and projects sent to
+      // archive, each with Restore.
+      if (pathname === "/clients/admin/archive") {
+        if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+        return htmlResponse(adminArchivePage({ clients: await listClients(store), notice: noticeFromQuery(url) }));
+      }
+
       // Share a document into any client portal's section, and see what awaits a signature.
+      // Client portals in the archive are left out.
       if (pathname === "/clients/admin/documents") {
-        const clients = await listClients(store);
+        const clients = (await listClients(store)).filter((entry) => !entry.archivedAt);
         if (isRead) {
           const known = new Set(clients.map((entry) => entry.slug));
           const documents = (await listAllDocuments(store)).filter((document) => known.has(document.clientSlug));
@@ -2162,11 +2249,10 @@ async function routePortalRequest(context) {
         else if (entered.siteAddress.length > 200) clientError = "Keep the job site address under 200 characters.";
         // The emails are optional, so only addresses that were typed are checked.
         else if (emails.addresses.length || emails.invalid.length) clientError = recipientProblem(emails);
-        // Each login must open exactly one portal.
-        if (!clientError && clientPassword && (await resolveLogin(env, store, clientPassword))) clientError = "That project login already opens another client portal. Choose a different login.";
+        // Each login must open exactly one portal (one in the archive counts too).
+        if (!clientError && clientPassword && (await loginOwners(env, store, clientPassword, { includeArchived: true })).length) clientError = "That project login already opens another client portal. Choose a different login.";
         if (clientError) return dashboard({ requested: null, newClient: entered, clientError, status: 400 });
-        const stem = slug.slice(0, 58).replace(/-+$/u, "");
-        for (let number = 2; slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug)); number += 1) slug = `${stem}-${number}`;
+        slug = await freeSlug(store, slug);
 
         await putClient(store, {
           slug, name: entered.name, emails: emails.addresses, active: true, passwordHash: clientPassword ? await hashPassword(clientPassword) : null,
@@ -2177,7 +2263,7 @@ async function routePortalRequest(context) {
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${clientPassword ? "client-added" : "client-added-private"}`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|group|access|payments|expenses|photos|gallery)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|access|payments|expenses|photos|gallery|projects|archive|restore|inside|own)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -2187,6 +2273,103 @@ async function routePortalRequest(context) {
         const id = idRaw ? decodeSegment(idRaw) : "";
 
         if (area === "billing") return handleAdminBilling(context, store, target, id, action || "", readiness, origin);
+
+        // A client portal and its projects: Add project, Send to archive (and Restore, from the
+        // archive), Inside another portal, and Make it its own client portal. The client portal
+        // screen's right-click menu posts these; the project's panel has them too.
+        if (["projects", "archive", "restore", "inside", "own"].includes(area) && !id && !action) {
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          const clients = await listClients(store);
+          const ip = requestIp(context.request);
+          const root = rootOf(clients, target);
+          const parentName = target.parentSlug ? root?.name || target.parentSlug : "";
+          const now = new Date().toISOString();
+
+          // Restore: back on the client portal screen and in the books, with the projects that went
+          // to the archive with it. A project waits for its client portal to be restored first.
+          if (area === "restore") {
+            if (!target.archivedAt) return redirectResponse(back);
+            if (target.parentSlug && root?.archivedAt) return redirectResponse("/clients/admin/archive?notice=restore-parent-first");
+            const restored = (entry) => {
+              const { archivedAt: _at, archivedWith: _with, label: _label, ...rest } = entry;
+              // A project whose client portal is gone stands on its own.
+              if (rest.parentSlug && !root) delete rest.parentSlug;
+              return { ...rest, active: true };
+            };
+            const along = target.parentSlug ? [] : projectsOf(clients, target).filter((entry) => entry.archivedWith === slug);
+            for (const entry of [target, ...along]) {
+              await putClient(store, restored(entry));
+              await record(store, { actor: "admin", action: "client.restored", clientSlug: entry.slug, ip, summary: `Restored ${entry.label} from the archive; it is back in the books` });
+            }
+            return redirectResponse(`${back}&notice=restored`);
+          }
+
+          // Nothing else is done to a client portal or project while it is in the archive.
+          if (target.archivedAt) return redirectResponse(`${back}&notice=invalid`);
+
+          // Add project: a new project inside this client portal (or the one this project is in). It
+          // uses the portal's login and starts with its emails.
+          if (area === "projects") {
+            if (!root) return redirectResponse(`${back}&notice=invalid`);
+            const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+            const entered = {
+              name: String(form?.get("name") || "").trim().replaceAll(/\s+/gu, " "),
+              siteAddress: String(form?.get("siteAddress") || "").trim().replaceAll(/\s+/gu, " ")
+            };
+            let projectError = "";
+            if (!form) projectError = "The form could not be read. Please try again.";
+            else if (!entered.name || entered.name.length > 120) projectError = "Enter the project name, up to 120 characters.";
+            else if (!isValidSlug(slugify(entered.name))) projectError = "Enter a name with letters or numbers, for example Kitchen Remodel.";
+            else if (entered.siteAddress.length > 200) projectError = "Keep the job site address under 200 characters.";
+            if (projectError) return dashboard({ requested: slug, newProject: entered, projectError, status: 400 });
+            const projectSlug = await freeSlug(store, slugify(entered.name));
+            await putClient(store, {
+              slug: projectSlug, name: entered.name, parentSlug: root.slug, emails: clientEmails(root), active: true, passwordHash: null,
+              ...(entered.siteAddress ? { siteAddress: entered.siteAddress } : {}), createdAt: now
+            });
+            await record(store, { actor: "admin", action: "client.project-added", clientSlug: projectSlug, ip, summary: `Added the project ${entered.name} to ${root.name}` });
+            return redirectResponse(`/clients/admin?client=${encodeURIComponent(projectSlug)}&notice=project-added`);
+          }
+
+          // Send to archive: out of the client portal screen, the books and the client's reach. A
+          // client portal takes its projects with it.
+          if (area === "archive") {
+            const along = target.parentSlug ? [] : projectsOf(clients, target).filter((entry) => !entry.archivedAt);
+            await putClient(store, { ...target, active: false, archivedAt: now });
+            for (const entry of along) await putClient(store, { ...entry, active: false, archivedAt: now, archivedWith: slug });
+            for (const entry of [target, ...along]) {
+              await record(store, { actor: "admin", action: "client.archived", clientSlug: entry.slug, ip, summary: `Sent ${entry.label} to archive${entry === target && along.length ? ` with its projects ${along.map((project) => project.name).join(", ")}` : ""}; it is left out of the books` });
+            }
+            return redirectResponse(target.parentSlug && root ? `/clients/admin?client=${encodeURIComponent(root.slug)}&notice=archived` : "/clients/admin?notice=archived");
+          }
+
+          // Inside another portal: the client portal (with its projects) or project becomes a project
+          // of the client portal chosen, and uses that portal's login from now on.
+          if (area === "inside") {
+            if (target.managedBySecret) return redirectResponse(`${back}&notice=inside-secret`);
+            const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+            const destination = clients.find((entry) => entry.slug === String(form?.get("to") || "") && !entry.parentSlug && !entry.archivedAt);
+            if (!form || !destination || destination.slug === slug || destination.slug === target.parentSlug) return redirectResponse(`${back}&notice=project-invalid`);
+            const moving = target.parentSlug ? [target] : [target, ...projectsOf(clients, target)];
+            for (const entry of moving) {
+              const { loginGroup: _group, ...rest } = entry;
+              await putClient(store, { ...rest, parentSlug: destination.slug, passwordHash: null, loginChangedAt: now });
+              await forgetLogin(store, entry.slug);
+              await record(store, { actor: "admin", action: "client.moved-inside", clientSlug: entry.slug, ip, summary: `Put ${entry.label} inside ${destination.name} as a project; it uses ${destination.name}'s client login` });
+            }
+            if (target.loginGroup) await endLoneGroup(store, target.loginGroup);
+            return redirectResponse(`${back}&notice=${hasLogin(destination) ? "inside-saved" : "inside-saved-private"}`);
+          }
+
+          // Make it its own client portal: a project out of its client portal, with no login until it
+          // is given one (admin only).
+          if (!target.parentSlug) return redirectResponse(`${back}&notice=invalid`);
+          const { parentSlug: _parent, ...rest } = target;
+          await putClient(store, { ...rest, passwordHash: null, loginChangedAt: now });
+          await forgetLogin(store, slug);
+          await record(store, { actor: "admin", action: "client.own-portal", clientSlug: slug, ip, summary: `Took ${target.name} out of ${parentName} as a client portal of its own; it is admin only until it is given a login` });
+          return redirectResponse(`${back}&notice=own-saved`);
+        }
 
         // Add expense: a cost of this job (the page without scripts; the list opens the same form in
         // a popup), its receipt, and deleting it (which takes it out of the books).
@@ -2251,79 +2434,32 @@ async function routePortalRequest(context) {
           return redirectResponse(`${back}&notice=client-updated`);
         }
 
-        // The project's client login: set it to make an admin-only project client facing, or
-        // change it. Each login opens one portal, or the projects under it (a login group), and
-        // a new login on any of those changes it for all of them.
+        // The client login: set it to make an admin-only client portal client facing, or change it.
+        // A project uses its client portal's login, so saving it on a project saves the portal's.
+        // Each login opens one client portal and the projects in it (or every portal of a login
+        // group, where a new login on any of them changes it for all).
         if (area === "login" && !id && !action) {
           if (method !== "POST") return methodNotAllowedResponse(["POST"]);
-          if (target.managedBySecret) return redirectResponse(`${back}&notice=invalid`);
+          const clients = await listClients(store);
+          const root = rootOf(clients, target);
+          if (!root || root.managedBySecret) return redirectResponse(`${back}&notice=invalid`);
           const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
           const login = String(form?.get("login") || "");
           if (login.length < 10 || login.length > 120) return redirectResponse(`${back}&notice=login-invalid`);
-          const members = loginGroupOf(await listClients(store), target);
-          const memberSlugs = new Set(members.map((member) => member.slug));
-          if ((await loginOwners(env, store, login)).some((owner) => !memberSlugs.has(owner))) return redirectResponse(`${back}&notice=login-taken`);
+          const members = root.loginGroup ? clients.filter((entry) => !entry.parentSlug && entry.loginGroup === root.loginGroup) : [root];
+          const opens = new Set(members.flatMap((member) => [member.slug, ...projectsOf(clients, member).map((project) => project.slug)]));
+          if ((await loginOwners(env, store, login, { includeArchived: true })).some((owner) => !opens.has(owner))) return redirectResponse(`${back}&notice=login-taken`);
           const passwordHash = await hashPassword(login);
           for (const member of members) {
+            const projects = projectsOf(clients, member);
             await putClient(store, { ...member, passwordHash });
             await keepLogin(env, store, member.slug, login);
             await record(store, {
               actor: "admin", action: "client.login-saved", clientSlug: member.slug, ip: requestIp(context.request),
-              summary: `${member.passwordHash ? "Changed the client login for" : "Gave a client login to"} ${member.name}${members.length > 1 ? ` (shared with ${members.filter((other) => other.slug !== member.slug).map((other) => other.name).join(", ")})` : ""}`
+              summary: `${member.passwordHash ? "Changed the client login for" : "Gave a client login to"} ${member.name}${projects.length ? ` and its projects ${projects.map((project) => project.name).join(", ")}` : ""}${members.length > 1 ? ` (shared with ${members.filter((other) => other.slug !== member.slug).map((other) => other.name).join(", ")})` : ""}`
             });
           }
           return redirectResponse(`${back}&notice=login-saved`);
-        }
-
-        // Projects under this login: the projects checked share this project's login (one login
-        // group: the same `loginGroup`, login hash and sealed login). A project unchecked from the
-        // group is left with no login, admin only, until it is given its own. The Muskegon project
-        // (its login is a secret in Render) is never grouped.
-        if (area === "group" && !id && !action) {
-          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
-          if (target.managedBySecret) return redirectResponse(`${back}&notice=invalid`);
-          const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-          if (!form) return redirectResponse(`${back}&notice=invalid`);
-          const clients = await listClients(store);
-          const eligible = new Map(clients.filter((entry) => entry.slug !== slug && !entry.managedBySecret).map((entry) => [entry.slug, entry]));
-          const chosen = [...new Set(form.getAll("projects").map(String))];
-          if (chosen.some((entry) => !eligible.has(entry))) return redirectResponse(`${back}&notice=project-invalid`);
-          if (chosen.length && !target.passwordHash) return redirectResponse(`${back}&notice=group-needs-login`);
-          const groupId = target.loginGroup || randomId(9);
-          const ip = requestIp(context.request);
-          const login = await keptLogin(env, store, target);
-          const current = target.loginGroup ? clients.filter((entry) => entry.loginGroup === target.loginGroup && entry.slug !== slug) : [];
-          const joining = chosen.map((entry) => eligible.get(entry)).filter((entry) => !target.loginGroup || entry.loginGroup !== target.loginGroup);
-          const leaving = current.filter((entry) => !chosen.includes(entry.slug));
-          // Groups a joining project leaves behind.
-          const leftBehind = new Set(joining.map((entry) => entry.loginGroup).filter((group) => group && group !== groupId));
-          for (const entry of joining) {
-            await putClient(store, { ...entry, loginGroup: groupId, passwordHash: target.passwordHash });
-            if (login) await keepLogin(env, store, entry.slug, login);
-            else await forgetLogin(store, entry.slug);
-            await record(store, { actor: "admin", action: "client.login-grouped", clientSlug: entry.slug, ip, summary: `Put ${entry.name} under the client login of ${target.name}` });
-          }
-          for (const entry of leaving) {
-            const { loginGroup: _group, ...rest } = entry;
-            await putClient(store, { ...rest, passwordHash: null });
-            await forgetLogin(store, entry.slug);
-            await record(store, { actor: "admin", action: "client.login-ungrouped", clientSlug: entry.slug, ip, summary: `Took ${entry.name} out from under the client login of ${target.name}; it is admin only until it is given its own login` });
-          }
-          if ((chosen.length > 0) !== Boolean(target.loginGroup)) {
-            const { loginGroup: _group, ...rest } = target;
-            await putClient(store, chosen.length ? { ...target, loginGroup: groupId } : rest);
-          }
-          // A group left with one project is no longer a group.
-          if (leftBehind.size) {
-            const after = await listClients(store);
-            for (const group of leftBehind) {
-              const left = after.filter((other) => other.loginGroup === group);
-              if (left.length !== 1) continue;
-              const { loginGroup: _group, ...rest } = left[0];
-              await putClient(store, rest);
-            }
-          }
-          return redirectResponse(`${back}&notice=group-saved`);
         }
 
         // The gallery's master switch: Show photos in the client portal (all of them, or none).
@@ -2339,7 +2475,8 @@ async function routePortalRequest(context) {
           return redirectResponse(`${back}&notice=gallery-saved#gallery`);
         }
 
-        // The gallery: add photos with a note, open one, show or hide one, delete one.
+        // The gallery: add photos with a note, open one, show or hide one, change or delete its
+        // date, delete one.
         if (area === "photos") {
           if (!id && !action) {
             if (method !== "POST") return methodNotAllowedResponse(["POST"]);
@@ -2353,9 +2490,22 @@ async function routePortalRequest(context) {
             if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
             return (await photoResponse(store, photo)) || notFoundResponse(session, admin);
           }
-          if (action !== "shown" && action !== "delete") return notFoundResponse(session, admin);
-          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          if (action !== "shown" && action !== "delete" && action !== "date") return notFoundResponse(session, admin);
+          // Its date, clicked on the panel: a popup there, this page without scripts.
+          if (action === "date" && isRead) return htmlResponse(adminPhotoDatePage({ client: target, photo, base: `/clients/admin/clients/${encodeURIComponent(slug)}` }));
+          if (method !== "POST") return methodNotAllowedResponse(action === "date" ? ["GET", "HEAD", "POST"] : ["POST"]);
           const ip = requestIp(context.request);
+          // The date it shows: changed, or deleted ("Delete date", or saved empty) so it shows none.
+          if (action === "date") {
+            const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+            const date = form?.get("clear") === "yes" ? "" : String(form?.get("date") || "").trim();
+            if (!form || (date && !isValidDate(date))) return redirectResponse(`${back}&notice=photo-date-invalid#gallery`);
+            if (date !== photoDate(photo)) {
+              await putPhoto(store, { ...photo, date, updatedAt: new Date().toISOString() });
+              await record(store, { actor: "admin", action: "photo.dated", clientSlug: slug, ip, data: { photoId: photo.id, date }, summary: date ? `Dated the photo ${photoTitle(photo)} ${formatDate(date)}` : `Deleted the date of the photo ${photoTitle(photo)}` });
+            }
+            return redirectResponse(`${back}&notice=gallery-saved#gallery`);
+          }
           if (action === "shown") {
             const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
             if (!form) return redirectResponse(`${back}&notice=invalid`);

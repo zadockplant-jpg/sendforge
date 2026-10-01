@@ -39,7 +39,7 @@ const { up: renderTables } = await import("../src/db/migrations/20261011_myhomeb
 const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
-const { ADMIN_SESSION_TTL_SECONDS, createAdminSession, hmacHex, isValidSlug, slugify } = await import(
+const { ADMIN_SESSION_TTL_SECONDS, CLIENT_SESSION_TTL_SECONDS, createAdminSession, hmacHex, hmacSign, isValidSlug, slugify } = await import(
   "../src/modules/myhomebuilder-portal/security.js"
 );
 const { addressesText, parseEmailList } = await import("../src/modules/myhomebuilder-portal/email.js");
@@ -1177,7 +1177,7 @@ test("a project's quotes and invoices end with invoiced, paid and outstanding to
   const adminCookie = await loginAsAdmin();
   const dashboard = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
   await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
-  assert.doesNotMatch(await dashboard(), /billing-totals/u, "quotes alone have no invoice totals");
+  assert.doesNotMatch(await dashboard(), /<dt>Invoiced<\/dt>/u, "quotes alone have no invoice totals");
 
   const { item: paid } = await postInvoice(adminCookie, { title: "Deposit", amount: "5,000" });
   await request(`/clients/admin/clients/muskegon-addition/billing/${paid.id}/record-payment`, form({ method: "zelle", paidOn: "2026-07-30" }, adminCookie));
@@ -1189,7 +1189,7 @@ test("a project's quotes and invoices end with invoiced, paid and outstanding to
   assert.match(body, /<div><dt>Invoiced<\/dt><dd>\$13,000\.00<\/dd><\/div>/u, "the quote and the voided invoice are left out");
   assert.match(body, /<div><dt>Paid<\/dt><dd>\$5,000\.00<\/dd><\/div>/u);
   assert.match(body, /<div class="billing-totals-due"><dt>Outstanding<\/dt><dd>\$8,000\.00<\/dd><\/div>/u);
-  assert.ok(body.indexOf("billing-totals") > body.indexOf("</table>"), "at the end of the list");
+  assert.ok(body.indexOf("<dt>Invoiced</dt>") > body.indexOf("</table>", body.indexOf('<th scope="col">Number</th>')), "at the end of the list");
   assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: await loginAsClient() } })).text(), /billing-totals/u, "the client's portal is unchanged");
 });
 
@@ -3378,7 +3378,7 @@ test("the gallery takes photos with a note from the client, the crew and the adm
   assert.equal((panel.match(/<span>Shown<\/span>/gu) || []).length, 3);
   assert.match(panel, new RegExp(`<form class="photo-shown" action="/clients/admin/clients/muskegon-addition/photos/${wall.id}/shown" method="post">\\s*<label class="portal-check" for="photo-shown-${wall.id}">\\s*<input id="photo-shown-${wall.id}" name="shown" type="checkbox" value="yes" checked data-autosubmit>`, "u"));
   assert.match(panel, new RegExp(`<form method="post" action="/clients/admin/clients/muskegon-addition/photos/${wall.id}/delete" data-confirm="Delete this photo\\? This can't be undone\\.">\\s*<button class="billing-trash"`, "u"));
-  assert.match(panel, /<p class="photo-note">Framing done<\/p>\s*<small class="photo-meta">My Home Builder · [A-Z][a-z]{2} \d{1,2}, \d{4}<\/small>/u);
+  assert.match(panel, new RegExp(`<p class="photo-note">Framing done</p>\\s*<small class="photo-meta">My Home Builder · <a class="photo-date" href="/clients/admin/clients/muskegon-addition/photos/${framing.id}/date" data-photo-date data-date="\\d{4}-\\d{2}-\\d{2}" title="Change the date">[A-Z][a-z]{2} \\d{1,2}, \\d{4}</a></small>`, "u"));
   assert.match(panel, /<small class="photo-meta">Client · /u);
   assert.match(panel, /<form class="portal-form admin-form photo-upload" action="\/clients\/admin\/clients\/muskegon-addition\/photos" method="post" enctype="multipart\/form-data">\s*<h3>Add photos<\/h3>/u);
 
@@ -3485,41 +3485,101 @@ test("photos are shown or hidden in the client portal all at once or one by one,
 
 // ---------- Several projects under one login ----------
 
-test("several projects share one login: it opens the first by name, and the client switches between them", async () => {
+test("a photo's date opens to change it or delete it, and a deleted date shows nothing", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  await request("/clients/admin/clients/muskegon-addition/photos", photoForm({ note: "Trusses set" }, [{ bytes: PNG, name: "trusses.png", type: "image/png" }], adminCookie));
+  const [photo] = await photoRecords();
+  const path = `/clients/admin/clients/muskegon-addition/photos/${photo.id}/date`;
+  const panel = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  const meta = async () => (await panel()).match(/<p class="photo-note">Trusses set<\/p>\s*<small class="photo-meta">([\s\S]*?)<\/small>/u)[1];
+
+  // It starts with the day it was added. A click on it opens the popup, or the page without scripts.
+  assert.match(await meta(), new RegExp(`^My Home Builder · <a class="photo-date" href="${path}" data-photo-date data-date="${today}" title="Change the date">[A-Z][a-z]{2} \\d{1,2}, \\d{4}</a>$`, "u"));
+  assert.match(await panel(), /<dialog class="admin-dialog" id="photo-date-dialog" aria-labelledby="photo-date-title">[\s\S]*?<input id="photo-date-dialog-date" name="date" type="date" value="">[\s\S]*?<button class="portal-logout-button" type="submit" name="clear" value="yes">Delete date<\/button>/u);
+  const page = await (await request(path, { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, new RegExp(`<form class="admin-stack-form" method="post" action="${path}" data-photo-date-form>\\s*<label for="photo-date">Date\\s*<input id="photo-date" name="date" type="date" value="${today}">`, "u"));
+
+  // A new date.
+  const saved = await request(path, form({ date: "2026-08-15" }, adminCookie));
+  assert.equal(saved.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=gallery-saved#gallery");
+  assert.equal((await photoRecord(photo.id)).date, "2026-08-15");
+  assert.match(await meta(), /· <a class="photo-date" [^>]*data-date="2026-08-15" title="Change the date">Aug 15, 2026<\/a>$/u);
+  assert.equal((await request(path, form({ date: "2026-02-30" }, adminCookie))).headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=photo-date-invalid#gallery");
+  assert.equal((await photoRecord(photo.id)).date, "2026-08-15");
+
+  // Deleted (Delete date, or saved empty), it shows nothing; its spot still opens the popup.
+  assert.equal((await request(path, form({ date: "2026-08-15", clear: "yes" }, adminCookie))).headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=gallery-saved#gallery");
+  assert.equal((await photoRecord(photo.id)).date, "");
+  assert.equal(await meta(), `My Home Builder<a class="photo-date is-empty" href="${path}" data-photo-date data-date="" aria-label="Add a date" title="Add a date"></a>`);
+  await request(path, form({ date: "2026-09-01" }, adminCookie));
+  assert.equal((await photoRecord(photo.id)).date, "2026-09-01");
+  await request(path, form({ date: "" }, adminCookie));
+  assert.equal((await photoRecord(photo.id)).date, "", "saved empty, it is deleted too");
+  const log = await db("mhb_activity").where({ action: "photo.dated" }).orderBy("id").select("summary");
+  assert.deepEqual(log.map((row) => row.summary), ["Dated the photo “Trusses set” Aug 15, 2026", "Deleted the date of the photo “Trusses set”", "Dated the photo “Trusses set” Sep 1, 2026", "Deleted the date of the photo “Trusses set”"]);
+
+  // The crew see the date their photo has now, or none.
+  const { cookie } = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com" });
+  await request("/clients/crew/photos", photoForm({ job: "muskegon-addition", note: "Sheathing" }, [{ bytes: GIF, name: "sheathing.gif", type: "image/gif" }], cookie));
+  const sheathing = (await photoRecords()).find((entry) => entry.note === "Sheathing");
+  const crewMeta = async () => (await (await request("/clients/crew", { headers: { Cookie: cookie } })).text()).match(/<p class="photo-note">Sheathing<\/p>\s*<small class="photo-meta">([^<]*)<\/small>/u)[1];
+  assert.match(await crewMeta(), /^Muskegon Addition · [A-Z][a-z]{2} \d{1,2}, \d{4}$/u);
+  await request(`/clients/admin/clients/muskegon-addition/photos/${sheathing.id}/date`, form({ date: "2026-07-04" }, adminCookie));
+  assert.equal(await crewMeta(), "Muskegon Addition · Jul 4, 2026");
+  await request(`/clients/admin/clients/muskegon-addition/photos/${sheathing.id}/date`, form({ clear: "yes" }, adminCookie));
+  assert.equal(await crewMeta(), "Muskegon Addition");
+
+  // Only from the photo's own project.
+  const birch = await addPortal(adminCookie, "Birch Cottage");
+  assert.equal((await request(`/clients/admin/clients/${birch}/photos/${photo.id}/date`, form({ date: "2026-01-01" }, adminCookie))).status, 404);
+});
+
+// ---------- Client portals and their projects ----------
+
+// Client portals that shared one login before projects existed (the old Projects under this login
+// checkboxes): the same login group and hash, as that feature saved them.
+async function shareLoginAsBefore(owner, ...members) {
+  const lead = await projectRecord(owner);
+  for (const slug of [owner, ...members]) {
+    const record = await projectRecord(slug);
+    await db("mhb_clients").where({ slug }).update({ data: JSON.stringify({ ...record, loginGroup: "group-from-before", passwordHash: lead.passwordHash }) });
+  }
+}
+
+// A client session that began `secondsAgo` seconds ago, signed as createClientSession signs them.
+async function earlierClientSession(slug, secondsAgo) {
+  const expiry = Math.floor(Date.now() / 1000) + CLIENT_SESSION_TTL_SECONDS - secondsAgo;
+  return `__Secure-mhb_client_session=${slug}.${expiry}.${await hmacSign(process.env.MHB_SESSION_SECRET, `mhb-client-portal:v2:${slug}:${expiry}`)}`;
+}
+
+// What a client's portal home shows: its heading (null on the sign-in page) and the projects at
+// the top to switch between, in order.
+async function clientHome(cookie) {
+  const body = await (await request("/clients", { headers: { Cookie: cookie } })).text();
+  return {
+    body,
+    heading: body.includes('action="/clients/login"') ? null : body.match(/<h1 class="portal-heading">([^<]+)<\/h1>/u)?.[1] ?? null,
+    projects: [...body.matchAll(/<span class="project-switch-current" aria-current="page">([^<]+)<\/span>|<button type="submit" name="project" value="[^"]+">([^<]+)<\/button>/gu)].map((match) => match[1] || match[2])
+  };
+}
+
+test("client portals that shared one login before projects keep sharing it: it opens the first by name, and the client switches between them", async () => {
   const adminCookie = await loginAsAdmin();
   const birch = await addPortal(adminCookie, "Birch Cottage");
   const alder = await addPortal(adminCookie, "Alder House");
   const cedar = await addPortal(adminCookie, "Cedar Barn");
+  await shareLoginAsBefore(birch, alder);
   const panel = async (slug) => (await request(`/clients/admin?client=${slug}`, { headers: { Cookie: adminCookie } })).text();
 
-  // Under the Client login field: a checkbox for each other project, but not the Muskegon project.
-  const birchPanel = await panel(birch);
-  assert.match(birchPanel, /<label for="client-login">Client login[\s\S]*?<\/form>\s*<form class="admin-inline-form admin-save-row admin-login-group" action="\/clients\/admin\/clients\/birch-cottage\/group" method="post">\s*<button class="icon-save" type="submit" aria-label="Save projects under this login" title="Save">[\s\S]*?<\/button>\s*<fieldset>\s*<legend>Projects under this login<\/legend>/u);
-  assert.match(birchPanel, /<label class="portal-check" for="login-group-alder-house">\s*<input id="login-group-alder-house" name="projects" type="checkbox" value="alder-house">\s*<span>Alder House<\/span>/u);
-  assert.match(birchPanel, /<input id="login-group-cedar-barn" name="projects" type="checkbox" value="cedar-barn">/u);
-  assert.doesNotMatch(birchPanel, /id="login-group-(muskegon-addition|birch-cottage)"/u);
-  assert.doesNotMatch(await panel("muskegon-addition"), /Projects under this login/u);
-
-  // Alder House goes under Birch Cottage's login.
-  const grouped = await request(`/clients/admin/clients/${birch}/group`, form({ projects: alder }, adminCookie));
-  assert.equal(grouped.headers.get("Location"), "/clients/admin?client=birch-cottage&notice=group-saved");
-  const birchRecord = await projectRecord(birch);
-  const alderRecord = await projectRecord(alder);
-  assert.ok(birchRecord.loginGroup);
-  assert.equal(alderRecord.loginGroup, birchRecord.loginGroup);
-  assert.equal(alderRecord.passwordHash, birchRecord.passwordHash);
-  assert.equal((await projectRecord(cedar)).loginGroup, undefined);
   const alderPanel = await panel(alder);
-  assert.match(alderPanel, /id="client-login" name="login" type="text"[^>]*value="birch-cottage-login-2026"/u, "the same login, kept sealed for each");
-  assert.match(alderPanel, /<input id="login-group-birch-cottage" name="projects" type="checkbox" value="birch-cottage" checked>/u);
-  assert.match(alderPanel, /<input id="login-group-cedar-barn" name="projects" type="checkbox" value="cedar-barn">/u);
+  assert.doesNotMatch(alderPanel, /Projects under this login/u, "projects go inside a client portal now");
   assert.match(alderPanel, /<strong>Alder House<\/strong><small>Shared login · No email on file<\/small>/u);
   assert.match(alderPanel, /<strong>Birch Cottage<\/strong><small>Shared login · No email on file<\/small>/u);
   assert.match(alderPanel, /<strong>Cedar Barn<\/strong><small>No email on file<\/small>/u);
   assert.equal((await request("/clients/login", form({ password: "alder-house-login-2026" }))).status, 401, "Alder House's own login was replaced");
-  assert.ok(await db("mhb_activity").where({ action: "client.login-grouped", client_slug: alder }).first());
 
-  // The shared login opens the first project by name, with the others at the top to switch to.
+  // The shared login opens the first client portal by name, with the other at the top to switch to.
   const cookie = await loginAsClient("birch-cottage-login-2026");
   const home = await (await request("/clients", { headers: { Cookie: cookie } })).text();
   assert.match(home, /<h1 class="portal-heading">Alder House<\/h1>/u);
@@ -3534,7 +3594,7 @@ test("several projects share one login: it opens the first by name, and the clie
   assert.match(birchHome, /<button type="submit" name="project" value="alder-house">Alder House<\/button>\s*<span class="project-switch-current" aria-current="page">Birch Cottage<\/span>/u);
   assert.ok(await db("mhb_activity").where({ action: "client.switched", client_slug: birch }).first());
 
-  // Never to a project outside the group.
+  // Never to a project outside the login.
   for (const project of [cedar, "muskegon-addition", "no-such-project", alder.toUpperCase(), ""]) {
     const refused = await request("/clients/switch", form({ project }, cookie));
     assert.equal(refused.headers.get("Location"), "/clients?notice=switch-invalid");
@@ -3553,23 +3613,24 @@ test("several projects share one login: it opens the first by name, and the clie
   assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: cookie } })).text(), /read only\./u);
 });
 
-test("a shared login changes for every project under it, is refused when another project has it, and a project taken out is admin only", async () => {
+test("a login shared from before changes for every client portal under it, is refused when another has it, and a portal put inside another leaves it", async () => {
   const adminCookie = await loginAsAdmin();
   const birch = await addPortal(adminCookie, "Birch Cottage");
   const alder = await addPortal(adminCookie, "Alder House");
   const cedar = await addPortal(adminCookie, "Cedar Barn");
   const dock = await addPortal(adminCookie, "Dock House");
+  await shareLoginAsBefore(birch, alder, cedar);
   const panel = async (slug) => (await request(`/clients/admin?client=${slug}`, { headers: { Cookie: adminCookie } })).text();
   const saveLogin = async (slug, login) => (await request(`/clients/admin/clients/${slug}/login`, form({ login }, adminCookie))).headers.get("Location");
-  const group = async (slug, projects) => (await request(`/clients/admin/clients/${slug}/group`, form(projects.length ? { projects } : {}, adminCookie))).headers.get("Location");
+  const inside = async (slug, to) => (await request(`/clients/admin/clients/${slug}/inside`, form({ to }, adminCookie))).headers.get("Location");
   const opens = async (login) => {
     const response = await request("/clients/login", form({ password: login }));
     if (response.status !== 303) return null;
-    return (await (await request("/clients", { headers: { Cookie: cookieValue(response) } })).text()).match(/<h1 class="portal-heading">([^<]+)<\/h1>/u)[1];
+    const home = await clientHome(cookieValue(response));
+    return home.projects.length ? [home.heading, home.projects] : home.heading;
   };
-  assert.equal(await group(birch, [alder, cedar]), `/clients/admin?client=${birch}&notice=group-saved`);
 
-  // A login another project opens is still refused; the group's own login is not.
+  // A login another client portal opens is refused; the group's own login is not.
   assert.match(await saveLogin(alder, "dock-house-login-2026"), /notice=login-taken$/u);
   assert.match(await saveLogin(alder, process.env.MHB_CLIENT_PORTAL_PASSWORD), /notice=login-taken$/u);
   assert.match(await saveLogin(alder, "birch-cottage-login-2026"), /notice=login-saved$/u);
@@ -3578,57 +3639,313 @@ test("a shared login changes for every project under it, is refused when another
   assert.equal(reused.status, 400);
   assert.match(await reused.text(), /That project login already opens another client portal/u);
 
-  // A new login saved on any project under it changes it for all of them.
+  // A new login saved on any of them changes it for all of them.
   assert.match(await saveLogin(cedar, "lakeside-trio-2026"), /notice=login-saved$/u);
   assert.equal(new Set(await Promise.all([birch, alder, cedar].map(async (slug) => (await projectRecord(slug)).passwordHash))).size, 1);
   for (const slug of [birch, alder, cedar]) assert.match(await panel(slug), /id="client-login" name="login" type="text"[^>]*value="lakeside-trio-2026"/u);
   assert.equal(await opens("birch-cottage-login-2026"), null);
-  assert.equal(await opens("lakeside-trio-2026"), "Alder House");
+  assert.deepEqual(await opens("lakeside-trio-2026"), ["Alder House", ["Alder House", "Birch Cottage", "Cedar Barn"]]);
   assert.equal(await opens("dock-house-login-2026"), "Dock House");
   assert.equal((await db("mhb_activity").where({ action: "client.login-saved" }).whereIn("client_slug", [birch, alder, cedar]).select("id")).length, 6);
 
-  // Unchecked, a project is left with no login (admin only) until it is given its own.
-  const cookie = await loginAsClient("lakeside-trio-2026");
-  const cedarCookie = cookieValue(await request("/clients/switch", form({ project: cedar }, cookie)));
-  assert.equal(await group(birch, [alder]), `/clients/admin?client=${birch}&notice=group-saved`);
+  // Put inside another client portal, a portal leaves the login it shared and uses its new
+  // portal's; the others still share theirs.
+  assert.equal(await inside(cedar, dock), `/clients/admin?client=${cedar}&notice=inside-saved`);
   const cedarRecord = await projectRecord(cedar);
-  assert.equal(cedarRecord.passwordHash, null);
   assert.equal(cedarRecord.loginGroup, undefined);
+  assert.equal(cedarRecord.passwordHash, null);
   assert.equal(await db("mhb_secure").where({ key: `client-login:${cedar}` }).first(), undefined);
-  const cedarPanel = await panel(cedar);
-  assert.match(cedarPanel, /<strong>Cedar Barn<\/strong><small>Admin only · No email on file<\/small>/u);
-  assert.match(cedarPanel, /value="" placeholder="None, so only you can see this project\. Type one to share it\."/u);
-  assert.doesNotMatch(cedarPanel, /Projects under this login/u, "it needs a login of its own first");
-  assert.match(await (await request("/clients", { headers: { Cookie: cedarCookie } })).text(), /Private project access/u, "its client session no longer opens it");
-  assert.equal((await request("/clients/switch", form({ project: cedar }, cookie))).headers.get("Location"), "/clients?notice=switch-invalid");
-  assert.ok(await db("mhb_activity").where({ action: "client.login-ungrouped", client_slug: cedar }).first());
-  assert.equal(await opens("lakeside-trio-2026"), "Alder House", "the others still share it");
-  assert.match(await group(cedar, [birch]), /notice=group-needs-login$/u);
-  assert.match(await saveLogin(cedar, "cedar-barn-again-2026"), /notice=login-saved$/u);
-  assert.equal(await opens("cedar-barn-again-2026"), "Cedar Barn");
+  assert.deepEqual(await opens("lakeside-trio-2026"), ["Alder House", ["Alder House", "Birch Cottage"]]);
+  assert.deepEqual(await opens("dock-house-login-2026"), ["Dock House", ["Dock House", "Cedar Barn"]]);
 
-  // Unchecking the last one ends the group; the project keeps its login.
-  assert.equal(await group(birch, []), `/clients/admin?client=${birch}&notice=group-saved`);
+  // A group left with one client portal ends; that portal keeps the login, and shares it with the
+  // project put inside it.
+  assert.equal(await inside(alder, birch), `/clients/admin?client=${alder}&notice=inside-saved`);
   assert.equal((await projectRecord(birch)).loginGroup, undefined);
-  assert.equal((await projectRecord(alder)).passwordHash, null);
-  assert.equal(await opens("lakeside-trio-2026"), "Birch Cottage");
+  assert.deepEqual(await opens("lakeside-trio-2026"), ["Birch Cottage", ["Birch Cottage", "Alder House"]]);
   assert.doesNotMatch(await panel(birch), /Shared login/u);
 
-  // Checked on another project's panel, a project moves under that login, and a group left with
-  // one project ends.
-  await saveLogin(alder, "alder-house-again-2026");
-  await group(birch, [alder]);
-  assert.equal(await group(dock, [alder]), `/clients/admin?client=${dock}&notice=group-saved`);
-  assert.equal((await projectRecord(alder)).loginGroup, (await projectRecord(dock)).loginGroup);
-  assert.equal((await projectRecord(birch)).loginGroup, undefined);
-  assert.equal(await opens("lakeside-trio-2026"), "Birch Cottage");
-  assert.equal(await opens("dock-house-login-2026"), "Alder House");
+  // The Projects under this login form is gone.
+  assert.equal((await request(`/clients/admin/clients/${birch}/group`, form({ projects: dock }, adminCookie))).status, 404);
+});
 
-  // The Muskegon project is never grouped.
-  assert.match(await group(birch, ["muskegon-addition"]), /notice=project-invalid$/u);
-  assert.match(await group(birch, ["no-such-project"]), /notice=project-invalid$/u);
-  assert.match(await group("muskegon-addition", [birch]), /notice=invalid$/u);
-  assert.equal((await request(`/clients/admin/clients/${birch}/group`, { headers: { Cookie: adminCookie } })).headers.get("Location"), `/clients/admin?client=${birch}`);
+test("Inside another portal makes a client portal a project there, under that portal's login, from its right-click menu", async () => {
+  const adminCookie = await loginAsAdmin();
+  const smith = await addPortal(adminCookie, "Smith Residence", "pat@example.com");
+  const deck = await addPortal(adminCookie, "Smith Deck", "sam@example.com");
+  const barn = await addPortal(adminCookie, "Jones Barn");
+  const page = async (slug) => (await request(`/clients/admin?client=${slug}`, { headers: { Cookie: adminCookie } })).text();
+  const inside = async (slug, to) => (await request(`/clients/admin/clients/${slug}/inside`, form({ to }, adminCookie))).headers.get("Location");
+
+  // Each client portal in the list opens its menu with a right-click: Send to archive and Inside
+  // another portal, which asks which client portal.
+  const before = await page(smith);
+  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=smith-deck" data-portal-menu="smith-deck" data-portal-name="Smith Deck">/u);
+  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=muskegon-addition" data-portal-menu="muskegon-addition" data-portal-name="Muskegon Addition" data-portal-secret>/u);
+  assert.match(before, /<div class="portal-menu" id="portal-menu" role="menu" aria-label="Client portal" hidden>\s*<form method="post" data-portal-menu-archive><button type="submit" role="menuitem">Send to archive<\/button><\/form>\s*<button type="button" role="menuitem" data-portal-menu-inside>Inside another portal<\/button>/u);
+  assert.match(before, /<select id="inside-to" name="to" required><option value="" selected disabled>Choose a client portal<\/option><option value="jones-barn">Jones Barn<\/option><option value="muskegon-addition">Muskegon Addition<\/option><option value="smith-deck">Smith Deck<\/option><option value="smith-residence">Smith Residence<\/option><\/select>/u);
+  // The same actions, without the menu, fold at the bottom of each project's panel.
+  assert.match(before, /<summary>Archive or move<\/summary>[\s\S]*?<form action="\/clients\/admin\/clients\/smith-residence\/archive" method="post">\s*<button class="portal-logout-button" type="submit">Send to archive<\/button>[\s\S]*?<form class="admin-inline-form admin-inside-form" action="\/clients\/admin\/clients\/smith-residence\/inside" method="post">/u);
+
+  const oldDeckSession = await earlierClientSession(deck, 60);
+  assert.equal((await clientHome(oldDeckSession)).heading, "Smith Deck");
+  assert.equal(await inside(deck, smith), "/clients/admin?client=smith-deck&notice=inside-saved");
+  const deckRecord = await projectRecord(deck);
+  assert.equal(deckRecord.parentSlug, smith);
+  assert.equal(deckRecord.passwordHash, null);
+  assert.ok(deckRecord.loginChangedAt);
+  assert.equal(await db("mhb_secure").where({ key: `client-login:${deck}` }).first(), undefined);
+  assert.ok(await db("mhb_activity").where({ action: "client.moved-inside", client_slug: deck }).first());
+  assert.match(await page(`${deck}&notice=inside-saved`), /It is a project in that client portal now, and uses that portal&#39;s client login\./u);
+
+  // The client portal screen lists Smith Residence alone, with two projects. Its page starts with
+  // Add project, its projects, and Show finances for all projects under this client.
+  const panel = await page(smith);
+  assert.match(panel, /<strong>Smith Residence<\/strong><small>2 projects · pat@example\.com<\/small>/u);
+  assert.doesNotMatch(panel, /class="admin-client-link[^"]*" href="\/clients\/admin\?client=smith-deck"/u);
+  assert.match(panel, /<li><a class="client-project-tab is-current" href="\/clients\/admin\?client=smith-residence" aria-current="page" data-portal-menu="smith-residence" data-portal-name="Smith Residence">Smith Residence<\/a><\/li>\s*<li><a class="client-project-tab" href="\/clients\/admin\?client=smith-deck" data-portal-menu="smith-deck" data-portal-name="Smith Deck" data-portal-parent="smith-residence">Smith Deck<\/a><\/li>/u);
+  const order = ["<summary>Add project</summary>", 'class="client-project-tabs"', "<summary>Show finances for all projects under this client</summary>", 'id="selected-heading"'].map((text) => panel.indexOf(text));
+  assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), "Add project, then the projects, then the finances, at the top");
+
+  // A project's page: its client portal stays chosen in the list, and the login is the portal's.
+  const deckPanel = await page(deck);
+  assert.match(deckPanel, /<a class="admin-client-link is-current" href="\/clients\/admin\?client=smith-residence" aria-current="page"/u);
+  assert.match(deckPanel, /<a class="client-project-tab is-current" href="\/clients\/admin\?client=smith-deck" aria-current="page"/u);
+  assert.match(deckPanel, /<h2 id="selected-heading">Smith Deck<\/h2>/u);
+  assert.match(deckPanel, /id="client-login" name="login" type="text"[^>]*value="smith-residence-login-2026"/u);
+  assert.match(deckPanel, /<small class="admin-field-hint">Smith Residence's login, for every project in it\.<\/small>/u);
+  assert.match(deckPanel, /<form action="\/clients\/admin\/clients\/smith-deck\/own" method="post">\s*<button class="portal-logout-button" type="submit">Make it its own client portal<\/button>/u);
+
+  // Smith Deck's own login is gone. Smith Residence's opens the portal, with Smith Deck to switch to.
+  assert.equal((await request("/clients/login", form({ password: "smith-deck-login-2026" }))).status, 401);
+  const cookie = await loginAsClient("smith-residence-login-2026");
+  const home = await clientHome(cookie);
+  assert.deepEqual([home.heading, home.projects], ["Smith Residence", ["Smith Residence", "Smith Deck"]]);
+  assert.equal((await clientHome(cookieValue(await request("/clients/switch", form({ project: deck }, cookie))))).heading, "Smith Deck");
+  assert.equal((await request("/clients/switch", form({ project: barn }, cookie))).headers.get("Location"), "/clients?notice=switch-invalid");
+  // A session from Smith Deck's old login does not carry over into Smith Residence's projects.
+  assert.equal((await clientHome(oldDeckSession)).heading, null);
+  assert.equal((await request("/clients/switch", form({ project: smith }, oldDeckSession))).headers.get("Location"), "/clients");
+
+  // A login saved on a project is its client portal's, for every project in it.
+  assert.match((await request(`/clients/admin/clients/${deck}/login`, form({ login: "smith-family-2026" }, adminCookie))).headers.get("Location"), /notice=login-saved$/u);
+  assert.equal((await projectRecord(deck)).passwordHash, null);
+  assert.equal((await clientHome(await loginAsClient("smith-family-2026"))).heading, "Smith Residence");
+  assert.match((await request(`/clients/admin/clients/${barn}/login`, form({ login: "smith-family-2026" }, adminCookie))).headers.get("Location"), /notice=login-taken$/u);
+
+  // Not inside itself, where it already is, a project, or nowhere; the Muskegon project's login is
+  // set in Render, so it stays a client portal of its own.
+  for (const to of [deck, smith, "nowhere", ""]) assert.match(await inside(deck, to), /notice=project-invalid$/u);
+  assert.match(await inside(barn, deck), /notice=project-invalid$/u, "a project holds no projects");
+  assert.equal(await inside("muskegon-addition", barn), "/clients/admin?client=muskegon-addition&notice=inside-secret");
+  assert.match((await page("muskegon-addition")), /Its login is set in Render, so it stays a client portal of its own\./u);
+
+  // A client portal goes inside another with its projects, as projects of that portal.
+  assert.equal(await inside(smith, barn), `/clients/admin?client=${smith}&notice=inside-saved`);
+  assert.equal((await projectRecord(smith)).parentSlug, barn);
+  assert.equal((await projectRecord(deck)).parentSlug, barn, "it brings its projects");
+  assert.equal((await request("/clients/login", form({ password: "smith-family-2026" }))).status, 401);
+  const jones = await clientHome(await loginAsClient("jones-barn-login-2026"));
+  assert.deepEqual([jones.heading, jones.projects], ["Jones Barn", ["Jones Barn", "Smith Deck", "Smith Residence"]]);
+
+  // Inside a client portal with no login, only the admin sees it.
+  await request("/clients/admin/clients", form({ name: "Shop Rebuild", password: "" }, adminCookie));
+  assert.equal(await inside(deck, "shop-rebuild"), `/clients/admin?client=${deck}&notice=inside-saved-private`);
+  assert.deepEqual((await clientHome(await loginAsClient("jones-barn-login-2026"))).projects, ["Jones Barn", "Smith Residence"]);
+
+  // Inside the Muskegon project, it is opened by the Muskegon login.
+  assert.equal(await inside(deck, "muskegon-addition"), `/clients/admin?client=${deck}&notice=inside-saved`);
+  const muskegon = await clientHome(await loginAsClient());
+  assert.deepEqual([muskegon.heading, muskegon.projects], ["Muskegon Addition", ["Muskegon Addition", "Smith Deck"]]);
+
+  // Make it its own client portal: out of its client portal, admin only until it has a login. (Its
+  // move into the Muskegon project is dated two minutes back, so a session from a minute ago
+  // still opens it until then.)
+  await db("mhb_clients").where({ slug: deck }).update({ data: JSON.stringify({ ...(await projectRecord(deck)), loginChangedAt: new Date(Date.now() - 120000).toISOString() }) });
+  const ownSession = await earlierClientSession(deck, 60);
+  assert.equal((await clientHome(ownSession)).heading, "Smith Deck");
+  assert.equal((await request(`/clients/admin/clients/${deck}/own`, form({}, adminCookie))).headers.get("Location"), `/clients/admin?client=${deck}&notice=own-saved`);
+  const own = await projectRecord(deck);
+  assert.equal(own.parentSlug, undefined);
+  assert.equal(own.passwordHash, null);
+  assert.match(await page(deck), /<strong>Smith Deck<\/strong><small>Admin only · sam@example\.com<\/small>/u);
+  assert.equal((await clientHome(ownSession)).heading, null, "its old sessions do not follow it");
+  assert.deepEqual((await clientHome(await loginAsClient())).projects, [], "the Muskegon login opens Muskegon alone again");
+  assert.match((await request(`/clients/admin/clients/${barn}/own`, form({}, adminCookie))).headers.get("Location"), /notice=invalid$/u, "a client portal is its own already");
+  assert.ok(await db("mhb_activity").where({ action: "client.own-portal", client_slug: deck }).first());
+  assert.equal((await request(`/clients/admin/clients/${deck}/inside`, { headers: { Cookie: adminCookie } })).headers.get("Location"), `/clients/admin?client=${deck}`);
+});
+
+test("Add project puts a new project in the client portal, and each project's finances and all of them together add up", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  const smith = await addPortal(adminCookie, "Smith Residence", "pat@example.com");
+  await request(`/clients/admin/clients/${smith}/site`, form({ siteAddress: "12 Lake St, Muskegon, MI 49441" }, adminCookie));
+  const page = async (slug) => (await request(`/clients/admin?client=${slug}`, { headers: { Cookie: adminCookie } })).text();
+  const panel = await page(smith);
+  assert.match(panel, /<details class="admin-add-project" id="add-project" data-collapsible>\s*<summary>Add project<\/summary>\s*<form class="admin-inline-form admin-add-project-form" action="\/clients\/admin\/clients\/smith-residence\/projects" method="post">/u);
+  assert.match(panel, /id="project-site" name="siteAddress" type="text" maxlength="200" value="12 Lake St, Muskegon, MI 49441"/u, "it starts with the client portal's site");
+
+  // A name is needed; a problem is explained, keeping what was typed.
+  const blank = await request(`/clients/admin/clients/${smith}/projects`, form({ name: " ", siteAddress: "40 Dune Rd" }, adminCookie));
+  assert.equal(blank.status, 400);
+  const blankBody = await blank.text();
+  assert.match(blankBody, /<details class="admin-add-project" id="add-project" data-collapsible open>/u);
+  assert.match(blankBody, /<p class="portal-error" role="alert">Enter the project name, up to 120 characters\.<\/p>/u);
+  assert.match(blankBody, /id="project-site" name="siteAddress" type="text" maxlength="200" value="40 Dune Rd"/u);
+
+  const added = await request(`/clients/admin/clients/${smith}/projects`, form({ name: "Kitchen Remodel", siteAddress: "12 Lake St, Muskegon, MI 49441" }, adminCookie));
+  assert.equal(added.headers.get("Location"), "/clients/admin?client=kitchen-remodel&notice=project-added");
+  const kitchen = await projectRecord("kitchen-remodel");
+  assert.equal(kitchen.parentSlug, smith);
+  assert.deepEqual(kitchen.emails, ["pat@example.com"]);
+  assert.equal(kitchen.passwordHash, null);
+  assert.equal(kitchen.siteAddress, "12 Lake St, Muskegon, MI 49441");
+  assert.equal(kitchen.label, undefined, "a project's label is not saved");
+  // From a project's page, Add project adds to its client portal.
+  assert.equal((await request("/clients/admin/clients/kitchen-remodel/projects", form({ name: "Deck" }, adminCookie))).headers.get("Location"), "/clients/admin?client=deck&notice=project-added");
+  assert.equal((await projectRecord("deck")).parentSlug, smith);
+  assert.ok(await db("mhb_activity").where({ action: "client.project-added", client_slug: "deck" }).first());
+
+  // Money in each project.
+  const invoice = (slug, title, amount) => request(`/clients/admin/clients/${slug}/billing`, form({ kind: "invoice", title, amount }, adminCookie));
+  await invoice(smith, "Design", "1,000");
+  await invoice("kitchen-remodel", "Cabinets", "8,000");
+  await invoice("deck", "Deck boards", "2,500");
+  const cabinets = (await billingRecords()).find((item) => item.title === "Cabinets");
+  await request(`/clients/admin/clients/kitchen-remodel/billing/${cabinets.id}/record-payment`, form({ method: "check", amount: "3,000", paidOn: today }, adminCookie));
+  await request("/clients/admin/clients/kitchen-remodel/expenses", crewForm({ spentOn: today, paidWith: "account:1000", vendor: "", description: "Cabinet boxes", category: "Materials", amount: "4,200" }, null, adminCookie));
+
+  // Clicking a project opens it with its finances.
+  const kitchenPanel = await page("kitchen-remodel");
+  assert.match(kitchenPanel, /<h3>Finances<\/h3>\s*<a class="portal-secondary-link" href="\/clients\/admin\/books\/jobs\/kitchen-remodel">Job book<\/a>\s*<\/div>\s*<dl class="billing-totals">\s*<div><dt>Gross income<\/dt><dd>\$8,000\.00<\/dd><\/div>\s*<div><dt>Gross expenses<\/dt><dd>\$4,200\.00<\/dd><\/div>\s*<div class="billing-totals-due"><dt>Gross profit<\/dt><dd>\$3,800\.00<\/dd><\/div>/u);
+
+  // Show finances for all projects under this client: each project, then all of them.
+  const finances = kitchenPanel.match(/<details class="client-finances" id="client-finances">([\s\S]*?)<\/details>/u)[1];
+  const row = (name, ...amounts) => new RegExp(`>${name}</a></td>\\s*${["Invoiced", "Paid", "Outstanding", "Gross income", "Gross expenses", "Gross profit"].map((label, index) => `<td class="books-money" data-label="${label}">\\$${amounts[index].replaceAll(".", "\\.")}</td>`).join("\\s*")}`, "u");
+  assert.match(finances, row("Smith Residence", "1,000.00", "0.00", "1,000.00", "1,000.00", "0.00", "1,000.00"));
+  assert.match(finances, row("Kitchen Remodel", "8,000.00", "3,000.00", "5,000.00", "8,000.00", "4,200.00", "3,800.00"));
+  assert.match(finances, row("Deck", "2,500.00", "0.00", "2,500.00", "2,500.00", "0.00", "2,500.00"));
+  assert.match(finances, /<th scope="row">All projects<\/th><td class="books-money" data-label="Invoiced">\$11,500\.00<\/td>\s*<td class="books-money" data-label="Paid">\$3,000\.00<\/td>\s*<td class="books-money" data-label="Outstanding">\$8,500\.00<\/td>\s*<td class="books-money" data-label="Gross income">\$11,500\.00<\/td>\s*<td class="books-money" data-label="Gross expenses">\$4,200\.00<\/td>\s*<td class="books-money" data-label="Gross profit">\$7,300\.00<\/td>/u);
+  assert.doesNotMatch(finances, /Muskegon Addition/u, "only this client's projects");
+
+  // The Books page and other job lists put the client portal's name first.
+  const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
+  assert.match(books, />Smith Residence · Kitchen Remodel<\/a><\/td>/u);
+  assert.match(books, /<option value="kitchen-remodel">Smith Residence · Kitchen Remodel<\/option>/u);
+  assert.doesNotMatch(books, /The books do not balance/u);
+
+  // The client: one login opens the client portal and every project in it.
+  const home = await clientHome(await loginAsClient("smith-residence-login-2026"));
+  assert.deepEqual([home.heading, home.projects], ["Smith Residence", ["Smith Residence", "Deck", "Kitchen Remodel"]]);
+});
+
+test("Send to archive takes a client portal or project off the client portal screen, out of the books and from its client; Archive restores it", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  const smith = await addPortal(adminCookie, "Smith Residence");
+  const barn = await addPortal(adminCookie, "Jones Barn");
+  await request(`/clients/admin/clients/${smith}/projects`, form({ name: "Kitchen Remodel" }, adminCookie));
+  await request(`/clients/admin/clients/${smith}/projects`, form({ name: "Deck" }, adminCookie));
+  const invoice = (slug, title, amount) => request(`/clients/admin/clients/${slug}/billing`, form({ kind: "invoice", title, amount }, adminCookie));
+  await invoice(smith, "Design", "1,000");
+  await invoice("kitchen-remodel", "Cabinets", "8,000");
+  await invoice("deck", "Deck boards", "2,500");
+  await invoice(barn, "Barn roof", "4,000");
+  await request("/clients/admin/clients/kitchen-remodel/expenses", crewForm({ spentOn: today, paidWith: "account:1000", vendor: "", description: "Cabinet boxes", category: "Materials", amount: "4,200" }, null, adminCookie));
+  const page = async (path) => (await request(path, { headers: { Cookie: adminCookie } })).text();
+  const invoiced = async () => (await page("/clients/admin/books")).match(/<div><dt>Invoiced<\/dt><dd>\$([\d,.]+)<\/dd>/u)[1];
+  assert.equal(await invoiced(), "15,500.00");
+  assert.match(await page("/clients/admin"), /<a class="portal-footer-archive" href="\/clients\/admin\/archive">Archive<\/a>\s*<a href="\/legal\/">Legal and privacy<\/a>/u);
+  const clientCookie = await loginAsClient("smith-residence-login-2026");
+  assert.deepEqual((await clientHome(clientCookie)).projects, ["Smith Residence", "Deck", "Kitchen Remodel"]);
+
+  // A project on its own: off its client portal's page, out of the books and the client's switcher.
+  assert.equal((await request("/clients/admin/clients/kitchen-remodel/archive", form({}, adminCookie))).headers.get("Location"), "/clients/admin?client=smith-residence&notice=archived");
+  const kitchen = await projectRecord("kitchen-remodel");
+  assert.equal(kitchen.active, false);
+  assert.ok(kitchen.archivedAt);
+  assert.equal(kitchen.archivedWith, undefined);
+  const smithPage = await page(`/clients/admin?client=${smith}&notice=archived`);
+  assert.match(smithPage, /Sent to archive\. It is left out of the books and the client portal screen, and the client cannot open it\./u);
+  assert.doesNotMatch(smithPage, /client-project-tab[^"]*" href="\/clients\/admin\?client=kitchen-remodel"/u);
+  assert.match(smithPage, /<strong>Smith Residence<\/strong><small>2 projects · No email on file<\/small>/u);
+  assert.match(smithPage, /<a class="portal-footer-archive" href="\/clients\/admin\/archive">Archive \(1\)<\/a>/u);
+  assert.equal(await invoiced(), "7,500.00");
+  assert.deepEqual((await clientHome(clientCookie)).projects, ["Smith Residence", "Deck"]);
+  assert.equal((await request("/clients/switch", form({ project: "kitchen-remodel" }, clientCookie))).headers.get("Location"), "/clients?notice=switch-invalid");
+
+  // A whole client portal goes with the projects still in it.
+  assert.equal((await request(`/clients/admin/clients/${smith}/archive`, form({}, adminCookie))).headers.get("Location"), "/clients/admin?notice=archived");
+  assert.equal((await projectRecord("deck")).archivedWith, smith);
+  assert.equal((await projectRecord("kitchen-remodel")).archivedWith, undefined, "in the archive on its own already");
+  const dashboard = await page("/clients/admin");
+  assert.doesNotMatch(dashboard, /admin-client-link[^"]*" href="\/clients\/admin\?client=smith-residence"/u);
+  assert.match(dashboard, /<a class="portal-footer-archive" href="\/clients\/admin\/archive">Archive \(1\)<\/a>/u);
+  assert.doesNotMatch(dashboard, /<option value="smith-residence">/u, "nor a client portal to put things inside");
+
+  // Out of the books entirely: the figures, the jobs, the ledger, the filters and the balance check.
+  // The activity log keeps everything.
+  assert.equal(await invoiced(), "4,000.00");
+  const books = await page("/clients/admin/books");
+  const jobs = books.match(/<table class="portal-table books-table books-jobs">([\s\S]*?)<\/table>/u)[1];
+  assert.match(jobs, />Jones Barn<\/a>/u);
+  assert.doesNotMatch(jobs, /Smith|Kitchen|Deck/u);
+  assert.doesNotMatch(books.match(/<select id="books-client" name="client">([\s\S]*?)<\/select>/u)[1], /smith-residence|kitchen-remodel|"deck"/u);
+  assert.doesNotMatch(books.match(/<select id="add-expense-job" name="job">([\s\S]*?)<\/select>/u)[1], /smith-residence|kitchen-remodel|"deck"/u);
+  assert.doesNotMatch(books, /The books do not balance/u);
+  assert.match(books, /Sent Smith Residence to archive with its projects Deck; it is left out of the books/u);
+  const ledger = await page("/clients/admin/books/ledger.csv");
+  assert.match(ledger, /Barn roof/u);
+  assert.doesNotMatch(ledger, /Design|Cabinets|Deck boards/u);
+  assert.match(await page("/clients/admin/books?client=smith-residence"), /<p class="portal-lead">Every job, all time\.<\/p>/u, "not a filter choice");
+
+  // Its client cannot open it.
+  assert.equal((await request("/clients/login", form({ password: "smith-residence-login-2026" }))).status, 401);
+  assert.equal((await clientHome(clientCookie)).heading, null);
+
+  // Nor is it offered as a job elsewhere.
+  assert.doesNotMatch((await page("/clients/admin/documents")).match(/<select id="documents-client" name="client" required>([\s\S]*?)<\/select>/u)[1], /smith-residence/u);
+  assert.doesNotMatch((await page("/clients/admin/schedule")).match(/<select id="schedule-job" name="job">([\s\S]*?)<\/select>/u)[1], /smith-residence|kitchen-remodel/u);
+  const roof = (await billingRecords()).find((item) => item.title === "Barn roof");
+  assert.doesNotMatch((await page(`/clients/admin/clients/${barn}/billing/${roof.id}`)).match(/<select id="other-project" name="to" required>([\s\S]*?)<\/select>/u)[1], /smith-residence/u);
+
+  // Archive, in the footer: what is there, each opening on the admin panel with Restore.
+  const archive = await page("/clients/admin/archive");
+  assert.match(archive, /<h1 class="portal-heading">Archive\.<\/h1>/u);
+  assert.match(archive, /<a class="portal-inline-link" href="\/clients\/admin\?client=smith-residence">Smith Residence<\/a><small>With its projects Deck<\/small><small>Archived before it, on their own: Kitchen Remodel<\/small>/u);
+  assert.match(archive, /<form action="\/clients\/admin\/clients\/smith-residence\/restore" method="post"><button class="button button-solid button-small" type="submit">Restore<\/button><\/form>/u);
+  assert.match(archive, /No projects are in the archive on their own\./u);
+  const opened = await page(`/clients/admin?client=${smith}`);
+  assert.match(opened, /<strong>In the archive<\/strong> since/u);
+  assert.match(opened, /<form action="\/clients\/admin\/clients\/smith-residence\/restore" method="post"><button class="button button-solid" type="submit">Restore<\/button><\/form>/u);
+  assert.doesNotMatch(opened, /<summary>Add project<\/summary>|<summary>Archive or move<\/summary>/u);
+  assert.match(await page("/clients/admin?client=kitchen-remodel"), /It is inside Smith Residence, which is in the archive too\. Restore Smith Residence to bring it back\./u);
+  assert.equal((await request("/clients/admin/clients/kitchen-remodel/restore", form({}, adminCookie))).headers.get("Location"), "/clients/admin/archive?notice=restore-parent-first");
+  for (const area of ["archive", "inside", "projects", "own"]) {
+    assert.equal((await request(`/clients/admin/clients/${smith}/${area}`, form({ to: barn, name: "Porch" }, adminCookie))).headers.get("Location"), `/clients/admin?client=${smith}&notice=invalid`, area);
+  }
+
+  // Restore brings it back with the project that went with it; one archived before it stays.
+  assert.equal((await request(`/clients/admin/clients/${smith}/restore`, form({}, adminCookie))).headers.get("Location"), "/clients/admin?client=smith-residence&notice=restored");
+  const restored = await projectRecord(smith);
+  assert.equal(restored.active, true);
+  assert.equal(restored.archivedAt, undefined);
+  assert.equal((await projectRecord("deck")).archivedWith, undefined);
+  assert.ok((await projectRecord("kitchen-remodel")).archivedAt);
+  assert.equal(await invoiced(), "7,500.00");
+  assert.deepEqual((await clientHome(await loginAsClient("smith-residence-login-2026"))).projects, ["Smith Residence", "Deck"]);
+  assert.match(await page("/clients/admin/archive"), /<a class="portal-inline-link" href="\/clients\/admin\?client=kitchen-remodel">Kitchen Remodel<\/a><small>In Smith Residence<\/small>/u);
+  assert.equal((await request("/clients/admin/clients/kitchen-remodel/restore", form({}, adminCookie))).headers.get("Location"), "/clients/admin?client=kitchen-remodel&notice=restored");
+  assert.equal(await invoiced(), "15,500.00");
+  assert.match(await page("/clients/admin/archive"), /No client portals are in the archive\./u);
+  assert.equal((await db("mhb_activity").where({ action: "client.restored" }).select("id")).length, 3);
+
+  // The Muskegon project too: while it is in the archive, its login (set in Render) opens nothing.
+  await request("/clients/admin/clients/muskegon-addition/archive", form({}, adminCookie));
+  assert.equal((await request("/clients/login", form({ password: process.env.MHB_CLIENT_PORTAL_PASSWORD }))).status, 401);
+  await request("/clients/admin/clients/muskegon-addition/restore", form({}, adminCookie));
+  assert.equal((await clientHome(await loginAsClient())).heading, "Muskegon Addition");
 });
 
 // ---------- The live material designer ----------

@@ -1,6 +1,6 @@
 // Pages for labor: the crew portal (sign-in, paperwork, hours and invoices, lien waivers) and the
 // admin Labor pages. crew.js decides what each shows.
-import { dateText, escapeAttribute, pageShell, photoFields, photoGrid } from "./pages.js";
+import { dateText, escapeAttribute, pageShell, photoDate, photoFields, photoGrid } from "./pages.js";
 import { escapeHtml, money } from "./format.js";
 import { moneyInput } from "./billing.js";
 import { FORMS, PAPERWORK } from "./forms.js";
@@ -29,14 +29,18 @@ function statusBadge(entry) {
   return `<span class="portal-status portal-status-${statusTone[entry.status] || "neutral"}">${escapeHtml(LABOR_STATUS[entry.status] || entry.status)}</span>`;
 }
 
+// A job goes by its label: a project inside a client portal has the portal's name first.
 function jobName(clients, slug) {
   if (!slug) return "Shop or not on a job";
-  return clients.find((client) => client.slug === slug)?.name || slug;
+  const client = clients.find((entry) => entry.slug === slug);
+  return client ? client.label || client.name : slug;
 }
 
+// Jobs in the archive are not offered, unless one is already chosen.
 function jobOptions(clients, selected) {
   return [`<option value=""${selected ? "" : " selected"}>Shop or not on a job</option>`,
-    ...clients.map((client) => `<option value="${escapeAttribute(client.slug)}"${client.slug === selected ? " selected" : ""}>${escapeHtml(client.name)}</option>`)].join("");
+    ...clients.filter((client) => !client.archivedAt || client.slug === selected)
+      .map((client) => `<option value="${escapeAttribute(client.slug)}"${client.slug === selected ? " selected" : ""}>${escapeHtml(client.label || client.name)}</option>`)].join("");
 }
 
 function workSummary(entry) {
@@ -162,7 +166,7 @@ function historyRows(entries, clients) {
 // Photos: Add photos to one of the active jobs' galleries, with a note, and the photos they added.
 // `jobNames`: every client portal, so a photo on a job no longer active still names it.
 function crewPhotosSection(photos, clients, jobNames) {
-  const options = clients.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.name)}</option>`).join("");
+  const options = clients.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.label || client.name)}</option>`).join("");
   return `<section class="portal-section" aria-labelledby="crew-photos-heading">
         <h2 id="crew-photos-heading">Photos</h2>
         <form class="portal-form portal-upload photo-upload crew-send" id="add-photos" action="/clients/crew/photos" method="post" enctype="multipart/form-data">
@@ -175,7 +179,7 @@ function crewPhotosSection(photos, clients, jobNames) {
         </form>
         ${photoGrid(photos, {
     href: (photo) => `/clients/crew/photos/${encodeURIComponent(photo.id)}`,
-    meta: (photo) => `${escapeHtml(jobName(jobNames, photo.clientSlug))} · ${dateText(photo.createdAt)}`
+    meta: (photo) => [escapeHtml(jobName(jobNames, photo.clientSlug)), dateText(photoDate(photo))].filter(Boolean).join(" · ")
   })}
       </section>`;
 }
@@ -262,7 +266,7 @@ export function crewHomePage({ worker, entries, clients, documents, schedule = [
         <p class="portal-lead-actions"><a class="button button-outline" href="#upload-document">Upload document</a></p>
         ${notice(status)}
       </section>
-      ${crewScheduleSection({ entries: schedule, clients })}
+      ${crewScheduleSection({ entries: schedule, clients: jobNames })}
       ${notes ? crewNotesSection({ notes }) : ""}
       <section class="portal-section" aria-labelledby="paperwork-heading">
         <h2 id="paperwork-heading">Your paperwork</h2>

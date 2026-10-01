@@ -200,8 +200,8 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   addresses and records) is made from the name, with -2, -3 and so on when the name is taken.
 - **The project login is optional.** A project created without one is **admin only** (shown as
   "Admin only" in the list). It is not client facing until the selected project's **Client
-  login** field is saved. Saving a new login there replaces the old one. Several projects can
-  share one login (see Several projects under one login).
+  login** field is saved. Saving a new login there replaces the old one. A client portal can hold
+  several projects under its one login (see Client portals and their projects).
 - **The client login shows in plain text** in that field, so a client's access is never lost.
   Besides its hash, each login is kept sealed in `mhb_secure` (`client-login:<slug>`, secure.js,
   AES-256-GCM). A login saved before this is not on file: the field asks for it again. The
@@ -329,27 +329,84 @@ under `photos/<slug>/<id>/<name>`.
   shows or hides them all. Both save as soon as they are clicked. A hidden photo is dimmed on the
   panel, and its address answers 404 to the client.
 - **Deleting:** the trash button asks first, then removes the photo and its file.
-- Adding, showing, hiding and deleting photos are recorded in the activity log.
+- **The date:** each photo on the panel shows who added it and its date, the day it was added until
+  the admin changes it. A click on the date opens **Photo date** (a popup; without scripts the
+  page `/clients/admin/clients/<slug>/photos/<id>/date`) to change it, or **Delete date** (or save
+  it empty) so the photo shows no date. The deleted date's spot still opens the popup, and names
+  itself (Add date) only under the pointer. The date is `date` on the photo: missing means the
+  day it was added, `""` means none. Crew see the same date on their photos; clients see none.
+- Adding, showing, hiding, dating and deleting photos are recorded in the activity log.
 
-## Several projects under one login
+## Client portals and their projects
 
-On a project's panel, **Projects under this login** (under Client login, shown once the project
-has a login) has a checkbox for each other project. The Muskegon project, whose login comes from
-`MHB_CLIENT_PORTAL_PASSWORD`, is never grouped.
+The admin panel's list (the client portal screen) shows client portals. A client portal can hold
+projects: each project names its client portal in `parentSlug`, one level deep. A project keeps
+everything of its own (quotes, invoices, expenses, documents, gallery, site address, read only),
+and its `label` (worked out on reading, never saved) puts the client portal's name first, as in
+"Smith Residence · Deck", wherever jobs are listed: Books, Labor, Banking, the schedule, Documents,
+the crew portal and Another project.
 
-- **Grouping:** checked projects join this project's login group. They take its `loginGroup` id,
-  its login hash and its sealed login, so the panel shows the same login on each. A project checked
-  from another group moves; a group left with one project ends.
-- **Ungrouping:** a project unchecked from the group is left with no login, admin only, until it
-  is given its own. A client session for it no longer opens it.
-- **Changing the login:** a new login saved on any project in the group changes it for all of them.
-  A login is refused when it opens a project outside the group (or the Muskegon project); one shared
-  inside the group is not.
-- **Signing in:** the shared login opens the first project of the group by name.
-- **Switching:** the client portal lists the group's projects at the top. Choosing one posts to
-  `/clients/switch`, which checks it is in the same group (and still has the same login), signs the
-  client in to it and returns to `/clients`. Read only stays per project.
-- The admin's client list shows "Shared login" on each grouped project.
+- **A client portal's page** starts with **Add project**, then its projects (the client portal
+  itself first, then the projects in it by name), then **Show finances for all projects under this
+  client**, then the panel of the project open. Clicking a project opens it with its **Finances**
+  (gross income, gross expenses and gross profit, beside its Job book link). The list on the left
+  keeps its client portal chosen and says how many projects it has.
+- **Add project** takes a name and a job site address (the client portal's to start). The project
+  starts with the client portal's emails.
+- **Show finances for all projects under this client** (folded until opened) lists each project's
+  invoiced, paid and outstanding (as its list totals them) and its gross income, gross expenses and
+  gross profit (as its job book totals them, `books.js` `jobTotals`), then all projects together.
+- **The right-click menu.** A right-click on a client portal in the list, or on a project at the
+  top of its page (a long press on a phone), opens a menu (`site/clients/portal/billing.js`):
+  - **Send to archive** (see The archive)
+  - **Inside another portal:** a popup asks which client portal. The client portal (with every
+    project in it) or project becomes a project of that client portal (`/inside`).
+  - **Make it its own client portal**, for a project (`/own`)
+
+  The same actions sit folded under **Archive or move** at the bottom of each project's panel,
+  for a page without scripts. On a phone the menu opens beside the finger, and the tap that ends
+  the long press neither follows the link nor picks a choice.
+- **Logins:** a project has no login of its own; it uses its client portal's. One login opens the
+  client portal (first) and every project in it, and the client switches between them at the top
+  of their portal (`/clients/switch`). A login saved on a project's panel is its client portal's.
+  The Muskegon project's login is set in Render: projects can go inside it (its login opens them
+  too), but it stays a client portal of its own.
+  - Put inside another portal, a portal or project drops its own login (hash and sealed copy) and
+    uses its new client portal's. Made its own client portal, a project has no login (admin only)
+    until it is given one.
+  - Either way the move is dated (`loginChangedAt`), and a client session that began before it no
+    longer opens that project, so a move never carries an old sign-in into another client's
+    projects.
+- **Portals that shared a login before projects existed** (the old Projects under this login
+  checkboxes: a `loginGroup` with one hash) keep sharing it: the login opens the first of them by
+  name, the client switches between them, the list shows "Shared login", and a new login saved on
+  any of them changes it for all. Put inside another portal, one leaves that login; a group left
+  with one client portal ends.
+- Projects added, moved, made their own client portal, archived and restored are recorded in the
+  activity log.
+
+## The archive
+
+**Send to archive** (the right-click menu, or Archive or move) takes a client portal, with the
+projects in it, or one project, out of use: `active: false` and `archivedAt`, with `archivedWith`
+on the projects that went with their client portal.
+
+- **Off the client portal screen**, and out of every job list: Books, Documents, Labor, Banking,
+  the schedule, the crew portal and Another project. Nothing more is done to it until it is
+  restored.
+- **Out of the books entirely:** the Books page's figures, jobs, ledger and its download, account
+  balances and the balance check skip every journal entry tagged with it. The entries stay, so
+  restoring it brings it all back. The activity log is not filtered; it is the permanent record.
+  Money that moved through shared accounts for it (its Stripe payments, bank filings, crew costs)
+  leaves those accounts' balances on the Books page with it.
+- **Its client cannot open it:** its login opens nothing (a project's client portal opens without
+  it), and it leaves the client's switcher. Public quote and invoice links keep working.
+- **Archive** (`/clients/admin/archive`, in the footer of the admin panel, with how many are
+  there) lists archived client portals (with the projects that went with them) and projects
+  archived on their own. Each opens on the admin panel, marked as in the archive, with **Restore**.
+- **Restore** brings back the client portal with the projects that went with it; a project
+  archived on its own before stays archived. A project inside a client portal that is in the
+  archive too waits for the client portal.
 
 ## The Back button
 
@@ -362,7 +419,8 @@ never asks to resubmit. Opened with GET, a form's address redirects to the page 
 ## Books
 
 The admin panel's **Books** page (`/clients/admin/books`, `books.js`) holds the portal's
-bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tables.
+bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tables. Client portals
+and projects in the archive are left out of it entirely (see The archive).
 
 - **Jobs** is the jobs ledger, one job per row: gross income (income accounts tagged with the
   job), gross expenses (expense accounts tagged with it, except Stripe fees and dispute losses)

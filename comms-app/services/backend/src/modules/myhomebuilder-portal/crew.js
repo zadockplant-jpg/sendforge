@@ -129,7 +129,8 @@ async function activeClients(store) {
 
 function jobNameOf(clients, slug) {
   if (!slug) return "Shop or not on a job";
-  return clients.find((client) => client.slug === slug)?.name || slug;
+  const client = clients.find((entry) => entry.slug === slug);
+  return client ? client.label || client.name : slug;
 }
 
 // A job picked from a form: "" (shop), or one of the client portals.

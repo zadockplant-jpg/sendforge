@@ -72,8 +72,9 @@ const MB_MARK = `<svg class="billing-doc-mark" viewBox="170 95 1250 665" role="i
             </g>
           </svg>`;
 
-// `crew`: signed in to the crew portal; `crewSignedOut`: its sign-in pages.
-export function pageShell(content, { authenticated = false, admin = false, crew = false, crewSignedOut = false, bodyClass = "portal-page", scripts = [], title = "Client Portal", navCurrent = "login" } = {}) {
+// `crew`: signed in to the crew portal; `crewSignedOut`: its sign-in pages. `footerLinks` come
+// first in the footer (the admin panel's Archive).
+export function pageShell(content, { authenticated = false, admin = false, crew = false, crewSignedOut = false, bodyClass = "portal-page", scripts = [], title = "Client Portal", navCurrent = "login", footerLinks = [] } = {}) {
   const nav = [];
   if (crew) {
     nav.push('<a href="/clients/crew">Crew home</a>');
@@ -154,7 +155,7 @@ export function pageShell(content, { authenticated = false, admin = false, crew 
     <div class="site-width portal-footer-inner">
       <p>© ${new Date().getUTCFullYear()} My Home Builder LLC</p>
       <div class="portal-footer-links">
-        <a href="/legal/">Legal and privacy</a>
+        ${footerLinks.map((link) => `${link}\n        `).join("")}<a href="/legal/">Legal and privacy</a>
         <a href="/#contact">Contact My Home Builder</a>
       </div>
     </div>
@@ -349,6 +350,13 @@ function documentSections(documents, { basePath, viewer }) {
 // with its note. `meta` is a line under it (who added it and when, or the job); `extra` adds
 // controls (the admin's Shown checkbox and trash button).
 export const PHOTO_ACCEPT = "image/jpeg,image/png,image/webp,image/gif";
+
+// The date a photo shows (YYYY-MM-DD): the one the admin gave it, or else the day it was added in
+// Michigan. A date the admin deleted is "": the photo shows no date.
+export function photoDate(photo) {
+  if (typeof photo.date === "string") return photo.date;
+  return photo.createdAt ? todayInMichigan(new Date(photo.createdAt)) : "";
+}
 
 export function photoGrid(photos, { href, meta = () => "", extra = () => "" }) {
   if (!photos.length) return "";
@@ -913,7 +921,7 @@ function addExpenseFields({ action, payers, today, prefix, paidTo = [], jobs = n
   const hidden = (id, label, control) => `<label class="in-box" for="${prefix}-${id}"><span class="visually-hidden">${label}</span>${control}</label>`;
   const shown = (id, label, control) => `<label class="in-box in-box-tagged" for="${prefix}-${id}"><span class="in-box-tag">${label}</span>${control}</label>`;
   return `<form class="admin-stack-form expense-form" method="post" action="${escapeAttribute(action)}" enctype="multipart/form-data">
-            ${jobs ? shown("job", "Job", `<select id="${prefix}-job" name="job"><option value="">Overhead (no job)</option>${jobs.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.name)}</option>`).join("")}</select>`) : ""}
+            ${jobs ? shown("job", "Job", `<select id="${prefix}-job" name="job"><option value="">Overhead (no job)</option>${jobs.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.label || client.name)}</option>`).join("")}</select>`) : ""}
             ${hidden("description", "Expense", `<input id="${prefix}-description" name="description" type="text" maxlength="200" required placeholder="Expense">`)}
             ${hidden("vendor", "Paid to", `<input id="${prefix}-vendor" name="vendor" type="text" maxlength="120" list="${prefix}-paid-to" autocomplete="off" placeholder="Paid to">`)}
             <datalist id="${prefix}-paid-to">${paidTo.map((name) => `<option value="${escapeAttribute(name)}"></option>`).join("")}</datalist>
@@ -1002,7 +1010,7 @@ export function adminAddPaymentPage({ client, billing, readiness, selected = "",
 // Admin Documents page: share a document into any client portal's section and ask for
 // signatures, with everything still awaiting a signature listed first.
 export function adminDocumentsPage({ clients, documents, notice = null }) {
-  const names = new Map(clients.map((client) => [client.slug, client.name]));
+  const names = new Map(clients.map((client) => [client.slug, client.label || client.name]));
   const row = (document) => {
     const [tone, label] = documentStatus(document, "admin");
     const path = `/clients/admin/clients/${encodeURIComponent(document.clientSlug)}/documents/${encodeURIComponent(document.id)}`;
@@ -1024,7 +1032,7 @@ export function adminDocumentsPage({ clients, documents, notice = null }) {
     : `<p class="portal-empty">${empty}</p>`;
   const waiting = documents.filter(awaitingSignature);
   const shared = documents.filter((document) => !awaitingSignature(document)).slice(0, 50);
-  const portals = clients.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.name)}</option>`).join("");
+  const portals = clients.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.label || client.name)}</option>`).join("");
   return adminShell(`<div class="site-width portal-shell">
       <section class="admin-intro">
         <p class="portal-kicker">Admin panel</p>
@@ -1067,34 +1075,182 @@ export function adminDocumentsPage({ clients, documents, notice = null }) {
     </div>`, { title: "Documents" });
 }
 
-// Projects under this login: a checkbox for each other project (not the Muskegon project, whose
-// login is set in Render), checked when it shares this project's login. Shown once the project
-// has a login of its own.
-function loginGroupForm(selected, clients, base) {
-  if (selected.managedBySecret || !selected.passwordHash) return "";
-  const others = clients.filter((client) => client.slug !== selected.slug && !client.managedBySecret);
-  if (!others.length) return "";
-  const boxes = others.map((client) => {
-    const id = `login-group-${client.slug}`;
-    const grouped = Boolean(selected.loginGroup) && client.loginGroup === selected.loginGroup;
-    return `<label class="portal-check" for="${escapeAttribute(id)}">
-                <input id="${escapeAttribute(id)}" name="projects" type="checkbox" value="${escapeAttribute(client.slug)}"${grouped ? " checked" : ""}>
-                <span>${escapeHtml(client.name)}</span>
-              </label>`;
-  }).join("\n              ");
-  return `<form class="admin-inline-form admin-save-row admin-login-group" action="${base}/group" method="post">
-            <button class="icon-save" type="submit" aria-label="Save projects under this login" title="Save">${SAVE_ICON}</button>
-            <fieldset>
-              <legend>Projects under this login</legend>
-              ${boxes}
-            </fieldset>
-          </form>`;
+// ---------- Client portals and their projects ----------
+
+// What the right-click menu (billing.js) needs to know about a client portal or project: its id
+// and name, the client portal it is in (a project can be made its own client portal again), and
+// whether its login is set in Render (the Muskegon project stays a client portal of its own).
+function portalMenuData(client) {
+  return ` data-portal-menu="${escapeAttribute(client.slug)}" data-portal-name="${escapeAttribute(client.name)}"${client.parentSlug ? ` data-portal-parent="${escapeAttribute(client.parentSlug)}"` : ""}${client.managedBySecret ? " data-portal-secret" : ""}`;
+}
+
+function insideOptions(portals) {
+  return `<option value="" selected disabled>Choose a client portal</option>${portals.map((portal) => `<option value="${escapeAttribute(portal.slug)}">${escapeHtml(portal.name)}</option>`).join("")}`;
+}
+
+// The menu a right-click (or a long press) on a client portal or project opens, and the popup that
+// asks which client portal it goes inside. billing.js fills both in for the one chosen; `portals`
+// are the client portals in use. Each project's panel has the same actions under Archive or move.
+function portalMenu(portals) {
+  return `<div class="portal-menu" id="portal-menu" role="menu" aria-label="Client portal" hidden>
+          <form method="post" data-portal-menu-archive><button type="submit" role="menuitem">Send to archive</button></form>
+          <button type="button" role="menuitem" data-portal-menu-inside>Inside another portal</button>
+          <form method="post" data-portal-menu-own><button type="submit" role="menuitem">Make it its own client portal</button></form>
+        </div>
+        <dialog class="admin-dialog" id="inside-dialog" aria-labelledby="inside-dialog-title">
+          <div class="admin-dialog-head">
+            <h2 id="inside-dialog-title" data-inside-title>Inside another portal</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          <form class="admin-stack-form" method="post" data-inside-form>
+            <label for="inside-to">Inside another portal
+              <select id="inside-to" name="to" required>${insideOptions(portals)}</select>
+            </label>
+            <p class="portal-security-note">It becomes a project in the client portal you choose (a client portal brings its projects with it). Quotes, invoices, expenses and documents go with it, and it uses that portal's client login from then on.</p>
+            <button class="button button-solid" type="submit">Put it inside</button>
+          </form>
+          <p class="admin-meta" data-inside-none hidden>There is no other client portal to put it in yet.</p>
+        </dialog>`;
+}
+
+// What is in the archive: client portals sent there (with the projects that went with them), and
+// projects sent there on their own while their client portal is still in use.
+function archiveContents(clients) {
+  const bySlug = new Map(clients.map((client) => [client.slug, client]));
+  const portals = clients.filter((client) => !client.parentSlug && client.archivedAt);
+  const projects = clients.filter((client) => client.parentSlug && client.archivedAt && !bySlug.get(client.parentSlug)?.archivedAt);
+  return { portals, projects, count: portals.length + projects.length, bySlug };
+}
+
+// Show finances for all projects under this client: each project's invoices (invoiced, paid and
+// outstanding, as its list totals them) and its job book (gross income, gross expenses and gross
+// profit), then all of them together. Folded until it is opened.
+function clientFinances(projects, billing, books) {
+  const rows = projects.map((project) => {
+    const invoices = billing.filter((item) => item.clientSlug === project.slug && item.kind === "invoice" && item.status !== "void");
+    const book = books.get(project.slug) || { income: 0, expenses: 0, profit: 0 };
+    return {
+      project,
+      invoiced: invoices.reduce((sum, item) => sum + item.amountCents, 0),
+      paid: invoices.reduce((sum, item) => sum + item.amountCents - balanceDue(item), 0),
+      outstanding: invoices.reduce((sum, item) => sum + balanceDue(item), 0),
+      income: book.income,
+      expenses: book.expenses,
+      profit: book.profit
+    };
+  });
+  const fields = ["invoiced", "paid", "outstanding", "income", "expenses", "profit"];
+  const total = Object.fromEntries(fields.map((field) => [field, rows.reduce((sum, row) => sum + row[field], 0)]));
+  const cells = (row) => `<td class="books-money" data-label="Invoiced">${money(row.invoiced)}</td>
+              <td class="books-money" data-label="Paid">${money(row.paid)}</td>
+              <td class="books-money" data-label="Outstanding">${money(row.outstanding)}</td>
+              <td class="books-money" data-label="Gross income">${money(row.income)}</td>
+              <td class="books-money" data-label="Gross expenses">${money(row.expenses)}</td>
+              <td class="books-money${row.profit < 0 ? " books-loss" : ""}" data-label="Gross profit">${money(row.profit)}</td>`;
+  return `<details class="client-finances" id="client-finances">
+          <summary>Show finances for all projects under this client</summary>
+          <table class="portal-table books-table client-finances-table">
+            <thead><tr><th scope="col">Project</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Paid</th><th scope="col" class="books-money">Outstanding</th><th scope="col" class="books-money">Gross income</th><th scope="col" class="books-money">Gross expenses</th><th scope="col" class="books-money">Gross profit</th></tr></thead>
+            <tbody>${rows.map((row) => `<tr>
+              <td><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(row.project.slug)}">${escapeHtml(row.project.name)}</a></td>
+              ${cells(row)}
+            </tr>`).join("")}</tbody>
+            <tfoot><tr><th scope="row">All projects</th>${cells(total)}</tr></tfoot>
+          </table>
+        </details>`;
+}
+
+// The top of a client portal's page: Add project, the list of its projects (the client portal
+// itself first; a click opens one, a right-click its menu), and Show finances for all projects
+// under this client. A new project's job site address starts as the client portal's.
+function clientProjects({ root, projects, selected, counted, projectBilling, projectBooks, newProject, projectError }) {
+  const tabs = projects.map((project) => {
+    const current = project.slug === selected.slug;
+    return `<li><a class="client-project-tab${current ? " is-current" : ""}${project.archivedAt ? " is-archived" : ""}" href="/clients/admin?client=${encodeURIComponent(project.slug)}"${current ? ' aria-current="page"' : ""}${project.archivedAt ? "" : portalMenuData(project)}>${escapeHtml(project.name)}${project.archivedAt ? "<small>In archive</small>" : ""}</a></li>`;
+  }).join("\n            ");
+  const add = root.archivedAt ? "" : `<details class="admin-add-project" id="add-project" data-collapsible${projectError ? " open" : ""}>
+          <summary>Add project</summary>
+          <form class="admin-inline-form admin-add-project-form" action="/clients/admin/clients/${encodeURIComponent(root.slug)}/projects" method="post">
+            ${projectError ? `<p class="portal-error" role="alert">${escapeHtml(projectError)}</p>` : ""}
+            <label for="project-name">Project name
+              <input id="project-name" name="name" type="text" maxlength="120" required value="${escapeAttribute(newProject?.name || "")}" placeholder="Kitchen Remodel">
+            </label>
+            <label for="project-site">Job site address (optional)
+              <input id="project-site" name="siteAddress" type="text" maxlength="200" value="${escapeAttribute(newProject ? newProject.siteAddress : root.siteAddress || "")}" placeholder="1234 Lakeshore Dr, Muskegon, MI 49441">
+            </label>
+            <button class="button button-solid" type="submit">Add project</button>
+          </form>
+        </details>`;
+  return `<div class="client-projects">
+          ${add}
+          <nav class="client-project-tabs" aria-label="Projects of ${escapeAttribute(root.name)}">
+            <ul>
+            ${tabs}
+            </ul>
+          </nav>
+          ${clientFinances(counted, projectBilling, projectBooks)}
+        </div>`;
+}
+
+// A project open from the archive: what that means, and Restore (a project inside a client portal
+// that is in the archive too waits for the portal).
+function archivedNote(selected, root) {
+  if (!selected.archivedAt) return "";
+  const waits = Boolean(selected.parentSlug && root?.archivedAt);
+  return `<div class="admin-archived" role="status">
+          <p><strong>In the archive</strong> since ${dateText(selected.archivedAt)}. It is left out of the books and the client portal screen, and the client cannot open it.</p>
+          ${waits
+    ? `<p class="admin-meta">It is inside ${escapeHtml(root.name)}, which is in the archive too. Restore ${escapeHtml(root.name)} to bring it back.</p>`
+    : `<form action="/clients/admin/clients/${encodeURIComponent(selected.slug)}/restore" method="post"><button class="button button-solid" type="submit">Restore</button></form>`}
+        </div>`;
+}
+
+// The right-click menu's actions on the project's own panel, folded at its bottom, for phones and
+// pages without scripts.
+function archiveOrMove(selected, portals) {
+  if (selected.archivedAt) return "";
+  const base = `/clients/admin/clients/${encodeURIComponent(selected.slug)}`;
+  const targets = portals.filter((portal) => portal.slug !== selected.slug && portal.slug !== selected.parentSlug);
+  const inside = selected.managedBySecret
+    ? '<p class="portal-security-note">Its login is set in Render, so it stays a client portal of its own. Other portals can go inside it.</p>'
+    : targets.length
+      ? `<form class="admin-inline-form admin-inside-form" action="${base}/inside" method="post">
+              <label for="manage-inside">Inside another portal
+                <select id="manage-inside" name="to" required>${insideOptions(targets)}</select>
+              </label>
+              <button class="portal-logout-button" type="submit">Put it inside</button>
+            </form>`
+      : "";
+  return `<details class="admin-archive-move">
+          <summary>Archive or move</summary>
+          <div class="admin-archive-move-body">
+            <form action="${base}/archive" method="post">
+              <button class="portal-logout-button" type="submit">Send to archive</button>
+              <p class="portal-security-note">${selected.parentSlug ? "This project leaves" : "This client portal and its projects leave"} the client portal screen and the books, and the client cannot open ${selected.parentSlug ? "it" : "them"}. Archive, at the bottom of the admin panel, restores ${selected.parentSlug ? "it" : "them"}.</p>
+            </form>
+            ${inside}
+            ${selected.parentSlug ? `<form action="${base}/own" method="post">
+              <button class="portal-logout-button" type="submit">Make it its own client portal</button>
+              <p class="portal-security-note">It leaves this client portal and has no client login until you give it one.</p>
+            </form>` : ""}
+          </div>
+        </details>`;
 }
 
 // The project's gallery: the master switch, the photos (each with its Shown checkbox and trash
 // button) and Add photos.
 function adminGallery(selected, photos, base) {
-  const meta = (photo) => `${escapeHtml(photo.uploaderName || (photo.uploadedBy === "client" ? "Client" : "My Home Builder"))} · ${dateText(photo.createdAt)}`;
+  // Who added it, then its date: a click on the date opens a popup to change or delete it
+  // (billing.js; without scripts, a page). A deleted date shows nothing; the empty spot still
+  // opens the popup, to give it one again.
+  const meta = (photo) => {
+    const day = photoDate(photo);
+    const path = `${base}/photos/${encodeURIComponent(photo.id)}/date`;
+    const who = escapeHtml(photo.uploaderName || (photo.uploadedBy === "client" ? "Client" : "My Home Builder"));
+    return day
+      ? `${who} · <a class="photo-date" href="${path}" data-photo-date data-date="${escapeAttribute(day)}" title="Change the date">${dateText(day)}</a>`
+      : `${who}<a class="photo-date is-empty" href="${path}" data-photo-date data-date="" aria-label="Add a date" title="Add a date"></a>`;
+  };
   const extra = (photo) => {
     const path = `${base}/photos/${encodeURIComponent(photo.id)}`;
     return `<div class="photo-actions">
@@ -1125,29 +1281,79 @@ function adminGallery(selected, photos, base) {
           <h3>Add photos</h3>
           ${photoFields("admin-photos")}
           <button class="button button-solid" type="submit">Add photos</button>
-        </form>`;
+        </form>
+        ${photos.length ? `<dialog class="admin-dialog" id="photo-date-dialog" aria-labelledby="photo-date-title">
+          <div class="admin-dialog-head">
+            <h2 id="photo-date-title">Photo date</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          ${photoDateFields("photo-date-dialog-date", "")}
+        </dialog>` : ""}`;
 }
 
-// `selectedLogin` is the selected project's client login in plain text, when it is on file.
-export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, expenses = [], payers = [], paidTo = [], selectedLogin = null, photos = [], today = todayInMichigan() }) {
+// A photo's date: change it, or delete it so the photo shows none. `action` is set by billing.js in
+// the popup, and is the page's own address without scripts.
+function photoDateFields(id, day, action = "") {
+  return `<form class="admin-stack-form" method="post"${action ? ` action="${escapeAttribute(action)}"` : ""} data-photo-date-form>
+            <label for="${id}">Date
+              <input id="${id}" name="date" type="date" value="${escapeAttribute(day)}">
+            </label>
+            <div class="admin-dialog-actions">
+              <button class="button button-solid" type="submit">Save date</button>
+              <button class="portal-logout-button" type="submit" name="clear" value="yes">Delete date</button>
+            </div>
+            <p class="portal-security-note">With its date deleted, the photo shows no date.</p>
+          </form>`;
+}
+
+// The same, as a page, for a page without scripts.
+export function adminPhotoDatePage({ client, photo, base }) {
+  const back = `/clients/admin?client=${encodeURIComponent(client.slug)}#gallery`;
+  const image = `${base}/photos/${encodeURIComponent(photo.id)}`;
+  return adminShell(`<div class="site-width portal-shell portal-detail">
+      <p class="portal-kicker"><a class="portal-inline-link" href="${escapeAttribute(back)}">${escapeHtml(client.label || client.name)}</a></p>
+      <h1 class="portal-heading portal-heading-sm">Photo date.</h1>
+      <section class="admin-card admin-card-narrow photo-date-card">
+        <img src="${escapeAttribute(image)}" alt="${escapeAttribute(photo.note ? photo.note.slice(0, 120) : "Project photo")}">
+        ${photoDateFields("photo-date", photoDate(photo), `${image}/date`)}
+      </section>
+    </div>`, { title: "Photo date" });
+}
+
+// The client portal screen. The sidebar lists the client portals in use (a right-click opens each
+// one's menu); a portal's page starts with Add project, its projects and Show finances for all
+// projects under this client, then the selected project's panel. `root` is the client portal the
+// selected project is in (or the portal itself), `projects` its projects as listed, `counted` the
+// ones its finances add up, from `projectBilling` (their quotes and invoices) and `projectBooks`
+// (books.js jobTotals). `selectedLogin` is the client portal's login in plain text, when on file.
+export function adminDashboardPage({ clients, selected, root = selected, projects = selected ? [selected] : [], counted = projects, projectBilling = [], projectBooks = new Map(), billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, newProject = null, projectError = "", expenses = [], payers = [], paidTo = [], selectedLogin = null, photos = [], today = todayInMichigan() }) {
+  // Client portals in use; projects are listed on their client portal's page, and anything in the
+  // archive under Archive in the footer.
+  const portals = clients.filter((client) => !client.parentSlug && !client.archivedAt);
   const groupSizes = new Map();
-  for (const client of clients) {
+  for (const client of portals) {
     if (client.loginGroup) groupSizes.set(client.loginGroup, (groupSizes.get(client.loginGroup) || 0) + 1);
   }
-  const clientLinks = clients.map((client) => {
-    const current = selected && client.slug === selected.slug;
+  const clientLinks = portals.map((client) => {
+    const current = root && client.slug === root.slug;
     const emails = clientEmails(client);
     const adminOnly = !client.passwordHash && !client.managedBySecret;
     const shared = Boolean(client.loginGroup) && groupSizes.get(client.loginGroup) > 1;
-    const detail = [adminOnly ? "Admin only" : "", shared ? "Shared login" : "", client.readOnly ? "Read only" : "", emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].filter(Boolean).join(" · ");
-    return `<li><a class="admin-client-link${current ? " is-current" : ""}" href="/clients/admin?client=${encodeURIComponent(client.slug)}"${current ? ' aria-current="page"' : ""}>
+    const inside = clients.filter((entry) => entry.parentSlug === client.slug && !entry.archivedAt).length;
+    const detail = [adminOnly ? "Admin only" : "", shared ? "Shared login" : "", client.readOnly ? "Read only" : "", inside ? `${inside + 1} projects` : "", emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].filter(Boolean).join(" · ");
+    return `<li><a class="admin-client-link${current ? " is-current" : ""}" href="/clients/admin?client=${encodeURIComponent(client.slug)}"${current ? ' aria-current="page"' : ""}${portalMenuData(client)}>
         <strong>${escapeHtml(client.name)}</strong><small>${detail}</small></a></li>`;
   }).join("");
+  const archive = archiveContents(clients);
 
   const selectedSection = selected
     ? (() => {
       const base = `/clients/admin/clients/${encodeURIComponent(selected.slug)}`;
+      const loginRoot = root || selected;
+      const shared = projects.filter((project) => !project.archivedAt).length > 1;
       return `<section class="admin-panel" aria-labelledby="selected-heading">
+        ${archivedNote(selected, root)}
+        ${clientProjects({ root: loginRoot, projects, selected, counted, projectBilling, projectBooks, newProject, projectError })}
         <div class="admin-panel-head">
           <div class="admin-subhead admin-title-row">
             <h2 id="selected-heading">${escapeHtml(selected.name)}</h2>
@@ -1163,18 +1369,19 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
               <input id="client-site" name="siteAddress" type="text" maxlength="200" value="${escapeAttribute(selected.siteAddress || "")}" placeholder="1234 Lakeshore Dr, Muskegon, MI 49441">
             </label>
           </form>
-          ${selected.managedBySecret ? `<div class="admin-inline-form admin-save-row">
+          ${loginRoot.managedBySecret ? `<div class="admin-inline-form admin-save-row">
             <span class="icon-save icon-save-off" title="Set in Render" aria-hidden="true">${SAVE_ICON}</span>
             <label for="client-login">Client login
               <input id="client-login" type="text" readonly value="${escapeAttribute(selectedLogin || "")}">
+              ${shared ? `<small class="admin-field-hint">${escapeHtml(loginRoot.name)}'s login, for every project in it.</small>` : ""}
             </label>
           </div>` : `<form class="admin-inline-form admin-save-row" action="${base}/login" method="post">
             <button class="icon-save" type="submit" aria-label="Save client login" title="Save">${SAVE_ICON}</button>
             <label for="client-login">Client login
-              <input id="client-login" name="login" type="text" minlength="10" maxlength="120" autocomplete="off" required value="${escapeAttribute(selectedLogin || "")}" placeholder="${selected.passwordHash ? "Set, but not on file. Type it again to show it here." : "None, so only you can see this project. Type one to share it."}">
+              <input id="client-login" name="login" type="text" minlength="10" maxlength="120" autocomplete="off" required value="${escapeAttribute(selectedLogin || "")}" placeholder="${loginRoot.passwordHash ? "Set, but not on file. Type it again to show it here." : "None, so only you can see this project. Type one to share it."}">
+              ${shared ? `<small class="admin-field-hint">${escapeHtml(loginRoot.name)}'s login, for every project in it.</small>` : ""}
             </label>
           </form>`}
-          ${loginGroupForm(selected, clients, base)}
         </div>
 
         <div class="admin-section-head">
@@ -1190,9 +1397,12 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
         ${billingRows(billing, { basePath: `${base}/billing`, viewer: "admin" })}
 
         <div class="admin-subhead">
-          <h3>Expenses</h3>
+          <h3>Finances</h3>
           <a class="portal-secondary-link" href="/clients/admin/books/jobs/${encodeURIComponent(selected.slug)}">Job book</a>
         </div>
+        ${grossFigures(projectBooks.get(selected.slug) || { income: 0, expenses: 0, profit: 0 })}
+
+        <h3>Expenses</h3>
         ${expenseRows(expenses, { base })}
 
         <h3>Documents</h3>
@@ -1224,6 +1434,7 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           </label>
           <button class="portal-logout-button" type="submit" data-autosubmit-button>Save</button>
         </form>
+        ${archiveOrMove(selected, portals)}
         ${statusDialogs(selected, readiness)}
         ${addPaymentDialog({ client: selected, billing, readiness })}
         ${addExpenseDialog({ action: `${base}/expenses`, payers, today, paidTo })}
@@ -1267,8 +1478,59 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
         </aside>
         ${selectedSection}
       </div>
+      ${portalMenu(portals)}
       ${recipientList(recipients)}
-    </div>`, { authenticated, admin: true, bodyClass: "portal-page portal-admin", title: "Admin panel", scripts: [BILLING_SCRIPT] });
+    </div>`, {
+    authenticated, admin: true, bodyClass: "portal-page portal-admin", title: "Admin panel", scripts: [BILLING_SCRIPT],
+    footerLinks: [`<a class="portal-footer-archive" href="/clients/admin/archive">Archive${archive.count ? ` (${archive.count})` : ""}</a>`]
+  });
+}
+
+// Archive (in the admin panel's footer): client portals sent to archive, with the projects that
+// went with them, and projects sent there on their own. Each one opens on the admin panel to look
+// at, and Restore brings it back to the client portal screen and the books.
+export function adminArchivePage({ clients, notice = null }) {
+  const { portals, projects, bySlug } = archiveContents(clients);
+  const restore = (client) => `<form action="/clients/admin/clients/${encodeURIComponent(client.slug)}/restore" method="post"><button class="button button-solid button-small" type="submit">Restore</button></form>`;
+  const open = (client) => `<a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a>`;
+  const portalRows = portals.map((portal) => {
+    const inside = clients.filter((client) => client.parentSlug === portal.slug);
+    const along = inside.filter((client) => client.archivedWith === portal.slug).map((client) => client.name);
+    const before = inside.filter((client) => client.archivedAt && client.archivedWith !== portal.slug).map((client) => client.name);
+    const notes = [along.length ? `With its projects ${along.join(", ")}` : "", before.length ? `Archived before it, on their own: ${before.join(", ")}` : ""].filter(Boolean);
+    return `<tr>
+          <td>${open(portal)}${notes.map((note) => `<small>${escapeHtml(note)}</small>`).join("")}</td>
+          <td>${dateText(portal.archivedAt)}</td>
+          <td class="portal-actions">${restore(portal)}</td>
+        </tr>`;
+  }).join("");
+  const projectRows = projects.map((project) => `<tr>
+          <td>${open(project)}<small>In ${escapeHtml(bySlug.get(project.parentSlug)?.name || "a client portal no longer here")}</small></td>
+          <td>${dateText(project.archivedAt)}</td>
+          <td class="portal-actions">${restore(project)}</td>
+        </tr>`).join("");
+  const table = (rows, empty) => rows
+    ? `<table class="portal-table admin-archive-table">
+        <thead><tr><th scope="col">Name</th><th scope="col">Sent to archive</th><th scope="col"><span class="visually-hidden">Restore</span></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`
+    : `<p class="portal-empty">${empty}</p>`;
+  return adminShell(`<div class="site-width portal-shell">
+      <section class="admin-intro">
+        <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin">Admin panel</a></p>
+        <h1 class="portal-heading">Archive.</h1>
+        <p class="portal-lead">Client portals and projects sent to archive are left out of the books and the client portal screen, and their clients cannot open them. Restore brings one back, with everything it had.</p>
+        ${noticeMarkup(notice)}
+      </section>
+      <section class="books-section admin-archive" aria-labelledby="archive-portals-heading">
+        <div class="books-section-head"><h2 id="archive-portals-heading">Client portals</h2></div>
+        ${table(portalRows, "No client portals are in the archive.")}
+      </section>
+      <section class="books-section admin-archive" aria-labelledby="archive-projects-heading">
+        <div class="books-section-head"><h2 id="archive-projects-heading">Projects</h2></div>
+        ${table(projectRows, "No projects are in the archive on their own.")}
+      </section>
+    </div>`, { title: "Archive" });
 }
 
 function lineRow(line, index) {
@@ -1507,7 +1769,7 @@ function otherProjectCard({ base, client, item, projects }) {
             <label for="other-project">Project
               <select id="other-project" name="to" required>
                 <option value="" selected disabled>Choose a project</option>
-                ${others.map((entry) => `<option value="${escapeAttribute(entry.slug)}">${escapeHtml(entry.name)}</option>`).join("")}
+                ${others.map((entry) => `<option value="${escapeAttribute(entry.slug)}">${escapeHtml(entry.label || entry.name)}</option>`).join("")}
               </select>
             </label>
             <div class="admin-manage">
@@ -1714,8 +1976,11 @@ function jobsLedger(report, names, period) {
         </table>`;
 }
 
+// `clients` are every client portal and project (for names); those in the archive are out of the
+// books, so the filter and Add expense leave them out.
 export function adminBooksPage({ report, check, log = null, clients, today, notice = null, overheadExpenses = [], payers = [], paidTo = [] }) {
-  const names = new Map(clients.map((client) => [client.slug, client.name]));
+  const names = new Map(clients.map((client) => [client.slug, client.label || client.name]));
+  const inUse = clients.filter((client) => !client.archivedAt);
   const query = (extra = {}) => {
     const params = new URLSearchParams();
     const values = { client: report.slug, from: report.from, to: report.to, ...extra };
@@ -1779,7 +2044,7 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
           <div><dt>Overhead</dt><dd>${money(overheadTotal)}</dd></div>
           <div class="billing-totals-due"><dt>Net profit</dt><dd${net < 0 ? ' class="books-loss"' : ""}>${money(net)}</dd></div>
         </dl>`;
-  const jobOptions = clients.map((client) => ({ slug: client.slug, name: client.name }));
+  const jobOptions = inUse.map((client) => ({ slug: client.slug, name: client.label || client.name }));
 
   const ledgerRows = report.entries.slice().reverse().map((entry) => {
     const text = entry.itemExists ? [entry.itemLabel, ...entry.memo.split(" · ").slice(1)].join(" · ") : entry.memo;
@@ -1836,7 +2101,7 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
         <label for="books-client">Client portal
           <select id="books-client" name="client">
             <option value="">All client portals</option>
-            ${clients.map((client) => `<option value="${escapeAttribute(client.slug)}"${client.slug === report.slug ? " selected" : ""}>${escapeHtml(client.name)}</option>`).join("")}
+            ${inUse.map((client) => `<option value="${escapeAttribute(client.slug)}"${client.slug === report.slug ? " selected" : ""}>${escapeHtml(client.label || client.name)}</option>`).join("")}
           </select>
         </label>
         <label for="books-from">From
@@ -1949,7 +2214,8 @@ export function adminJobBookPage({ client, book, today }) {
   return adminShell(`<div class="site-width portal-shell books">
       <section class="admin-intro">
         <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin/books">Books</a></p>
-        <h1 class="portal-heading portal-heading-sm">${escapeHtml(client.name)}</h1>
+        <h1 class="portal-heading portal-heading-sm">${escapeHtml(client.label || client.name)}</h1>
+        ${client.archivedAt ? '<p class="portal-lead">In the archive, so it is left out of the Books page.</p>' : ""}
       </section>
       <nav class="books-periods" aria-label="Periods">${periods}</nav>
       ${grossFigures(book.totals)}
@@ -1967,7 +2233,7 @@ export function adminJobBookPage({ client, book, today }) {
         </div>
         ${expenses}
       </section>
-    </div>`, { title: `${client.name} · Job book` });
+    </div>`, { title: `${client.label || client.name} · Job book` });
 }
 
 // Whether the activity log is as it was written (books.js verifyActivityLog). Invoices and the

@@ -486,10 +486,22 @@ export async function record(store, event) {
   }
 }
 
+// ---------- Client portals in the archive ----------
+
+// A client portal or project sent to archive is left out of the books entirely: the Books page's
+// figures, jobs, ledger, account balances and balance check skip every journal entry tagged with
+// it. The entries themselves stay, so restoring it brings it all back. The activity log is not
+// filtered; it is the permanent record of what was done.
+async function archivedSlugs(db) {
+  const rows = await db("mhb_clients").whereRaw("data->>'archivedAt' IS NOT NULL").select("slug").timeout(QUERY_TIMEOUT_MS);
+  return new Set(rows.map((row) => row.slug));
+}
+
 // ---------- Checking and correcting ----------
 
 // Whether the books balance: every entry's debits equal its credits, and each invoice's journal
-// holds what its state calls for (a deleted invoice's: no receivable or sales left).
+// holds what its state calls for (a deleted invoice's: no receivable or sales left). Anything of a
+// client portal in the archive is left out.
 export async function checkBooks(store) {
   await ensureBooksOpened(store);
   const items = (await store.db("mhb_billing").where({ kind: "invoice" }).select("data").timeout(QUERY_TIMEOUT_MS)).map(data);
@@ -535,7 +547,9 @@ export async function checkBooks(store) {
     const off = offParts(held, deletedParts(held));
     if (off.length) problems.push({ itemId: row.item_id, number: row.item_number, clientSlug: row.client_slug, label: `Invoice ${row.item_number} (deleted)`, parts: [...new Set(off.map(partKind))], deleted: true });
   }
-  return { balanced: debits === credits && problems.length === 0, debits, credits, problems };
+  const archived = await archivedSlugs(store.db);
+  const kept = problems.filter((problem) => !archived.has(problem.clientSlug));
+  return { balanced: debits === credits && kept.length === 0, debits, credits, problems: kept };
 }
 
 async function expenseRecords(db) {
@@ -589,10 +603,11 @@ export async function correctBooks(store, { ip = null } = {}) {
 // ---------- Reading ----------
 
 // The journal and activity for the Books page and its downloads, optionally for one client
-// portal (`slug`) and a date range (`from`, `to`, inclusive, YYYY-MM-DD).
+// portal (`slug`) and a date range (`from`, `to`, inclusive, YYYY-MM-DD). Client portals in the
+// archive are left out of everything but the activity log.
 export async function booksReport(store, { slug = "", from = "", to = "" } = {}) {
   await ensureBooksOpened(store);
-  const [accountRows, entryRows, lineRows, itemRows, activityRows] = await Promise.all([
+  const [accountRows, entryRows, lineRows, itemRows, activityRows, archived] = await Promise.all([
     store.db("mhb_accounts").orderBy([{ column: "sort" }, { column: "code" }]).select("code", "name", "type").timeout(QUERY_TIMEOUT_MS),
     store.db("mhb_journal_entries").select("id", store.db.raw("to_char(entry_date, 'YYYY-MM-DD') AS entry_date"), "recorded_at", "kind", "part", "memo", "client_slug", "item_id", "item_number", "source", "external_id").orderBy([{ column: "entry_date" }, { column: "id" }]).timeout(QUERY_TIMEOUT_MS),
     store.db("mhb_journal_lines").select("entry_id", "account", "debit_cents", "credit_cents", "client_slug").orderBy("id").timeout(QUERY_TIMEOUT_MS),
@@ -601,12 +616,13 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
       const query = store.db("mhb_activity").orderBy([{ column: "at", order: "desc" }, { column: "id", order: "desc" }]).limit(5000);
       if (slug) query.where({ client_slug: slug });
       return query.select("id", "at", "actor", "action", "client_slug", "item_id", "item_kind", "item_number", "amount_cents", "summary", "ip", "chain_seq", "chain_hash").timeout(QUERY_TIMEOUT_MS);
-    })()
+    })(),
+    archivedSlugs(store.db)
   ]);
   const items = new Map(itemRows.map((row) => [row.id, data(row)]));
   const linesByEntry = new Map();
   for (const line of lineRows) {
-    if (slug && line.client_slug !== slug) continue;
+    if ((slug && line.client_slug !== slug) || archived.has(line.client_slug)) continue;
     const entryId = Number(line.entry_id);
     if (!linesByEntry.has(entryId)) linesByEntry.set(entryId, []);
     linesByEntry.get(entryId).push({ account: line.account, debit: Number(line.debit_cents), credit: Number(line.credit_cents) });
@@ -680,7 +696,7 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
   const overhead = new Map();
   let otherIncome = 0;
   for (const line of lineRows) {
-    if (slug && line.client_slug !== slug) continue;
+    if ((slug && line.client_slug !== slug) || archived.has(line.client_slug)) continue;
     const row = entriesById.get(Number(line.entry_id));
     const day = row?.entry_date;
     if (!day || (from && day < from) || (to && day > to)) continue;
@@ -824,6 +840,28 @@ export async function jobBook(store, slug, { from = "", to = "" } = {}) {
     categories: [...byCategory].map(([name, amount]) => ({ name, amount })).filter((entry) => entry.amount).sort((left, right) => right.amount - left.amount),
     totals: { ...totals, profit: totals.income - totals.expenses }
   };
+}
+
+// Several jobs' gross income, gross expenses and gross profit over all time, as each one's job
+// book totals them: for a client portal's projects side by side. Map of slug to totals.
+export async function jobTotals(store, slugs) {
+  const totals = new Map(slugs.map((slug) => [slug, { income: 0, expenses: 0, profit: 0 }]));
+  if (!slugs.length) return totals;
+  await ensureBooksOpened(store);
+  const [accountRows, lineRows] = await Promise.all([
+    store.db("mhb_accounts").select("code", "type").timeout(QUERY_TIMEOUT_MS),
+    store.db("mhb_journal_lines").whereIn("client_slug", slugs).select("client_slug", "account", "debit_cents", "credit_cents").timeout(QUERY_TIMEOUT_MS)
+  ]);
+  const types = new Map(accountRows.map((account) => [account.code, account.type]));
+  for (const line of lineRows) {
+    const total = totals.get(line.client_slug);
+    const type = types.get(line.account);
+    const amount = Number(line.debit_cents) - Number(line.credit_cents);
+    if (type === "income") total.income -= amount;
+    else if (type === "expense" && !OVERHEAD_ONLY.has(line.account)) total.expenses += amount;
+  }
+  for (const total of totals.values()) total.profit = total.income - total.expenses;
+  return totals;
 }
 
 // ---------- Downloads ----------
