@@ -76,8 +76,10 @@ function payableExpenses(expenses, { amountCents, ledger }) {
 }
 
 function expenseName(expense, clients) {
+  const what = expense.vendor || expense.description;
+  if (!expense.clientSlug) return `Overhead expense · ${what}`;
   const job = clients.find((client) => client.slug === expense.clientSlug)?.name || expense.clientSlug;
-  return `Expense on ${job} · ${expense.vendor}`;
+  return `Expense on ${job} · ${what}`;
 }
 
 // What `value` files the transaction to: { target, account, clientSlug, laborId, expenseId, name },

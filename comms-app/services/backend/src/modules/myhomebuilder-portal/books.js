@@ -50,6 +50,7 @@
 import { billingLabel, issuedDate, todayInMichigan } from "./billing.js";
 import { money } from "./format.js";
 import { LABOR_PAYMENT_METHODS, hoursText } from "./labor.js";
+import { categoryName } from "./expenses.js";
 
 const RECEIVABLE = "1100";
 const STRIPE = "1200";
@@ -66,6 +67,8 @@ const WAGES = "2300";
 const JOB_LABOR = "5000";
 const SUBCONTRACTORS = "5100";
 const SHOP_LABOR = "6450";
+// Costs of collecting money, never of a job: overhead even when the invoice belongs to one.
+const OVERHEAD_ONLY = new Set([STRIPE_FEES, DISPUTE_LOSSES]);
 const QUERY_TIMEOUT_MS = 5000;
 
 // A part's kind: every "refund:<id>" part is a refund, every "installment:<id>" a payment toward
@@ -666,24 +669,41 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
     running += entry.receivable;
     entry.owed = running;
   }
-  // Each job's (client portal's) sales and costs in the period, for the job profit table.
-  const entryDates = new Map(entryRows.map((row) => [Number(row.id), row.entry_date]));
+  // Each job's (client portal's) gross income and gross expenses in the period, and the overhead
+  // no job carries (by category), for the jobs ledger. Income is every income account's lines
+  // tagged with the job; expenses every expense account's, except costs of collecting money.
+  const types = new Map(accountRows.map((account) => [account.code, account.type]));
+  const accountNames = new Map(accountRows.map((account) => [account.code, account.name]));
+  const entriesById = new Map(entryRows.map((row) => [Number(row.id), row]));
+  const handExpenses = new Map((await expenseRecords(store.db)).map((expense) => [expense.id, expense]));
   const jobs = new Map();
+  const overhead = new Map();
+  let otherIncome = 0;
   for (const line of lineRows) {
-    if (!line.client_slug || line.client_slug.startsWith("crew:") || (slug && line.client_slug !== slug)) continue;
-    const day = entryDates.get(Number(line.entry_id));
+    if (slug && line.client_slug !== slug) continue;
+    const row = entriesById.get(Number(line.entry_id));
+    const day = row?.entry_date;
     if (!day || (from && day < from) || (to && day > to)) continue;
-    const job = jobs.get(line.client_slug) || { slug: line.client_slug, invoiced: 0, labor: 0, subcontractors: 0, otherCosts: 0 };
+    const type = types.get(line.account);
+    if (type !== "income" && type !== "expense") continue;
     const amount = Number(line.debit_cents) - Number(line.credit_cents);
-    if (line.account === SALES || line.account === REFUNDS) job.invoiced -= amount;
-    else if (line.account === JOB_LABOR) job.labor += amount;
-    else if (line.account === SUBCONTRACTORS) job.subcontractors += amount;
-    else if (String(line.account).startsWith("5")) job.otherCosts += amount;
-    jobs.set(line.client_slug, job);
+    const jobSlug = line.client_slug && !line.client_slug.startsWith("crew:") ? line.client_slug : null;
+    const job = jobSlug ? jobs.get(jobSlug) || { slug: jobSlug, income: 0, expenses: 0 } : null;
+    if (type === "income") {
+      if (job) job.income -= amount;
+      else otherIncome -= amount;
+    } else if (job && !OVERHEAD_ONLY.has(line.account)) {
+      job.expenses += amount;
+    } else {
+      const name = lineCategory(row, line.account, { handExpenses, accountNames });
+      overhead.set(name, (overhead.get(name) || 0) + amount);
+    }
+    if (job) jobs.set(jobSlug, job);
   }
   const jobList = [...jobs.values()]
-    .map((job) => ({ ...job, costs: job.labor + job.subcontractors + job.otherCosts, profit: job.invoiced - job.labor - job.subcontractors - job.otherCosts }))
-    .filter((job) => job.invoiced || job.costs);
+    .map((job) => ({ ...job, profit: job.income - job.expenses }))
+    .filter((job) => job.income || job.expenses);
+  const overheadList = [...overhead].map(([name, amount]) => ({ name, amount })).filter((entry) => entry.amount).sort((left, right) => right.amount - left.amount || left.name.localeCompare(right.name));
 
   const accounts = accountRows.map((account) => ({ ...account, ...balances.get(account.code) }));
   const debits = accounts.reduce((sum, account) => sum + account.debit, 0);
@@ -709,6 +729,8 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
     },
     items,
     jobs: jobList,
+    overhead: overheadList,
+    otherIncome,
     activity: activityRows.filter((row) => {
       const day = calendarDate(row.at instanceof Date ? row.at.toISOString() : row.at);
       return (!from || day >= from) && (!to || day <= to);
@@ -727,6 +749,80 @@ export async function booksReport(store, { slug = "", from = "", to = "" } = {})
       seq: Number(row.chain_seq),
       seal: row.chain_hash
     }))
+  };
+}
+
+// A line's category: an expense added by hand keeps the category it was given; anything else is
+// its account's name.
+function lineCategory(row, account, { handExpenses, accountNames }) {
+  const expense = row?.item_id ? handExpenses.get(row.item_id) : null;
+  return expense && expense.category === account ? categoryName(expense) : accountNames.get(account) || account;
+}
+
+// One job's book: what it earned and what it cost, over a period (all time without dates). Each
+// invoice, expense, labor entry or bank transaction is one row, its edits and reversals netted, so
+// the book reads as it stands; rows that net to nothing are left out.
+//   income:   [{ date, what, itemId, amount }]   expenses: [{ date, what, paidTo, category, amount }]
+//   categories: [{ name, amount }]   totals: { income, expenses, profit }
+export async function jobBook(store, slug, { from = "", to = "" } = {}) {
+  await ensureBooksOpened(store);
+  const [accountRows, result, itemRows, expenses] = await Promise.all([
+    store.db("mhb_accounts").select("code", "name", "type").timeout(QUERY_TIMEOUT_MS),
+    store.db.raw(
+      `SELECT e.id, to_char(e.entry_date, 'YYYY-MM-DD') AS entry_date, e.kind, e.memo, e.item_id, e.item_number, l.account, l.debit_cents, l.credit_cents
+       FROM mhb_journal_entries e JOIN mhb_journal_lines l ON l.entry_id = e.id
+       WHERE l.client_slug = ? ORDER BY e.entry_date, e.id, l.id`,
+      [slug]
+    ).timeout(QUERY_TIMEOUT_MS),
+    store.db("mhb_billing").where({ client_slug: slug }).select("id", "data").timeout(QUERY_TIMEOUT_MS),
+    expenseRecords(store.db)
+  ]);
+  const types = new Map(accountRows.map((account) => [account.code, account.type]));
+  const accountNames = new Map(accountRows.map((account) => [account.code, account.name]));
+  const items = new Map(itemRows.map((row) => [row.id, data(row)]));
+  const handExpenses = new Map(expenses.map((expense) => [expense.id, expense]));
+  const groups = new Map();
+  for (const row of result.rows) {
+    if ((from && row.entry_date < from) || (to && row.entry_date > to)) continue;
+    const type = types.get(row.account);
+    if (type !== "income" && !(type === "expense" && !OVERHEAD_ONLY.has(row.account))) continue;
+    const key = `${row.item_id || `entry:${row.id}`}|${row.account}`;
+    const group = groups.get(key) || { type, account: row.account, itemId: row.item_id, amount: 0, date: row.entry_date, memo: row.memo, row };
+    const debit = Number(row.debit_cents);
+    const credit = Number(row.credit_cents);
+    group.amount += type === "income" ? credit - debit : debit - credit;
+    // A row is dated and named by its latest posting, not by a reversal of an older one.
+    if (row.kind !== "reversal") Object.assign(group, { date: row.entry_date, memo: row.memo, row });
+    groups.set(key, group);
+  }
+  const income = [];
+  const costs = [];
+  for (const group of groups.values()) {
+    if (!group.amount) continue;
+    const item = group.itemId ? items.get(group.itemId) : null;
+    const expense = group.itemId ? handExpenses.get(group.itemId) : null;
+    if (group.type === "income") {
+      income.push({ date: group.date, what: item ? `${billingLabel(item)} · ${item.title}` : group.memo, itemId: item ? item.id : null, amount: group.amount });
+      continue;
+    }
+    costs.push({
+      date: group.date,
+      what: expense ? expense.description || expense.vendor : group.memo,
+      paidTo: expense && expense.description ? expense.vendor : "",
+      category: lineCategory(group.row, group.account, { handExpenses, accountNames }),
+      amount: group.amount
+    });
+  }
+  const newestFirst = (left, right) => right.date.localeCompare(left.date);
+  income.sort(newestFirst);
+  costs.sort(newestFirst);
+  const byCategory = new Map();
+  for (const cost of costs) byCategory.set(cost.category, (byCategory.get(cost.category) || 0) + cost.amount);
+  const totals = { income: income.reduce((sum, row) => sum + row.amount, 0), expenses: costs.reduce((sum, row) => sum + row.amount, 0) };
+  return {
+    slug, from, to, income, expenses: costs,
+    categories: [...byCategory].map(([name, amount]) => ({ name, amount })).filter((entry) => entry.amount).sort((left, right) => right.amount - left.amount),
+    totals: { ...totals, profit: totals.income - totals.expenses }
   };
 }
 

@@ -2,7 +2,7 @@ import { balanceDue, billingLabel, billingLineItems, installmentsTotal, isEditab
 import { addressesText, clientEmails, MAX_RECIPIENTS } from "./email.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 import { DOCUMENT_SECTIONS, awaitingSignature, groupBySection, sectionName, sectionOf } from "./documents.js";
-import { EXPENSE_CATEGORIES, categoryName } from "./expenses.js";
+import { JOB_CATEGORIES, OVERHEAD_CATEGORIES, categoryName } from "./expenses.js";
 
 export { escapeHtml, money };
 export const escapeAttribute = escapeHtml;
@@ -254,7 +254,7 @@ function deleteNote(item) {
   return `${item.status === "paid" || installmentsTotal(item) > 0 ? "Its payment records are deleted with it. " : ""}Its link stops working, and later invoices move up a number. This can't be undone.`;
 }
 
-function billingRows(items, { basePath, viewer }) {
+function billingRows(items, { basePath, viewer, readOnly = false }) {
   if (!items.length) {
     return `<p class="portal-empty">${viewer === "client" ? "No quotes or invoices have been posted yet." : "No quotes or invoices for this client yet."}</p>`;
   }
@@ -268,7 +268,7 @@ function billingRows(items, { basePath, viewer }) {
       ? `<div class="billing-row-actions">
             <a class="billing-trash" href="${href}/delete" data-delete-menu data-label="${escapeAttribute(name)}" data-kind="${item.kind}" data-note="${escapeAttribute(deleteNote(item))}"${item.status === "processing" ? " data-blocked" : ""} aria-label="Delete ${escapeAttribute(billingLabel(item))}" title="Delete">${TRASH_ICON}</a>
           </div>`
-      : `<a class="portal-secondary-link" href="${href}">${item.kind === "invoice" && item.status === "open" ? "View and pay" : "View"}</a>`;
+      : `<a class="portal-secondary-link" href="${href}">${item.kind === "invoice" && item.status === "open" && !readOnly ? "View and pay" : "View"}</a>`;
     const note = admin && item.invoiceNumber ? `<small>Invoiced as Invoice ${escapeHtml(item.invoiceNumber)}</small>` : "";
     const dueLine = item.dueDate && !(admin && item.kind === "invoice") ? `<small>${item.kind === "invoice" ? "Due" : "Valid until"} ${dateText(item.dueDate)}</small>` : "";
     const badge = `<span class="portal-status portal-status-${tone}">${label}</span>`;
@@ -293,7 +293,7 @@ function billingRows(items, { basePath, viewer }) {
   return `<table class="portal-table">
         <thead><tr><th scope="col">Number</th><th scope="col">Item</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Action</span></th></tr></thead>
         <tbody>${rows.join("")}</tbody>
-      </table>${viewer === "admin" ? billingTotals(items) : ""}`;
+      </table>${viewer === "admin" || readOnly ? billingTotals(items) : ""}`;
 }
 
 // Invoiced, paid and outstanding across a project's invoices; voided invoices and quotes are left
@@ -351,7 +351,37 @@ function noticeMarkup(notice) {
   return `<p class="${tone}" role="status">${escapeHtml(notice.text)}</p>`;
 }
 
-export function portalHomePage({ client, billing, documents, storeReady, admin = false, notice = null }) {
+// A read-only client sees the whole job's money (from books.js jobBook): its gross income,
+// expenses and profit, and each expense.
+function financialsSection(book) {
+  if (!book) return "";
+  const rows = book.expenses.map((row) => `<tr>
+          <td>${dateText(row.date)}</td>
+          <td>${escapeHtml(row.what)}${row.paidTo ? `<small>${escapeHtml(row.paidTo)}</small>` : ""}</td>
+          <td>${escapeHtml(row.category)}</td>
+          <td>${money(row.amount)}</td>
+        </tr>`).join("");
+  return `<section class="portal-section" aria-labelledby="financials-heading">
+        <h2 id="financials-heading">Financials</h2>
+        ${grossFigures(book.totals)}
+        ${rows ? `<table class="portal-table">
+          <thead><tr><th scope="col">Date</th><th scope="col">Expense</th><th scope="col">Category</th><th scope="col">Amount</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>` : '<p class="portal-empty">No expenses yet.</p>'}
+      </section>`;
+}
+
+function grossFigures(totals) {
+  return `<dl class="billing-totals">
+        <div><dt>Gross income</dt><dd>${money(totals.income)}</dd></div>
+        <div><dt>Gross expenses</dt><dd>${money(totals.expenses)}</dd></div>
+        <div class="billing-totals-due"><dt>Gross profit</dt><dd${totals.profit < 0 ? ' class="books-loss"' : ""}>${money(totals.profit)}</dd></div>
+      </dl>`;
+}
+
+export function portalHomePage({ client, billing, documents, storeReady, admin = false, notice = null, book = null }) {
+  // Display all data to client portal (read only): every figure, and nothing to do or download.
+  const readOnly = Boolean(client.readOnly);
   const projectSection = client.projectPath
     ? `<section class="portal-section" aria-labelledby="projects-heading">
         <h2 id="projects-heading">Project resources</h2>
@@ -378,20 +408,21 @@ export function portalHomePage({ client, billing, documents, storeReady, admin =
       <section>
         <p class="portal-kicker">Client portal</p>
         <h1 class="portal-heading">${escapeHtml(client.name)}</h1>
-        <p class="portal-lead">Review project resources, pay invoices securely, and upload or sign documents in one place.</p>
-        ${storeReady ? '<p class="portal-lead-actions"><a class="button button-outline" href="#upload-document">Upload document</a></p>' : ""}
+        <p class="portal-lead">${readOnly ? "Everything on this project, read only." : "Review project resources, pay invoices securely, and upload or sign documents in one place."}</p>
+        ${storeReady && !readOnly ? '<p class="portal-lead-actions"><a class="button button-outline" href="#upload-document">Upload document</a></p>' : ""}
         ${noticeMarkup(notice)}
         ${setupNote}
       </section>
       ${projectSection}
       <section class="portal-section" aria-labelledby="billing-heading">
         <h2 id="billing-heading">Quotes and invoices</h2>
-        ${billingRows(billing, { basePath: "/clients/billing", viewer: "client" })}
+        ${billingRows(billing, { basePath: "/clients/billing", viewer: "client", readOnly })}
       </section>
+      ${readOnly ? financialsSection(book) : ""}
       <section class="portal-section" aria-labelledby="documents-heading">
         <h2 id="documents-heading">Documents</h2>
-        ${documentSections(documents, { basePath: "/clients/documents", viewer: "client" })}
-        ${storeReady ? `<form class="portal-form portal-upload" id="upload-document" action="/clients/documents/upload" method="post" enctype="multipart/form-data">
+        ${readOnly ? '<p class="portal-empty">Document view disabled for completed projects</p>' : documentSections(documents, { basePath: "/clients/documents", viewer: "client" })}
+        ${storeReady && !readOnly ? `<form class="portal-form portal-upload" id="upload-document" action="/clients/documents/upload" method="post" enctype="multipart/form-data">
           <h3>Upload document</h3>
           <p>Share plans, photos, permits or signed paperwork with My Home Builder. PDF, images and common office files up to 20 MB.</p>
           <label for="client-upload">Choose a file
@@ -534,7 +565,9 @@ function acceptForm(action, { requireName }) {
 
 export function billingDetailPage({ client, item, stripeReady, admin = false, notice = null }) {
   let action = statusPanel(item);
-  if (item.kind === "invoice" && item.status === "open") {
+  if (client.readOnly) {
+    action += paidSoFar(item);
+  } else if (item.kind === "invoice" && item.status === "open") {
     action = stripeReady && isPayable(item)
       ? `${paidSoFar(item)}<form action="/clients/billing/${encodeURIComponent(item.id)}/pay" method="post">
           <button class="button button-solid" type="submit">Pay ${money(balanceDue(item), item.currency)} securely</button>
@@ -768,16 +801,18 @@ function statusDialogs(client, readiness) {
         </dialog>`;
 }
 
-// A job's expenses, newest first, with their total. Clients never see them.
-function expenseRows(expenses, { base }) {
-  if (!expenses.length) return '<p class="portal-empty">No expenses for this job yet. Add expense records a cost of it, such as materials, a rental or a permit.</p>';
+// Expenses, newest first, with their total: a job's on its panel, overhead on the Books page.
+// Clients see them only on a project shown read only.
+function expenseRows(expenses, { base, totalLabel = "Job expenses" }) {
+  if (!expenses.length) return '<p class="portal-empty">No expenses yet.</p>';
   const rows = expenses.map((expense) => {
     const path = `${base}/expenses/${encodeURIComponent(expense.id)}`;
-    const name = `${expense.vendor} · ${money(expense.amountCents)}`;
+    const what = expense.description || expense.vendor;
+    const name = `${what} · ${money(expense.amountCents)}`;
     return `<tr>
           <td>${dateText(expense.spentOn)}</td>
-          <td>${escapeHtml(expense.vendor)}${expense.description ? `<small>${escapeHtml(expense.description)}</small>` : ""}</td>
-          <td>${escapeHtml(categoryName(expense.category))}</td>
+          <td>${escapeHtml(what)}${expense.description && expense.vendor ? `<small>${escapeHtml(expense.vendor)}</small>` : ""}</td>
+          <td>${escapeHtml(categoryName(expense))}</td>
           <td>${escapeHtml(expense.paidWith?.label || "")}${expense.bankTransactionId ? "<small>Matched to the bank</small>" : ""}</td>
           <td>${money(expense.amountCents)}</td>
           <td><div class="billing-row-actions">
@@ -790,60 +825,58 @@ function expenseRows(expenses, { base }) {
   }).join("");
   const total = expenses.reduce((sum, expense) => sum + expense.amountCents, 0);
   return `<table class="portal-table">
-        <thead><tr><th scope="col">Date</th><th scope="col">Expense</th><th scope="col">Kind</th><th scope="col">Paid with</th><th scope="col">Amount</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+        <thead><tr><th scope="col">Date</th><th scope="col">Expense</th><th scope="col">Category</th><th scope="col">Paid with</th><th scope="col">Amount</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <dl class="billing-totals">
-        <div class="billing-totals-due"><dt>Job expenses</dt><dd>${money(total)}</dd></div>
+        <div class="billing-totals-due"><dt>${escapeHtml(totalLabel)}</dt><dd>${money(total)}</dd></div>
       </dl>`;
 }
 
-// Add expense: the form, as a popup on the client panel and as a page.
-function addExpenseFields({ client, payers, today, prefix }) {
-  return `<form class="admin-stack-form" method="post" action="/clients/admin/clients/${encodeURIComponent(client.slug)}/expenses" enctype="multipart/form-data">
-            <label for="${prefix}-date">Date
-              <input id="${prefix}-date" name="spentOn" type="date" required value="${escapeAttribute(today)}" max="${escapeAttribute(today)}">
-            </label>
-            <label for="${prefix}-vendor">Paid to
-              <input id="${prefix}-vendor" name="vendor" type="text" maxlength="120" required placeholder="Home Depot">
-            </label>
-            <label for="${prefix}-description">What for (optional)
-              <input id="${prefix}-description" name="description" type="text" maxlength="200" placeholder="Lumber for the deck">
-            </label>
-            <label for="${prefix}-category">Kind of cost
-              <select id="${prefix}-category" name="category">${EXPENSE_CATEGORIES.map(([code, name]) => `<option value="${code}">${escapeHtml(name)}</option>`).join("")}</select>
-            </label>
-            <label for="${prefix}-amount">Amount ($)
-              <input id="${prefix}-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required placeholder="0.00">
-            </label>
-            <label for="${prefix}-paid">Paid with
-              <select id="${prefix}-paid" name="paidWith">${payers.map((option) => `<option value="${escapeAttribute(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</select>
-            </label>
-            <label for="${prefix}-receipt">Receipt (PDF or photo, optional)
-              <input id="${prefix}-receipt" name="receipt" type="file" accept="application/pdf,image/*">
-            </label>
+// Add expense, compact: each box says what goes in it. Paid to suggests everyone in Labor and
+// whoever earlier expenses went to, and Category the usual categories, but both take anything
+// typed. With `jobs` (the Books page) it starts with the job, where no job is overhead.
+function addExpenseFields({ action, payers, today, prefix, paidTo = [], jobs = null }) {
+  const categories = jobs ? [...JOB_CATEGORIES, ...OVERHEAD_CATEGORIES] : JOB_CATEGORIES;
+  const hidden = (id, label, control) => `<label class="in-box" for="${prefix}-${id}"><span class="visually-hidden">${label}</span>${control}</label>`;
+  const shown = (id, label, control) => `<label class="in-box in-box-tagged" for="${prefix}-${id}"><span class="in-box-tag">${label}</span>${control}</label>`;
+  return `<form class="admin-stack-form expense-form" method="post" action="${escapeAttribute(action)}" enctype="multipart/form-data">
+            ${jobs ? shown("job", "Job", `<select id="${prefix}-job" name="job"><option value="">Overhead (no job)</option>${jobs.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.name)}</option>`).join("")}</select>`) : ""}
+            ${hidden("description", "Expense", `<input id="${prefix}-description" name="description" type="text" maxlength="200" required placeholder="Expense">`)}
+            ${hidden("vendor", "Paid to", `<input id="${prefix}-vendor" name="vendor" type="text" maxlength="120" list="${prefix}-paid-to" autocomplete="off" placeholder="Paid to">`)}
+            <datalist id="${prefix}-paid-to">${paidTo.map((name) => `<option value="${escapeAttribute(name)}"></option>`).join("")}</datalist>
+            ${hidden("category", "Category", `<input id="${prefix}-category" name="category" type="text" maxlength="60" list="${prefix}-categories" autocomplete="off" placeholder="Category">`)}
+            <datalist id="${prefix}-categories">${categories.map(([, name]) => `<option value="${escapeAttribute(name)}"></option>`).join("")}</datalist>
+            <div class="expense-pair">
+              ${hidden("amount", "Amount", `<input id="${prefix}-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required placeholder="Amount">`)}
+              ${shown("date", "Date", `<input id="${prefix}-date" name="spentOn" type="date" required value="${escapeAttribute(today)}" max="${escapeAttribute(today)}">`)}
+            </div>
+            ${shown("paid", "Paid with", `<select id="${prefix}-paid" name="paidWith">${payers.map((option) => `<option value="${escapeAttribute(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</select>`)}
+            ${shown("receipt", "Receipt", `<input id="${prefix}-receipt" name="receipt" type="file" accept="application/pdf,image/*">`)}
             <button class="button button-solid" type="submit">Add expense</button>
-            <p class="portal-security-note">It goes in the books as a cost of this job. Clients do not see expenses. If a bank account paid it, file that withdrawal on the Banking page as this expense so it counts once.</p>
           </form>`;
 }
 
-function addExpenseDialog({ client, payers, today }) {
-  return `<dialog class="admin-dialog" id="add-expense-dialog" aria-labelledby="add-expense-title">
+function addExpenseDialog(options) {
+  return `<dialog class="admin-dialog expense-dialog" id="add-expense-dialog" aria-labelledby="add-expense-title">
           <div class="admin-dialog-head">
             <h2 id="add-expense-title">Add an expense</h2>
             <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
           </div>
-          ${addExpenseFields({ client, payers, today, prefix: "add-expense" })}
+          ${addExpenseFields({ ...options, prefix: "add-expense" })}
         </dialog>`;
 }
 
-export function adminAddExpensePage({ client, payers, today, notice = null }) {
+// The page without scripts: a job's (client) or, from the Books page, any job's or overhead (jobs).
+export function adminAddExpensePage({ client = null, jobs = null, payers, today, paidTo = [], notice = null }) {
+  const back = client ? `/clients/admin?client=${encodeURIComponent(client.slug)}` : "/clients/admin/books";
+  const action = client ? `/clients/admin/clients/${encodeURIComponent(client.slug)}/expenses` : "/clients/admin/books/expenses";
   return adminShell(`<div class="site-width portal-shell portal-detail">
-      <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a></p>
+      <p class="portal-kicker"><a class="portal-inline-link" href="${back}">${escapeHtml(client ? client.name : "Books")}</a></p>
       <h1 class="portal-heading portal-heading-sm">Add an expense.</h1>
       ${noticeMarkup(notice)}
       <section class="admin-card admin-card-narrow">
-        ${addExpenseFields({ client, payers, today, prefix: "add-expense" })}
+        ${addExpenseFields({ action, payers, today, paidTo, jobs: client ? null : jobs, prefix: "add-expense" })}
       </section>
     </div>`, { title: "Add an expense", scripts: [BILLING_SCRIPT] });
 }
@@ -962,12 +995,13 @@ export function adminDocumentsPage({ clients, documents, notice = null }) {
     </div>`, { title: "Documents" });
 }
 
-export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, expenses = [], payers = [], today = todayInMichigan() }) {
+// `selectedLogin` is the selected project's client login in plain text, when it is on file.
+export function adminDashboardPage({ clients, selected, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, expenses = [], payers = [], paidTo = [], selectedLogin = null, today = todayInMichigan() }) {
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
     const emails = clientEmails(client);
     const adminOnly = !client.passwordHash && !client.managedBySecret;
-    const detail = [adminOnly ? "Admin only" : "", emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].filter(Boolean).join(" · ");
+    const detail = [adminOnly ? "Admin only" : "", client.readOnly ? "Read only" : "", emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].filter(Boolean).join(" · ");
     return `<li><a class="admin-client-link${current ? " is-current" : ""}" href="/clients/admin?client=${encodeURIComponent(client.slug)}"${current ? ' aria-current="page"' : ""}>
         <strong>${escapeHtml(client.name)}</strong><small>${detail}</small></a></li>`;
   }).join("");
@@ -988,10 +1022,15 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
               <input id="client-site" name="siteAddress" type="text" maxlength="200" value="${escapeAttribute(selected.siteAddress || "")}" placeholder="1234 Lakeshore Dr, Muskegon, MI 49441">
             </label>
           </form>
-          ${selected.managedBySecret ? "" : `<form class="admin-inline-form admin-save-row" action="${base}/login" method="post">
+          ${selected.managedBySecret ? `<div class="admin-inline-form admin-save-row">
+            <span class="icon-save icon-save-off" title="Set in Render" aria-hidden="true">${SAVE_ICON}</span>
+            <label for="client-login">Client login
+              <input id="client-login" type="text" readonly value="${escapeAttribute(selectedLogin || "")}">
+            </label>
+          </div>` : `<form class="admin-inline-form admin-save-row" action="${base}/login" method="post">
             <button class="icon-save" type="submit" aria-label="Save client login" title="Save">${SAVE_ICON}</button>
             <label for="client-login">Client login
-              <input id="client-login" name="login" type="text" minlength="10" maxlength="120" autocomplete="off" required placeholder="${selected.passwordHash ? "Set. Type a new one to change it." : "None, so only you can see this project. Type one to share it."}">
+              <input id="client-login" name="login" type="text" minlength="10" maxlength="120" autocomplete="off" required value="${escapeAttribute(selectedLogin || "")}" placeholder="${selected.passwordHash ? "Set, but not on file. Type it again to show it here." : "None, so only you can see this project. Type one to share it."}">
             </label>
           </form>`}
         </div>
@@ -1008,7 +1047,10 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
         </div>
         ${billingRows(billing, { basePath: `${base}/billing`, viewer: "admin" })}
 
-        <h3>Expenses</h3>
+        <div class="admin-subhead">
+          <h3>Expenses</h3>
+          <a class="portal-secondary-link" href="/clients/admin/books/jobs/${encodeURIComponent(selected.slug)}">Job book</a>
+        </div>
         ${expenseRows(expenses, { base })}
 
         <h3>Documents</h3>
@@ -1031,9 +1073,16 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
           </label>
           <button class="button button-solid" type="submit">Share with client</button>
         </form>
+        <form class="admin-access" action="${base}/access" method="post">
+          <label class="portal-check" for="client-read-only">
+            <input id="client-read-only" name="readOnly" type="checkbox" value="yes"${selected.readOnly ? " checked" : ""} data-autosubmit>
+            <span>Display all data to client portal (read only)</span>
+          </label>
+          <button class="portal-logout-button" type="submit" data-autosubmit-button>Save</button>
+        </form>
         ${statusDialogs(selected, readiness)}
         ${addPaymentDialog({ client: selected, billing, readiness })}
-        ${addExpenseDialog({ client: selected, payers, today })}
+        ${addExpenseDialog({ action: `${base}/expenses`, payers, today, paidTo })}
       </section>`;
     })()
     : `<section class="admin-panel"><p class="portal-empty">Choose a client portal to manage its quotes, invoices and documents.</p></section>`;
@@ -1052,7 +1101,14 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
             <input id="client-password" name="password" type="text" minlength="10" maxlength="120" autocomplete="off" placeholder="Leave blank to keep it admin only">
           </label>
           ${emailsField({ id: "new-client-emails", name: "emails", label: "Client email (optional)", typed: newClient?.emails ?? null })}
+          <label for="new-client-site">Job site address (optional)
+            <input id="new-client-site" name="siteAddress" type="text" maxlength="200" value="${escapeAttribute(newClient?.siteAddress || "")}" placeholder="1234 Lakeshore Dr, Muskegon, MI 49441">
+          </label>
           <button class="button button-solid" type="submit">Create portal</button>
+          <label class="portal-check admin-add-client-access" for="new-client-read-only">
+            <input id="new-client-read-only" name="readOnly" type="checkbox" value="yes"${newClient?.readOnly ? " checked" : ""}>
+            <span>Display all data to client portal (read only)</span>
+          </label>
         </form>
       </details>
       ${[[readiness.store, "Portal storage"], [readiness.files, "File storage"], [readiness.stripe, "Stripe"], [readiness.webhook, "Stripe webhook"], [readiness.email, "Email"]].some(([ready]) => !ready)
@@ -1496,7 +1552,25 @@ function bookPeriods(today) {
 }
 
 // The Books page. `report` from books.js booksReport, `check` from checkBooks.
-export function adminBooksPage({ report, check, log = null, clients, today, notice = null }) {
+// Each job's gross income, gross expenses and gross profit, one job per row, and the jobs' total.
+function jobsLedger(report, names, period) {
+  if (!report.jobs.length) return '<p class="portal-empty">No job income or expenses in this period.</p>';
+  const jobs = report.jobs.slice().sort((left, right) => (names.get(left.slug) || left.slug).localeCompare(names.get(right.slug) || right.slug));
+  const total = jobs.reduce((sum, job) => ({ income: sum.income + job.income, expenses: sum.expenses + job.expenses, profit: sum.profit + job.profit }), { income: 0, expenses: 0, profit: 0 });
+  const cells = (row) => `<td class="books-money" data-label="Gross income">${money(row.income)}</td>
+          <td class="books-money" data-label="Gross expenses">${money(row.expenses)}</td>
+          <td class="books-money${row.profit < 0 ? " books-loss" : ""}" data-label="Gross profit">${money(row.profit)}</td>`;
+  return `<table class="portal-table books-table books-jobs">
+          <thead><tr><th scope="col">Job</th><th scope="col" class="books-money">Gross income</th><th scope="col" class="books-money">Gross expenses</th><th scope="col" class="books-money">Gross profit</th></tr></thead>
+          <tbody>${jobs.map((job) => `<tr>
+          <td><a class="portal-inline-link" href="/clients/admin/books/jobs/${encodeURIComponent(job.slug)}${period}">${escapeHtml(names.get(job.slug) || job.slug)}</a></td>
+          ${cells(job)}
+        </tr>`).join("")}</tbody>
+          <tfoot><tr><th scope="row">All jobs</th>${cells(total)}</tr></tfoot>
+        </table>`;
+}
+
+export function adminBooksPage({ report, check, log = null, clients, today, notice = null, overheadExpenses = [], payers = [], paidTo = [] }) {
   const names = new Map(clients.map((client) => [client.slug, client.name]));
   const query = (extra = {}) => {
     const params = new URLSearchParams();
@@ -1541,25 +1615,29 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
     ["Outstanding", summary.outstanding, report.to ? `owed on ${dateText(report.to)}` : "owed now", true],
     ["Unapplied payments", summary.unapplied, "received, not tied to an invoice"],
     ...(summary.owedToCrew ? [["Owed to crew", summary.owedToCrew, "approved labor not paid yet"]] : []),
-    ...(summary.overhead ? [["Overhead", summary.overhead, `in ${range}`]] : []),
     ...(summary.disputed ? [["Held in disputes", summary.disputed, "until Stripe decides"]] : [])
   ];
 
-  // Each job's sales and costs in the period: labor and subcontractors approved to it.
-  const jobRows = report.jobs.map((job) => `<tr>
-          <td>${escapeHtml(names.get(job.slug) || job.slug)}</td>
-          <td class="books-money" data-label="Invoiced">${money(job.invoiced)}</td>
-          <td class="books-money" data-label="Labor">${moneyCell(job.labor)}</td>
-          <td class="books-money" data-label="Subcontractors">${moneyCell(job.subcontractors)}</td>
-          <td class="books-money" data-label="Materials and other">${moneyCell(job.otherCosts)}</td>
-          <td class="books-money${job.profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(job.profit)}</td>
-        </tr>`).join("");
-  const jobs = report.jobs.length
-    ? `<table class="portal-table books-table books-jobs">
-          <thead><tr><th scope="col">Job</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Labor</th><th scope="col" class="books-money">Subcontractors</th><th scope="col" class="books-money">Materials and other</th><th scope="col" class="books-money">Profit</th></tr></thead>
-          <tbody>${jobRows}</tbody>
+  // The jobs ledger, then overhead (what no job carries) by category, and what is left.
+  const period = query({ client: "" });
+  const jobs = jobsLedger(report, names, period);
+  const grossProfit = report.jobs.reduce((sum, job) => sum + job.profit, 0);
+  const overheadTotal = report.overhead.reduce((sum, entry) => sum + entry.amount, 0);
+  const overhead = report.overhead.length
+    ? `<table class="portal-table books-table books-overhead">
+          <thead><tr><th scope="col">Category</th><th scope="col" class="books-money">Amount</th></tr></thead>
+          <tbody>${report.overhead.map((entry) => `<tr><td>${escapeHtml(entry.name)}</td><td class="books-money" data-label="Amount">${money(entry.amount)}</td></tr>`).join("")}</tbody>
+          <tfoot><tr><th scope="row">Overhead</th><td class="books-money" data-label="Amount">${money(overheadTotal)}</td></tr></tfoot>
         </table>`
-    : '<p class="portal-empty">No invoices or job costs in this period.</p>';
+    : '<p class="portal-empty">No overhead in this period.</p>';
+  const net = grossProfit + report.otherIncome - overheadTotal;
+  const bottomLine = `<dl class="billing-totals books-net">
+          <div><dt>Gross profit</dt><dd${grossProfit < 0 ? ' class="books-loss"' : ""}>${money(grossProfit)}</dd></div>
+          ${report.otherIncome ? `<div><dt>Other income</dt><dd>${money(report.otherIncome)}</dd></div>` : ""}
+          <div><dt>Overhead</dt><dd>${money(overheadTotal)}</dd></div>
+          <div class="billing-totals-due"><dt>Net profit</dt><dd${net < 0 ? ' class="books-loss"' : ""}>${money(net)}</dd></div>
+        </dl>`;
+  const jobOptions = clients.map((client) => ({ slug: client.slug, name: client.name }));
 
   const ledgerRows = report.entries.slice().reverse().map((entry) => {
     const text = entry.itemExists ? [entry.itemLabel, ...entry.memo.split(" · ").slice(1)].join(" · ") : entry.memo;
@@ -1607,7 +1685,8 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
       <section class="admin-intro">
         <p class="portal-kicker">Admin panel</p>
         <h1 class="portal-heading">Books.</h1>
-        <p class="portal-lead">Everything done in the portal, and the money it moved: invoiced, received and still owed, for ${escapeHtml(report.slug ? names.get(report.slug) || report.slug : "every client portal")}, ${escapeHtml(range)}.</p>
+        <p class="portal-lead">${escapeHtml(report.slug ? names.get(report.slug) || report.slug : "Every job")}, ${escapeHtml(range)}.</p>
+        <p class="portal-lead-actions"><a class="button button-outline" href="/clients/admin/books/expenses/new" data-add-expense>Add expense</a></p>
         ${noticeMarkup(notice)}
       </section>
 
@@ -1637,10 +1716,20 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
       <section class="books-section" aria-labelledby="books-jobs-heading">
         <div class="books-section-head">
           <h2 id="books-jobs-heading">Jobs</h2>
-          <a class="portal-secondary-link" href="/clients/admin/labor">Labor</a>
         </div>
-        <p class="admin-meta">What each job invoiced and cost ${escapeHtml(range)}: hours and subcontractor invoices approved to it in Labor, and bank transactions filed to it in Banking.</p>
         ${jobs}
+      </section>
+
+      <section class="books-section" aria-labelledby="books-overhead-heading">
+        <div class="books-section-head">
+          <h2 id="books-overhead-heading">Overhead</h2>
+        </div>
+        ${overhead}
+        ${bottomLine}
+        ${overheadExpenses.length ? `<details class="books-overhead-added">
+          <summary>Overhead expenses added here (${overheadExpenses.length})</summary>
+          ${expenseRows(overheadExpenses, { base: "/clients/admin/books", totalLabel: "Overhead expenses" })}
+        </details>` : ""}
       </section>
 
       <section class="books-section" aria-labelledby="books-ledger-heading">
@@ -1673,7 +1762,70 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
         ${logSeal(log)}
         ${activity}
       </section>
-    </div>`, { title: "Books" });
+      ${addExpenseDialog({ action: "/clients/admin/books/expenses", payers, today, paidTo, jobs: jobOptions })}
+    </div>`, { title: "Books", scripts: [BILLING_SCRIPT] });
+}
+
+// One job's book (books.js jobBook): what it earned and what it cost, and its gross profit.
+export function adminJobBookPage({ client, book, today }) {
+  const base = `/clients/admin/books/jobs/${encodeURIComponent(client.slug)}`;
+  const periods = bookPeriods(today).map(([label, from, to]) => {
+    const params = new URLSearchParams();
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    const text = params.toString();
+    const current = book.from === from && book.to === to;
+    return `<a class="portal-secondary-link" href="${base}${text ? `?${text}` : ""}"${current ? ' aria-current="page"' : ""}>${label}</a>`;
+  }).join("");
+  const download = new URLSearchParams({ client: client.slug, ...(book.from ? { from: book.from } : {}), ...(book.to ? { to: book.to } : {}) });
+  const income = book.income.length
+    ? `<table class="portal-table books-table">
+          <thead><tr><th scope="col">Date</th><th scope="col">Income</th><th scope="col" class="books-money">Amount</th></tr></thead>
+          <tbody>${book.income.map((row) => `<tr>
+          <td>${dateText(row.date)}</td>
+          <td>${row.itemId ? `<a class="portal-inline-link" href="/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(row.itemId)}">${escapeHtml(row.what)}</a>` : escapeHtml(row.what)}</td>
+          <td class="books-money" data-label="Amount">${money(row.amount)}</td>
+        </tr>`).join("")}</tbody>
+        </table>`
+    : '<p class="portal-empty">No income in this period.</p>';
+  const expenses = book.expenses.length
+    ? `<table class="portal-table books-table">
+          <thead><tr><th scope="col">Date</th><th scope="col">Expense</th><th scope="col">Category</th><th scope="col" class="books-money">Amount</th></tr></thead>
+          <tbody>${book.expenses.map((row) => `<tr>
+          <td>${dateText(row.date)}</td>
+          <td>${escapeHtml(row.what)}${row.paidTo ? `<small>${escapeHtml(row.paidTo)}</small>` : ""}</td>
+          <td>${escapeHtml(row.category)}</td>
+          <td class="books-money" data-label="Amount">${money(row.amount)}</td>
+        </tr>`).join("")}</tbody>
+        </table>
+        <table class="portal-table books-table books-categories">
+          <thead><tr><th scope="col">Category</th><th scope="col" class="books-money">Amount</th></tr></thead>
+          <tbody>${book.categories.map((entry) => `<tr><td>${escapeHtml(entry.name)}</td><td class="books-money" data-label="Amount">${money(entry.amount)}</td></tr>`).join("")}</tbody>
+          <tfoot><tr><th scope="row">Gross expenses</th><td class="books-money" data-label="Amount">${money(book.totals.expenses)}</td></tr></tfoot>
+        </table>`
+    : '<p class="portal-empty">No expenses in this period.</p>';
+  return adminShell(`<div class="site-width portal-shell books">
+      <section class="admin-intro">
+        <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin/books">Books</a></p>
+        <h1 class="portal-heading portal-heading-sm">${escapeHtml(client.name)}</h1>
+      </section>
+      <nav class="books-periods" aria-label="Periods">${periods}</nav>
+      ${grossFigures(book.totals)}
+      <section class="books-section" aria-labelledby="job-income-heading">
+        <div class="books-section-head"><h2 id="job-income-heading">Income</h2></div>
+        ${income}
+      </section>
+      <section class="books-section" aria-labelledby="job-expenses-heading">
+        <div class="books-section-head">
+          <h2 id="job-expenses-heading">Expenses</h2>
+          <div class="books-section-links">
+            <a class="portal-secondary-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">Project</a>
+            <a class="portal-secondary-link" href="/clients/admin/books/ledger.csv?${download}">Download (CSV)</a>
+          </div>
+        </div>
+        ${expenses}
+      </section>
+    </div>`, { title: `${client.name} · Job book` });
 }
 
 // Whether the activity log is as it was written (books.js verifyActivityLog). Invoices and the

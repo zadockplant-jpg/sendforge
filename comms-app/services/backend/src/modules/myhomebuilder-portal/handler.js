@@ -114,13 +114,14 @@ import {
 } from "./billing.js";
 import { formatDate, money } from "./format.js";
 import { isPdf, signDocument } from "./pdf.js";
-import { activityCsv, booksReport, checkBooks, correctBooks, ledgerCsv, record, verifyActivityLog } from "./books.js";
+import { activityCsv, booksReport, checkBooks, correctBooks, jobBook, ledgerCsv, record, verifyActivityLog } from "./books.js";
 import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
-import { CREW_SECTIONS } from "./labor.js";
+import { CREW_SECTIONS, listWorkers } from "./labor.js";
+import { getSecureJson, putSecureJson, secureReady } from "./secure.js";
 import { handleAdminLabor, handleCrew } from "./crew.js";
 import { handleAdminBank, listBankAccounts, unfileExpenseMatch } from "./bank.js";
 import { handleAdminTeam } from "./team.js";
-import { EXPENSE_CATEGORIES, categoryName, deleteExpense, getExpense, listExpenses, paidWithOptions, putExpense } from "./expenses.js";
+import { categoryName, deleteExpense, getExpense, listAllExpenses, listExpenses, paidToSuggestions, paidWithOptions, putExpense, resolveCategory } from "./expenses.js";
 import {
   adminBillingPage,
   adminBooksPage,
@@ -128,6 +129,7 @@ import {
   adminAddExpensePage,
   adminAddPaymentPage,
   adminDocumentsPage,
+  adminJobBookPage,
   adminRequestPage,
   adminTemplatesPage,
   billingDeletePage,
@@ -293,11 +295,13 @@ const NOTICES = {
   "payment-other-required": { text: "Type the payment method when you choose Other.", tone: "error" },
   "payment-date-invalid": { text: "Enter the date the payment was received.", tone: "error" },
   "payment-partial": { text: "Payment added. The rest of the invoice is still due." },
-  "expense-added": { text: "Expense added. It's a cost of this job in the books." },
+  "expense-added": { text: "Expense added." },
+  "access-saved": { text: "Saved." },
+  "read-only": { text: "This project is read only." },
   "expense-deleted": { text: "Expense deleted and taken out of the books." },
   "expense-date-invalid": { text: "Enter the date of the expense (today or earlier).", tone: "error" },
-  "expense-vendor-required": { text: "Enter who the expense was paid to (up to 120 characters).", tone: "error" },
-  "expense-category-invalid": { text: "Choose what kind of cost it was.", tone: "error" },
+  "expense-vendor-required": { text: "Enter the expense (up to 200 characters) and who it was paid to (up to 120).", tone: "error" },
+  "expense-category-invalid": { text: "Keep the category under 60 characters.", tone: "error" },
   "expense-amount-invalid": { text: "Enter the expense amount, like 412.37.", tone: "error" },
   "expense-paid-invalid": { text: "Choose what the expense was paid with.", tone: "error" },
   "expense-receipt-invalid": { text: "Attach the receipt as a PDF or photo under 20 MB, or leave it off.", tone: "error" },
@@ -1120,16 +1124,19 @@ function withListedPayments(item, payments) {
 
 // Adds a job expense from the Add expense form (multipart, with an optional receipt) and returns
 // the notice to show. `payers` are what it can be paid with (expenses.js paidWithOptions).
+// Records an expense and returns the notice to show: a cost of `target`'s job, or overhead with no
+// target (the Books page). The category is chosen or typed (expenses.js resolveCategory).
 async function addExpense({ store, target, form, payers, ip }) {
   const spentOn = String(form.get("spentOn") || "").trim();
   const vendor = String(form.get("vendor") || "").trim().replaceAll(/\s+/gu, " ");
   const description = String(form.get("description") || "").trim().replaceAll(/\s+/gu, " ");
-  const category = String(form.get("category") || "");
+  const resolved = resolveCategory(form.get("category"), { overhead: !target });
   const amountCents = parseMoney(String(form.get("amount") || ""));
   const paidWith = payers.find((option) => option.key === String(form.get("paidWith") || ""));
   if (!isValidDate(spentOn) || spentOn > todayInMichigan()) return "expense-date-invalid";
-  if (!vendor || vendor.length > 120 || description.length > 200) return "expense-vendor-required";
-  if (!EXPENSE_CATEGORIES.some(([code]) => code === category)) return "expense-category-invalid";
+  if ((!vendor && !description) || vendor.length > 120 || description.length > 200) return "expense-vendor-required";
+  if (!resolved) return "expense-category-invalid";
+  const category = resolved.code;
   if (!amountCents || amountCents > MAX_TOTAL_CENTS) return "expense-amount-invalid";
   if (!paidWith) return "expense-paid-invalid";
   const id = randomId(12);
@@ -1140,18 +1147,18 @@ async function addExpense({ store, target, form, payers, ip }) {
     const type = isPdf(bytes) ? "application/pdf" : String(file.type || "").split(";")[0].trim().toLowerCase();
     if (bytes.byteLength > MAX_UPLOAD_BYTES || !["application/pdf", "image/jpeg", "image/png", "image/webp", "image/heic"].includes(type)) return "expense-receipt-invalid";
     const name = safeFileName(file.name);
-    receipt = { key: `expenses/${target.slug}/${id}/${name}`, name, type };
+    receipt = { key: `expenses/${target ? target.slug : "overhead"}/${id}/${name}`, name, type };
     await putFile(store, receipt.key, bytes, type);
   }
   const expense = {
-    id, clientSlug: target.slug, spentOn, vendor, description, category, amountCents,
+    id, clientSlug: target ? target.slug : null, spentOn, vendor, description, category, categoryName: resolved.name, amountCents,
     paidWith: { key: paidWith.key, account: paidWith.account, label: paidWith.label },
     receipt, bankTransactionId: null, createdAt: new Date().toISOString()
   };
   await putExpense(store, expense);
   await record(store, {
-    actor: "admin", ip, action: "expense.added", clientSlug: target.slug, amountCents, expense, data: { expenseId: id },
-    summary: `Added an expense for ${target.name}: ${vendor}${description ? ` (${description})` : ""} · ${categoryName(category)} · ${money(amountCents)}, paid with ${paidWith.label}`
+    actor: "admin", ip, action: "expense.added", clientSlug: target ? target.slug : null, amountCents, expense, data: { expenseId: id },
+    summary: `Added ${target ? `an expense for ${target.name}` : "an overhead expense"}: ${[description, vendor].filter(Boolean).join(" · ")} · ${resolved.name} · ${money(amountCents)}, paid with ${paidWith.label}`
   });
   return "expense-added";
 }
@@ -1531,6 +1538,44 @@ async function handleBooks(context, store, pathname, url) {
     const posted = await correctBooks(store, { ip: requestIp(context.request) });
     return redirectResponse(`/clients/admin/books?notice=${posted ? "books-corrected" : "books-balanced"}`);
   }
+
+  // Add expense from the Books page: a job's, or overhead with no job. Its receipt and delete.
+  const expenseMatch = pathname.match(/^\/clients\/admin\/books\/expenses(?:\/([A-Za-z0-9_-]+))?(?:\/(receipt|delete))?$/u);
+  if (expenseMatch) {
+    const [, id, action] = expenseMatch;
+    if (!id || (id === "new" && !action)) {
+      const payers = paidWithOptions(await listBankAccounts(store));
+      if (id === "new") {
+        if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+        return scriptedHtmlResponse(adminAddExpensePage({ jobs: clients, payers, today: todayInMichigan(), paidTo: await expensePaidTo(store), notice: noticeFromQuery(url) }));
+      }
+      if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+      const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 8192);
+      const job = String(form?.get("job") || "");
+      const target = job ? clients.find((client) => client.slug === job) : null;
+      const result = !form || (job && !target) ? "invalid" : await addExpense({ store, target, form, payers, ip: requestIp(context.request) });
+      return redirectResponse(`/clients/admin/books?notice=${result}`);
+    }
+    const expense = await getExpense(store, null, id);
+    if (!expense || !action) return notFoundResponse(null, true);
+    if (action === "receipt") {
+      if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+      const object = expense.receipt ? await getFile(store, expense.receipt.key) : null;
+      return object ? fileResponse(object, expense.receipt.name, expense.receipt.type) : notFoundResponse(null, true);
+    }
+    if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+    await removeExpense(store, expense, { ip: requestIp(context.request), jobName: names.get(expense.clientSlug) || "" });
+    return redirectResponse("/clients/admin/books?notice=expense-deleted");
+  }
+
+  // One job's book.
+  const jobMatch = pathname.match(/^\/clients\/admin\/books\/jobs\/([^/]+)$/u);
+  if (jobMatch) {
+    if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+    const client = clients.find((entry) => entry.slug === decodeSegment(jobMatch[1]));
+    if (!client) return notFoundResponse(null, true);
+    return htmlResponse(adminJobBookPage({ client, book: await jobBook(store, client.slug, { from, to }), today: todayInMichigan() }));
+  }
   if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
   const report = await booksReport(store, { slug, from, to });
   if (pathname === "/clients/admin/books/ledger.csv" || pathname === "/clients/admin/books/activity.csv") {
@@ -1541,8 +1586,50 @@ async function handleBooks(context, store, pathname, url) {
     return new Response(ledger ? ledgerCsv(report, names) : activityCsv(report, names), { status: 200, headers });
   }
   if (pathname !== "/clients/admin/books") return notFoundResponse(null, true);
-  const [check, log] = await Promise.all([checkBooks(store), verifyActivityLog(store)]);
-  return htmlResponse(adminBooksPage({ report, check, log, clients, today: todayInMichigan(), notice: noticeFromQuery(url) }));
+  const [check, log, overheadExpenses, accounts, paidTo] = await Promise.all([checkBooks(store), verifyActivityLog(store), listExpenses(store, null), listBankAccounts(store), expensePaidTo(store)]);
+  return scriptedHtmlResponse(adminBooksPage({ report, check, log, clients, today: todayInMichigan(), notice: noticeFromQuery(url), overheadExpenses, payers: paidWithOptions(accounts), paidTo }));
+}
+
+// Who expenses can be paid to (expenses.js paidToSuggestions).
+async function expensePaidTo(store) {
+  const [workers, expenses] = await Promise.all([listWorkers(store), listAllExpenses(store)]);
+  return paidToSuggestions({ workers, expenses });
+}
+
+// Deletes an expense and takes it out of the books (and unfiles a bank withdrawal matched to it).
+async function removeExpense(store, expense, { ip, jobName }) {
+  if (expense.bankTransactionId) await unfileExpenseMatch(store, expense, { ip });
+  await deleteExpense(store, expense.id);
+  await record(store, {
+    actor: "admin", ip, action: "expense.deleted", clientSlug: expense.clientSlug, amountCents: expense.amountCents, reason: "deleted", expense: { ...expense, deleted: true }, data: { expenseId: expense.id },
+    summary: `Deleted ${expense.clientSlug ? `the expense for ${jobName || expense.clientSlug}` : "the overhead expense"}: ${[expense.description, expense.vendor].filter(Boolean).join(" · ")} · ${categoryName(expense)} · ${money(expense.amountCents)}`
+  });
+}
+
+// A project's client login in plain text, so the admin panel can show it: kept sealed
+// (secure.js, AES-256-GCM) beside its hash. Logins saved before this are not on file (null).
+function loginKey(slug) {
+  return `client-login:${slug}`;
+}
+
+async function keepLogin(env, store, slug, login) {
+  if (!secureReady(env)) return;
+  try {
+    await putSecureJson(store, env, loginKey(slug), { login });
+  } catch (error) {
+    console.error(JSON.stringify({ message: "client login not kept", slug, error: error instanceof Error ? error.message : "Unknown error" }));
+  }
+}
+
+async function keptLogin(env, store, client) {
+  if (!client) return null;
+  if (client.managedBySecret) return env.CLIENT_PORTAL_PASSWORD || null;
+  if (!client.passwordHash || !secureReady(env)) return null;
+  try {
+    return (await getSecureJson(store, env, loginKey(client.slug)))?.login || null;
+  } catch {
+    return null;
+  }
 }
 
 async function handleAdminTemplates(context, store, id, action) {
@@ -1715,8 +1802,10 @@ async function routePortalRequest(context) {
       if (authenticated && pathname === "/clients/login") return redirectResponse("/clients");
       if (!authenticated) return htmlResponse(loginPage(false, destination));
 
-      const [billing, documents] = store ? await Promise.all([listBilling(store, client.slug), listDocuments(store, client.slug)]) : [[], []];
-      return htmlResponse(portalHomePage({ client, billing, documents, storeReady: Boolean(store), admin, notice: noticeFromQuery(url) }));
+      const [billing, documents, book] = store
+        ? await Promise.all([listBilling(store, client.slug), client.readOnly ? [] : listDocuments(store, client.slug), client.readOnly ? jobBook(store, client.slug) : null])
+        : [[], [], null];
+      return htmlResponse(portalHomePage({ client, billing, documents, storeReady: Boolean(store), admin, notice: noticeFromQuery(url), book }));
     }
 
     if (method === "POST" && pathname === "/clients/login") {
@@ -1831,17 +1920,19 @@ async function routePortalRequest(context) {
         }
         const clients = await listClients(store);
         const selected = clients.find((entry) => entry.slug === requested) || null;
-        const [billing, documents, templates, recipients, expenses, accounts] = await Promise.all([
+        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin] = await Promise.all([
           selected ? listBilling(store, selected.slug) : [],
           selected ? listDocuments(store, selected.slug) : [],
           listTemplates(store),
           listRecipients(store),
           selected ? listExpenses(store, selected.slug) : [],
-          selected ? listBankAccounts(store) : []
+          selected ? listBankAccounts(store) : [],
+          selected ? expensePaidTo(store) : [],
+          keptLogin(env, store, selected)
         ]);
         return scriptedHtmlResponse(adminDashboardPage({
           clients, selected, billing, documents, templates, recipients, readiness, notice, authenticated, newClient, clientError, typedEmails,
-          expenses, payers: paidWithOptions(accounts), today: todayInMichigan()
+          expenses, payers: paidWithOptions(accounts), paidTo, selectedLogin, today: todayInMichigan()
         }), status);
       };
 
@@ -1885,7 +1976,9 @@ async function routePortalRequest(context) {
         // sees it.
         const entered = {
           name: String(form?.get("name") || "").trim(),
-          emails: String(form?.get("emails") || "").trim()
+          emails: String(form?.get("emails") || "").trim(),
+          siteAddress: String(form?.get("siteAddress") || "").trim().replaceAll(/\s+/gu, " "),
+          readOnly: form?.get("readOnly") === "yes"
         };
         const clientPassword = String(form?.get("password") || "");
         let slug = slugify(entered.name);
@@ -1895,6 +1988,7 @@ async function routePortalRequest(context) {
         else if (!entered.name || entered.name.length > 120) clientError = "Enter the client or project name, up to 120 characters.";
         else if (!isValidSlug(slug)) clientError = "Enter a name with letters or numbers, for example Smith Residence.";
         else if (clientPassword && (clientPassword.length < 10 || clientPassword.length > 120)) clientError = "The project login needs 10 to 120 characters, or leave it blank to keep the project admin only.";
+        else if (entered.siteAddress.length > 200) clientError = "Keep the job site address under 200 characters.";
         // The emails are optional, so only addresses that were typed are checked.
         else if (emails.addresses.length || emails.invalid.length) clientError = recipientProblem(emails);
         // Each login must open exactly one portal.
@@ -1903,12 +1997,16 @@ async function routePortalRequest(context) {
         const stem = slug.slice(0, 58).replace(/-+$/u, "");
         for (let number = 2; slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug)); number += 1) slug = `${stem}-${number}`;
 
-        await putClient(store, { slug, name: entered.name, emails: emails.addresses, active: true, passwordHash: clientPassword ? await hashPassword(clientPassword) : null, createdAt: new Date().toISOString() });
-        await record(store, { actor: "admin", action: "client.created", clientSlug: slug, ip: requestIp(context.request), summary: `Created the ${clientPassword ? "client portal" : "admin-only project"} ${entered.name}${emails.addresses.length ? ` for ${emails.addresses.join(", ")}` : ""}` });
+        await putClient(store, {
+          slug, name: entered.name, emails: emails.addresses, active: true, passwordHash: clientPassword ? await hashPassword(clientPassword) : null,
+          ...(entered.siteAddress ? { siteAddress: entered.siteAddress } : {}), ...(entered.readOnly ? { readOnly: true } : {}), createdAt: new Date().toISOString()
+        });
+        if (clientPassword) await keepLogin(env, store, slug, clientPassword);
+        await record(store, { actor: "admin", action: "client.created", clientSlug: slug, ip: requestIp(context.request), summary: `Created the ${clientPassword ? "client portal" : "admin-only project"} ${entered.name}${emails.addresses.length ? ` for ${emails.addresses.join(", ")}` : ""}${entered.readOnly ? " (read only)" : ""}` });
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${clientPassword ? "client-added" : "client-added-private"}`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|payments|expenses)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|access|payments|expenses)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -1926,7 +2024,7 @@ async function routePortalRequest(context) {
             const payers = paidWithOptions(await listBankAccounts(store));
             if (id === "new") {
               if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
-              return scriptedHtmlResponse(adminAddExpensePage({ client: target, payers, today: todayInMichigan(), notice: noticeFromQuery(url) }));
+              return scriptedHtmlResponse(adminAddExpensePage({ client: target, payers, today: todayInMichigan(), paidTo: await expensePaidTo(store), notice: noticeFromQuery(url) }));
             }
             if (method !== "POST") return methodNotAllowedResponse(["POST"]);
             const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 8192);
@@ -1942,13 +2040,7 @@ async function routePortalRequest(context) {
           }
           if (action === "delete") {
             if (method !== "POST") return methodNotAllowedResponse(["POST"]);
-            const ip = requestIp(context.request);
-            if (expense.bankTransactionId) await unfileExpenseMatch(store, expense, { ip });
-            await deleteExpense(store, expense.id);
-            await record(store, {
-              actor: "admin", ip, action: "expense.deleted", clientSlug: slug, amountCents: expense.amountCents, reason: "deleted", expense: { ...expense, deleted: true }, data: { expenseId: expense.id },
-              summary: `Deleted the expense for ${target.name}: ${expense.vendor} · ${categoryName(expense.category)} · ${money(expense.amountCents)}`
-            });
+            await removeExpense(store, expense, { ip: requestIp(context.request), jobName: target.name });
             return redirectResponse(`${back}&notice=expense-deleted`);
           }
           return notFoundResponse(session, admin);
@@ -1999,8 +2091,23 @@ async function routePortalRequest(context) {
           const owner = await resolveLogin(env, store, login);
           if (owner && owner !== slug) return redirectResponse(`${back}&notice=login-taken`);
           await putClient(store, { ...target, passwordHash: await hashPassword(login) });
+          await keepLogin(env, store, slug, login);
           await record(store, { actor: "admin", action: "client.login-saved", clientSlug: slug, ip: requestIp(context.request), summary: `${target.passwordHash ? "Changed the client login for" : "Gave a client login to"} ${target.name}` });
           return redirectResponse(`${back}&notice=login-saved`);
+        }
+
+        // Display all data to client portal (read only): the client sees every figure and can
+        // do nothing (handlePortalRequest refuses paying, accepting, uploads and documents).
+        if (area === "access" && !id && !action) {
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+          if (!form) return redirectResponse(`${back}&notice=invalid`);
+          const readOnly = form.get("readOnly") === "yes";
+          if (readOnly !== Boolean(target.readOnly)) {
+            await putClient(store, { ...target, readOnly });
+            await record(store, { actor: "admin", action: readOnly ? "client.read-only" : "client.read-write", clientSlug: slug, ip: requestIp(context.request), summary: `${readOnly ? "Showed all data, read only, in" : "Turned off read only for"} ${target.name}'s client portal` });
+          }
+          return redirectResponse(`${back}&notice=access-saved`);
         }
 
         // The job site's address, printed on subcontractors' lien waivers for this job.
@@ -2071,6 +2178,8 @@ async function routePortalRequest(context) {
         if (!action && isRead) {
           return scriptedHtmlResponse(billingDetailPage({ client, item, stripeReady: readiness.stripe, admin, notice: noticeFromQuery(url) }));
         }
+        // A read-only project's client can look but not pay or accept.
+        if ((action === "pay" || action === "accept") && method === "POST" && client.readOnly) return redirectResponse(`${detailPath}?notice=read-only`);
         if (action === "pay" && method === "POST") {
           if (!isPayable(item) || !readiness.stripe) return redirectResponse(detailPath);
           try {
@@ -2093,6 +2202,11 @@ async function routePortalRequest(context) {
           return redirectResponse(`${detailPath}?notice=accepted`);
         }
         return methodNotAllowedResponse(action === "pay" || action === "accept" ? ["POST"] : ["GET", "HEAD"]);
+      }
+
+      // A read-only project has no uploads and no documents to open or sign.
+      if (client.readOnly && pathname.startsWith("/clients/documents")) {
+        return method === "POST" || isRead ? redirectResponse("/clients?notice=read-only") : methodNotAllowedResponse(["GET", "HEAD", "POST"]);
       }
 
       if (pathname === "/clients/documents/upload") {

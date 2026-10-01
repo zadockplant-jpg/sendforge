@@ -200,8 +200,20 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   addresses and records) is made from the name, with -2, -3 and so on when the name is taken.
 - **The project login is optional.** A project created without one is **admin only** (shown as
   "Admin only" in the list). It is not client facing until the selected project's **Client
-  login** field is saved. Saving a new login there replaces the old one; a project whose login
-  comes from `MHB_CLIENT_PORTAL_PASSWORD` has no such field.
+  login** field is saved. Saving a new login there replaces the old one.
+- **The client login shows in plain text** in that field, so a client's access is never lost.
+  Besides its hash, each login is kept sealed in `mhb_secure` (`client-login:<slug>`, secure.js,
+  AES-256-GCM). A login saved before this is not on file: the field asks for it again. The
+  Muskegon project's login comes from `MHB_CLIENT_PORTAL_PASSWORD` and is shown read only.
+- **Add a client portal** also takes the job site address, and at its very bottom **Display all
+  data to client portal (read only)**.
+- **Display all data to client portal (read only)**, also at the very bottom of each project,
+  makes the client portal a read-only view of the whole job:
+  - The client sees its quotes and invoices (with invoiced, paid and outstanding) and its
+    **Financials**: gross income, gross expenses, gross profit and each expense, from the job book.
+  - Nothing can be done: paying, accepting a quote, uploading and documents are refused.
+  - Documents read "Document view disabled for completed projects".
+  - Public quote and invoice links are not affected.
 - The selected project's **Client email**, **Job site address** and **Client login** each save
   with the disk button on their left.
 - **Start from a template** opens the chosen template as soon as it is picked. Clicking anywhere
@@ -262,12 +274,22 @@ outside Stripe:
 
 ## Job expenses
 
-**Add expense** beside New invoice, New quote and Add payment (`expenses.js`, migration
-`20261007_myhomebuilder_portal_expenses.js`) records a cost of that client portal's job: the date,
-who it was paid to, what for, the kind (Materials, Equipment rental, Permits and fees, Other job
-costs), the amount, what paid it (a bank account from Banking, the owner's own money, or not paid
-yet), and an optional receipt (PDF or photo). The panel lists the job's expenses with their total,
-each with its receipt and a trash button that asks first. Clients never see expenses.
+**Add expense** beside New invoice, New quote and Add payment (`expenses.js`, migrations
+`20261007_myhomebuilder_portal_expenses.js` and `20261009_myhomebuilder_portal_job_books.js`)
+records a cost of that client portal's job. The form is compact: each box says what goes in it.
+- **Expense** (what it was), **Paid to** and **Category**.
+  - Paid to suggests everyone in Labor (and their companies), then whoever earlier expenses went to.
+  - Category suggests Materials, Labor, Subcontractors, Equipment rental, Permits and fees, Land,
+    House, Commercial property and Other job costs. Both take anything typed.
+  - A known category posts to its account (Land 5500, House 5510, Commercial property 5520, Labor
+    5000 Job labor). Any other is kept as typed and posted to Other job costs.
+- The amount, the date, what paid it (a bank account from Banking, the owner's own money, or not
+  paid yet), and an optional receipt (PDF or photo).
+
+The panel lists the job's expenses with their total, each with its receipt and a trash button that
+asks first. **Add expense on the Books page** does the same with a job choice. With no job it is
+overhead (`client_slug` empty), a typed category going to Other overhead. Clients see expenses only
+on a project shown read only.
 
 - **Books:** Dr the job cost account, tagged with the job (the Books page's Jobs table), Cr the
   bank account's books account, Owner contributions or Accounts payable. Deleting reverses it.
@@ -293,6 +315,16 @@ never asks to resubmit. Opened with GET, a form's address redirects to the page 
 
 The admin panel's **Books** page (`/clients/admin/books`, `books.js`) holds the portal's
 bookkeeping. Migration `20260930_myhomebuilder_portal_books.js` creates its tables.
+
+- **Jobs** is the jobs ledger, one job per row: gross income (income accounts tagged with the
+  job), gross expenses (expense accounts tagged with it, except Stripe fees and dispute losses)
+  and gross profit, with the total for all jobs. Each job opens its **job book**
+  (`/clients/admin/books/jobs/<slug>`, `jobBook`).
+  - The job book shows its income and expenses, each invoice, expense, labor entry or bank
+    transaction once as it stands now (edits and reversals netted).
+  - It also shows the expenses by category, and the gross figures for any period.
+- **Overhead** breaks down what no job carries, by category (an expense's typed category, or the
+  account's name), then gross profit, other income, overhead and **net profit**.
 
 - **Activity log** (`mhb_activity`) records everything done in the portal, newest first:
   - the admin's actions, with the address they came from: sign-ins and admin codes (requested

@@ -33,6 +33,7 @@ const { up: bankTables } = await import("../src/db/migrations/20261005_myhomebui
 const { up: sealActivity } = await import("../src/db/migrations/20261006_myhomebuilder_portal_activity_seal.js");
 const { up: expenseTables } = await import("../src/db/migrations/20261007_myhomebuilder_portal_expenses.js");
 const { up: teamTables } = await import("../src/db/migrations/20261008_myhomebuilder_portal_notes_schedule.js");
+const { up: jobBookChanges } = await import("../src/db/migrations/20261009_myhomebuilder_portal_job_books.js");
 const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
@@ -240,6 +241,7 @@ before(async () => {
   sealedBefore = await db("mhb_activity").orderBy("chain_seq").select("action", "chain_seq", "chain_hash");
   await expenseTables(db);
   await teamTables(db);
+  await jobBookChanges(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -2505,7 +2507,7 @@ test("a statement upload is filed with one click to a job, overhead or a Stripe 
   const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
   assert.match(books, /The books balance\./u);
   assert.match(books, /<dt>Overhead<\/dt><dd>\$151\.19<\/dd>/u);
-  assert.match(books, /Materials and other/u);
+  assert.match(books, /<a class="portal-inline-link" href="\/clients\/admin\/books\/jobs\/muskegon-addition">Muskegon Addition<\/a>/u, "the job's row in the jobs ledger");
 });
 
 test("crew work is paid from the bank, a payment recorded by hand is matched to its withdrawal, and Mark unpaid puts it back", async () => {
@@ -2812,7 +2814,7 @@ test("Add expense records a job cost with its receipt, posts it to the books, an
   const adminCookie = await loginAsAdmin();
   const list = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
   assert.match(list, /<a class="button button-outline" href="\/clients\/admin\/clients\/muskegon-addition\/expenses\/new" data-add-expense>Add expense<\/a>/u);
-  assert.match(list, /<dialog class="admin-dialog" id="add-expense-dialog"/u);
+  assert.match(list, /<dialog class="admin-dialog expense-dialog" id="add-expense-dialog"/u);
   assert.match(list, /<option value="account:1000">Business checking<\/option><option value="personal">The owner&#39;s own money<\/option><option value="unpaid">Not paid yet \(a bill to pay later\)<\/option>/u);
   const today = todayInMichigan();
 
@@ -2829,7 +2831,7 @@ test("Add expense records a job cost with its receipt, posts it to the books, an
   assert.ok(lines.every((line) => line.client_slug === "muskegon-addition"), "each is a cost of the job");
 
   const page = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
-  assert.match(page, /Home Depot<small>Deck lumber<\/small>/u);
+  assert.match(page, /Deck lumber<small>Home Depot<\/small>/u);
   assert.match(page, /<dt>Job expenses<\/dt><dd>\$652\.37<\/dd>/u);
   const depot = (await expenseRecords()).find((expense) => expense.vendor === "Home Depot");
   const receipt = await request(`/clients/admin/clients/muskegon-addition/expenses/${depot.id}/receipt`, { headers: { Cookie: adminCookie } });
@@ -3107,4 +3109,173 @@ test("the schedule puts crews on jobs over days with notes, marks anyone double-
   assert.match(february, /href="\/clients\/admin\/schedule\?month=2026-03">March →<\/a>/u);
   assert.equal((february.match(/<tr>/gu) || []).length, 1 + 4, "February 2026 starts on a Sunday and fills exactly four weeks, plus the header row");
   assert.notEqual((await request("/clients/admin/schedule")).status, 200, "the schedule needs an admin sign-in");
+});
+
+// ---------- Client logins, read only, expense categories and job books ----------
+
+test("the client login shows in plain text on the admin panel, kept sealed; a project can start with its site and read only", async () => {
+  const adminCookie = await loginAsAdmin();
+  const slug = await addPortal(adminCookie, "Lakeview Cabin");
+  const panel = async (name = slug) => (await request(`/clients/admin?client=${name}`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(await panel(), /id="client-login" name="login" type="text"[^>]*value="lakeview-cabin-login-2026"/u);
+  const sealed = await db("mhb_secure").where({ key: `client-login:${slug}` }).first();
+  assert.ok(sealed, "kept in secure storage");
+  assert.ok(!Buffer.from(sealed.ciphertext).toString("utf8").includes("lakeview-cabin-login-2026"), "and only sealed");
+
+  const changed = await request(`/clients/admin/clients/${slug}/login`, form({ login: "cabin-by-the-lake-2026" }, adminCookie));
+  assert.match(changed.headers.get("Location"), /notice=login-saved$/u);
+  assert.match(await panel(), /value="cabin-by-the-lake-2026"/u);
+  assert.equal((await request("/clients/login", form({ password: "cabin-by-the-lake-2026" }))).headers.get("Location"), "/clients");
+
+  // A login saved before logins were kept is asked for again.
+  await db("mhb_secure").where({ key: `client-login:${slug}` }).delete();
+  assert.match(await panel(), /value="" placeholder="Set, but not on file\. Type it again to show it here\."/u);
+  // The Muskegon login is set in Render, and shown as it is there.
+  assert.match(await panel("muskegon-addition"), new RegExp(`id="client-login" type="text" readonly value="${process.env.MHB_CLIENT_PORTAL_PASSWORD}"`, "u"));
+
+  const home = await panel();
+  assert.match(home, /<label for="new-client-site">Job site address \(optional\)/u);
+  assert.match(home, /<button class="button button-solid" type="submit">Create portal<\/button>\s*<label class="portal-check admin-add-client-access" for="new-client-read-only">\s*<input id="new-client-read-only" name="readOnly" type="checkbox" value="yes">\s*<span>Display all data to client portal \(read only\)<\/span>/u);
+  const created = await request("/clients/admin/clients", form({ name: "Harbor Flip", password: "harbor-flip-login", emails: "", siteAddress: "12  Harbor Dr, Grand Haven, MI 49417", readOnly: "yes" }, adminCookie));
+  assert.equal(created.status, 303);
+  const record = await projectRecord("harbor-flip");
+  assert.equal(record.siteAddress, "12 Harbor Dr, Grand Haven, MI 49417");
+  assert.equal(record.readOnly, true);
+  assert.match(await panel("harbor-flip"), /<strong>Harbor Flip<\/strong><small>Read only · No email on file<\/small>/u);
+});
+
+test("Display all data to client portal shows a read-only client every figure, and refuses paying, accepting, uploads and documents", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  const { item: invoice } = await postInvoice(adminCookie, { title: "Framing", amount: "5,000" });
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Porch", amount: "900" }, adminCookie));
+  const quote = (await billingRecords()).find((item) => item.kind === "quote");
+  await request("/clients/admin/clients/muskegon-addition/expenses", crewForm({ spentOn: today, description: "Lot purchase", vendor: "Ottawa Land Co", category: "Land", amount: "1,200", paidWith: "account:1000" }, null, adminCookie));
+  await request("/clients/admin/clients/muskegon-addition/documents", multipart({}, { bytes: await samplePdf(), name: "contract.pdf", type: "application/pdf" }, adminCookie));
+  const [document] = await db("mhb_documents").where({ client_slug: "muskegon-addition" }).select("id");
+
+  const panel = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(panel, /<form class="admin-access" action="\/clients\/admin\/clients\/muskegon-addition\/access" method="post">\s*<label class="portal-check" for="client-read-only">\s*<input id="client-read-only" name="readOnly" type="checkbox" value="yes" data-autosubmit>\s*<span>Display all data to client portal \(read only\)<\/span>/u);
+  const saved = await request("/clients/admin/clients/muskegon-addition/access", form({ readOnly: "yes" }, adminCookie));
+  assert.equal(saved.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=access-saved");
+  assert.equal((await projectRecord()).readOnly, true);
+  assert.ok(await db("mhb_activity").where({ action: "client.read-only" }).first());
+
+  const clientCookie = await loginAsClient();
+  const home = await (await request("/clients", { headers: { Cookie: clientCookie } })).text();
+  assert.match(home, /Everything on this project, read only\./u);
+  assert.doesNotMatch(home, /Upload document|View and pay|contract\.pdf/u);
+  assert.match(home, /<p class="portal-empty">Document view disabled for completed projects<\/p>/u);
+  assert.match(home, /<dt>Invoiced<\/dt><dd>\$5,000\.00<\/dd>/u);
+  assert.match(home, /<h2 id="financials-heading">Financials<\/h2>/u);
+  assert.match(home, /<dt>Gross income<\/dt><dd>\$5,000\.00<\/dd>/u);
+  assert.match(home, /<dt>Gross expenses<\/dt><dd>\$1,200\.00<\/dd>/u);
+  assert.match(home, /<dt>Gross profit<\/dt><dd>\$3,800\.00<\/dd>/u);
+  assert.match(home, /<td>Lot purchase<small>Ottawa Land Co<\/small><\/td>\s*<td>Land<\/td>/u);
+
+  const detail = await (await request(`/clients/billing/${invoice.id}`, { headers: { Cookie: clientCookie } })).text();
+  assert.doesNotMatch(detail, /securely<\/button>|paying by check/u);
+  const pay = await request(`/clients/billing/${invoice.id}/pay`, form({}, clientCookie));
+  assert.equal(pay.headers.get("Location"), `/clients/billing/${invoice.id}?notice=read-only`);
+  assert.equal(stripe.created.length, 0, "no checkout started");
+  const accept = await request(`/clients/billing/${quote.id}/accept`, form({ name: "Pat" }, clientCookie));
+  assert.equal(accept.headers.get("Location"), `/clients/billing/${quote.id}?notice=read-only`);
+  assert.equal((await stored(quote)).status, "open");
+  const upload = await request("/clients/documents/upload", multipart({}, { bytes: await samplePdf(), name: "mine.pdf", type: "application/pdf" }, clientCookie));
+  assert.equal(upload.headers.get("Location"), "/clients?notice=read-only");
+  assert.equal((await request(`/clients/documents/${document.id}`, { headers: { Cookie: clientCookie } })).headers.get("Location"), "/clients?notice=read-only");
+  assert.equal((await db("mhb_documents").where({ client_slug: "muskegon-addition" }).count({ n: "*" }).first()).n, 1);
+
+  await request("/clients/admin/clients/muskegon-addition/access", form({}, adminCookie));
+  assert.equal((await projectRecord()).readOnly, false);
+  assert.match(await (await request("/clients", { headers: { Cookie: clientCookie } })).text(), /Upload document/u);
+});
+
+test("Add expense takes a typed category and suggests who it was paid to from Labor and past expenses", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com", company: "Reyes Drywall LLC", trade: "Drywall" });
+  const add = (fields) => request("/clients/admin/clients/muskegon-addition/expenses", crewForm({ spentOn: today, paidWith: "account:1000", vendor: "", description: "", category: "", ...fields }, null, adminCookie));
+  assert.equal((await add({ amount: "10" })).headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=expense-vendor-required");
+  assert.equal((await add({ description: "Fill", amount: "10", category: "x".repeat(61) })).headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=expense-category-invalid");
+  await add({ description: "Lot purchase", vendor: "Ottawa Land Co", category: "land", amount: "25,000" });
+  await add({ description: "Dumpster swap", vendor: "Waste Pro", category: "Dumpster rental", amount: "450" });
+  await add({ description: "Drywall hang", vendor: "Dana Reyes", category: "Labor", amount: "1,800" });
+  await add({ description: "Nails", amount: "12.50" });
+  const records = await expenseRecords();
+  assert.deepEqual(records.map((expense) => [expense.description, expense.category, expense.categoryName]).sort(), [
+    ["Drywall hang", "5000", "Labor"], ["Dumpster swap", "5900", "Dumpster rental"], ["Lot purchase", "5500", "Land"], ["Nails", "5900", "Other job costs"]
+  ]);
+  assert.deepEqual(await ledgerBalances(), { 1000: -2726250, 5000: 180000, 5500: 2500000, 5900: 46250 });
+
+  const page = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  for (const placeholder of ["Expense", "Paid to", "Category", "Amount"]) assert.match(page, new RegExp(`placeholder="${placeholder}"`, "u"));
+  const paidTo = page.match(/<datalist id="add-expense-paid-to">([\s\S]*?)<\/datalist>/u)[1];
+  assert.deepEqual([...paidTo.matchAll(/value="([^"]+)"/gu)].map((match) => match[1].replaceAll("&amp;", "&")).slice(0, 2), ["Dana Reyes", "Reyes Drywall LLC"], "Labor first");
+  for (const name of ["Ottawa Land Co", "Waste Pro"]) assert.match(paidTo, new RegExp(`value="${name}"`, "u"));
+  const categories = page.match(/<datalist id="add-expense-categories">([\s\S]*?)<\/datalist>/u)[1];
+  for (const name of ["Land", "House", "Commercial property", "Labor", "Materials"]) assert.match(categories, new RegExp(`value="${name}"`, "u"));
+  assert.match(page, /<td>Dumpster swap<small>Waste Pro<\/small><\/td>\s*<td>Dumpster rental<\/td>/u);
+  assert.match(page, /<a class="portal-secondary-link" href="\/clients\/admin\/books\/jobs\/muskegon-addition">Job book<\/a>/u);
+});
+
+test("each job has its own book, and the Books ledger shows one job per row, then overhead and net profit", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  const deck = await addPortal(adminCookie, "Grand Haven Deck");
+  const { item: invoice } = await postInvoice(adminCookie, { title: "Framing", amount: "5,000" });
+  await request(`/clients/admin/clients/${deck}/billing`, form({ kind: "invoice", title: "Deck", amount: "800" }, adminCookie));
+  const jobExpense = (slug, fields) => request(`/clients/admin/clients/${slug}/expenses`, crewForm({ spentOn: today, paidWith: "account:1000", vendor: "", ...fields }, null, adminCookie));
+  await jobExpense("muskegon-addition", { description: "Lot purchase", category: "Land", amount: "1,200" });
+  await jobExpense(deck, { description: "Deck boards", vendor: "Menards", category: "Materials", amount: "300" });
+
+  // From the Books page: overhead with no job, and an expense on a job.
+  const books = async (path = "/clients/admin/books") => (await request(path, { headers: { Cookie: adminCookie } })).text();
+  const empty = await books();
+  assert.match(empty, /<a class="button button-outline" href="\/clients\/admin\/books\/expenses\/new" data-add-expense>Add expense<\/a>/u);
+  assert.match(empty, /<select id="add-expense-job" name="job"><option value="">Overhead \(no job\)<\/option>/u);
+  const overhead = (fields) => request("/clients/admin/books/expenses", crewForm({ spentOn: today, paidWith: "account:1000", vendor: "", job: "", ...fields }, null, adminCookie));
+  assert.equal((await overhead({ description: "Liability policy", vendor: "Next First Insurance", category: "Insurance", amount: "250" })).headers.get("Location"), "/clients/admin/books?notice=expense-added");
+  await overhead({ description: "Shop rent", category: "Shop space", amount: "100" });
+  await overhead({ job: deck, description: "Railing", category: "Materials", amount: "50" });
+  assert.equal((await overhead({ job: "nowhere", description: "x", amount: "1" })).headers.get("Location"), "/clients/admin/books?notice=invalid");
+  const records = await expenseRecords();
+  const policy = records.find((expense) => expense.description === "Liability policy");
+  assert.equal(policy.category, "6320");
+  assert.equal((await db("mhb_expenses").where({ id: policy.id }).first()).client_slug, null);
+  assert.equal(records.find((expense) => expense.description === "Shop rent").category, "6490");
+  assert.equal((await db("mhb_expenses").where({ id: records.find((expense) => expense.description === "Railing").id }).first()).client_slug, deck);
+
+  const page = await books();
+  assert.match(page, /The books balance\./u);
+  const row = (name, income, expenses, profit) => new RegExp(">" + name + "</a></td>\\s*<td class=\"books-money\" data-label=\"Gross income\">\\$" + income + "</td>\\s*<td class=\"books-money\" data-label=\"Gross expenses\">\\$" + expenses + "</td>\\s*<td class=\"books-money\" data-label=\"Gross profit\">\\$" + profit + "</td>", "u");
+  assert.match(page, row("Grand Haven Deck", "800\\.00", "350\\.00", "450\\.00"));
+  assert.match(page, row("Muskegon Addition", "5,000\\.00", "1,200\\.00", "3,800\\.00"));
+  assert.match(page, /<th scope="row">All jobs<\/th><td class="books-money" data-label="Gross income">\$5,800\.00<\/td>\s*<td class="books-money" data-label="Gross expenses">\$1,550\.00<\/td>\s*<td class="books-money" data-label="Gross profit">\$4,250\.00<\/td>/u);
+  assert.match(page, /<tr><td>Insurance<\/td><td class="books-money" data-label="Amount">\$250\.00<\/td><\/tr><tr><td>Shop space<\/td><td class="books-money" data-label="Amount">\$100\.00<\/td><\/tr>/u);
+  assert.match(page, /<dt>Overhead<\/dt><dd>\$350\.00<\/dd>/u);
+  assert.match(page, /<dt>Net profit<\/dt><dd>\$3,900\.00<\/dd>/u);
+  assert.match(page, /<summary>Overhead expenses added here \(2\)<\/summary>/u);
+
+  const book = await books("/clients/admin/books/jobs/muskegon-addition");
+  assert.match(book, /<h1 class="portal-heading portal-heading-sm">Muskegon Addition<\/h1>/u);
+  assert.match(book, /<dt>Gross income<\/dt><dd>\$5,000\.00<\/dd>/u);
+  assert.match(book, /<dt>Gross profit<\/dt><dd>\$3,800\.00<\/dd>/u);
+  assert.match(book, new RegExp(`href="/clients/admin/clients/muskegon-addition/billing/${invoice.id}">Invoice 1 · Framing</a>`, "u"));
+  assert.match(book, /<td>Lot purchase<\/td>\s*<td>Land<\/td>/u);
+  assert.match(book, /<th scope="row">Gross expenses<\/th><td class="books-money" data-label="Amount">\$1,200\.00<\/td>/u);
+
+  // An invoice changed after it posted shows once, as it stands.
+  const edit = await request(`/clients/admin/clients/muskegon-addition/billing/${invoice.id}/edit`, form({ title: "Framing", ...lines(["Framing", "1", "5,500"]) }, adminCookie));
+  assert.equal(edit.status, 303, await edit.clone().text());
+  const edited = await books("/clients/admin/books/jobs/muskegon-addition");
+  assert.equal((edited.match(/Invoice 1 · Framing<\/a>/gu) || []).length, 1);
+  assert.match(edited, /<dt>Gross income<\/dt><dd>\$5,500\.00<\/dd>/u);
+  assert.equal((await request("/clients/admin/books/jobs/nowhere", { headers: { Cookie: adminCookie } })).status, 404);
+
+  const removed = await request(`/clients/admin/books/expenses/${policy.id}/delete`, form({}, adminCookie));
+  assert.equal(removed.headers.get("Location"), "/clients/admin/books?notice=expense-deleted");
+  const after = await books();
+  assert.match(after, /<dt>Overhead<\/dt><dd>\$100\.00<\/dd>/u);
+  assert.match(after, /The books balance\./u);
 });
