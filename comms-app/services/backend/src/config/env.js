@@ -70,4 +70,9 @@ export const env = {
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
   googleRedirectUri: process.env.GOOGLE_REDIRECT_URI || "",
+  // Google sign-in for the desktop apps (DropForge, Rose Colored Glasses,
+  // TuneForge): a "Desktop app" OAuth client. The secret stays here; the apps
+  // hand this server the code they get and it does the exchange.
+  googleDesktopClientId: process.env.GOOGLE_DESKTOP_CLIENT_ID || "",
+  googleDesktopClientSecret: process.env.GOOGLE_DESKTOP_CLIENT_SECRET || "",
 };

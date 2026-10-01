@@ -1039,8 +1039,16 @@ authRouter.post("/google", googleSignInRateLimiter, async (req, res) => {
   if (!identity) {
     return res.status(403).json({ error: "google_email_not_verified" });
   }
-  const { email } = identity;
+  return finishGoogleSignIn(identity.email, { requestId, res });
+});
 
+/**
+ * A Google identity, proven, signed in: its account (made the first time),
+ * then a session exactly as /login gives. Shared by the id-token route (the
+ * website, the TabForge extension, phones) and the desktop apps' code
+ * exchange (/google/code).
+ */
+async function finishGoogleSignIn(email, { requestId, res }) {
   try {
     let user = await db("users").where({ email }).first();
 
@@ -1093,4 +1101,81 @@ authRouter.post("/google", googleSignInRateLimiter, async (req, res) => {
     });
     return res.status(500).json({ error: "server_error" });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Google sign-in for desktop apps (DropForge, Rose Colored Glasses, TuneForge)
+//
+// A desktop app opens the system browser at Google with PKCE and a loopback
+// redirect (http://127.0.0.1:<port>/), as Google asks installed apps to, and
+// hands the code it gets back to this route. The exchange happens here, so
+// the desktop client's secret stays in Render and never ships inside an app.
+// Every app learns the client ids from /google/config: a client can change in
+// Render without a release, and an app shows its Google button only once one
+// is set.
+// ---------------------------------------------------------------------------
+
+// Exported for tests: only a loopback address can receive a desktop code.
+export function desktopRedirectAllowed(uri) {
+  return /^http:\/\/(127\.0\.0\.1|\[::1\]|localhost):\d{2,5}\/[A-Za-z0-9._~/-]{0,64}$/.test(String(uri || ""));
+}
+
+const GoogleCode = z.object({
+  code: z.string().min(8).max(2048),
+  codeVerifier: z.string().min(43).max(128).regex(/^[A-Za-z0-9._~-]+$/),
+  redirectUri: z.string().max(200),
+});
+
+const desktopGoogleReady = () => Boolean(env.googleDesktopClientId && env.googleDesktopClientSecret);
+
+// Client ids are public. Never the secret.
+authRouter.get("/google/config", (req, res) => {
+  res.set("Cache-Control", "public, max-age=300");
+  return res.json({
+    webClientId: env.googleClientId || "",
+    desktopClientId: desktopGoogleReady() ? env.googleDesktopClientId : "",
+  });
+});
+
+authRouter.post("/google/code", googleSignInRateLimiter, async (req, res) => {
+  const requestId = getRequestId(req);
+
+  if (!env.jwtSecret) {
+    log("error", "google_signin_missing_jwt_secret", { requestId });
+    return res.status(500).json({ error: "server_misconfigured" });
+  }
+  if (!desktopGoogleReady()) {
+    log("error", "google_desktop_signin_missing_client", { requestId });
+    return res.status(503).json({ error: "google_signin_unavailable" });
+  }
+
+  const parsed = GoogleCode.safeParse(req.body);
+  if (!parsed.success || !desktopRedirectAllowed(parsed.data.redirectUri)) {
+    return res.status(400).json({ error: "invalid_input" });
+  }
+  const { code, codeVerifier, redirectUri } = parsed.data;
+
+  let payload;
+  try {
+    const client = new OAuth2Client(env.googleDesktopClientId, env.googleDesktopClientSecret, redirectUri);
+    const { tokens } = await client.getToken({ code, codeVerifier, redirect_uri: redirectUri });
+    if (!tokens?.id_token) throw new Error("Google returned no id_token");
+    const ticket = await client.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: env.googleDesktopClientId,
+    });
+    payload = ticket.getPayload();
+  } catch (err) {
+    log("warn", "google_desktop_signin_bad_code", {
+      requestId,
+      message: String(err?.message || err),
+    });
+    return res.status(401).json({ error: "bad_google_code" });
+  }
+
+  const identity = googleIdentityFromPayload(payload);
+  if (!identity) {
+    return res.status(403).json({ error: "google_email_not_verified" });
+  }
+  return finishGoogleSignIn(identity.email, { requestId, res });
 });
