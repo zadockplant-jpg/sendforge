@@ -119,6 +119,7 @@ import { CLIENT_UPLOADS, parseSection, sectionName } from "./documents.js";
 import { CREW_SECTIONS } from "./labor.js";
 import { handleAdminLabor, handleCrew } from "./crew.js";
 import { handleAdminBank, listBankAccounts, unfileExpenseMatch } from "./bank.js";
+import { handleAdminTeam } from "./team.js";
 import { EXPENSE_CATEGORIES, categoryName, deleteExpense, getExpense, listExpenses, paidWithOptions, putExpense } from "./expenses.js";
 import {
   adminBillingPage,
@@ -262,6 +263,10 @@ const NOTICES = {
   "billing-send-failed": { text: "Posted to the client portal, but the email did not go out. Use Email on this page to try again.", tone: "error" },
   "billing-updated": { text: "Changes saved." },
   "client-added": { text: "Client portal created." },
+  "client-added-private": { text: "Project created. It has no client login, so only you can see it." },
+  "login-saved": { text: "Client login saved. The client signs in with it on the client portal." },
+  "login-invalid": { text: "The client login needs 10 to 120 characters.", tone: "error" },
+  "login-taken": { text: "That login already opens another client portal. Choose a different one.", tone: "error" },
   "client-exists": { text: "A client portal with that id already exists.", tone: "error" },
   "client-updated": { text: "Client emails saved." },
   "site-saved": { text: "Job site address saved. It goes on subcontractors' lien waivers for this job." },
@@ -1628,7 +1633,7 @@ function pageFor(pathname) {
   if (client) return `/clients/admin?client=${client[1]}`;
   const worker = pathname.match(/^\/clients\/admin\/labor\/workers\/([^/]+)/u);
   if (worker) return `/clients/admin/labor/workers/${worker[1]}`;
-  for (const section of ["/clients/admin/labor", "/clients/admin/bank", "/clients/admin/books", "/clients/admin/templates", "/clients/admin/documents"]) {
+  for (const section of ["/clients/admin/labor", "/clients/admin/bank", "/clients/admin/books", "/clients/admin/templates", "/clients/admin/documents", "/clients/admin/schedule", "/clients/admin/notes"]) {
     if (pathname === section || pathname.startsWith(`${section}/`)) return section;
   }
   if (/^\/clients\/admin\/(request|verify)$/u.test(pathname)) return "/clients/admin/code";
@@ -1847,6 +1852,7 @@ async function routePortalRequest(context) {
       if (pathname === "/clients/admin/books" || pathname.startsWith("/clients/admin/books/")) return handleBooks(context, store, pathname, url);
       if (pathname === "/clients/admin/labor" || pathname.startsWith("/clients/admin/labor/")) return handleAdminLabor({ ...context, kit: KIT }, store, pathname, url);
       if (pathname === "/clients/admin/bank" || pathname.startsWith("/clients/admin/bank/")) return handleAdminBank({ ...context, kit: KIT }, store, pathname, url);
+      if (/^\/clients\/admin\/(schedule|notes)(\/|$)/u.test(pathname)) return handleAdminTeam({ ...context, kit: KIT }, store, pathname, url);
 
       // Share a document into any client portal's section, and see what awaits a signature.
       if (pathname === "/clients/admin/documents") {
@@ -1874,34 +1880,35 @@ async function routePortalRequest(context) {
       // A problem is explained next to the form, which keeps what was typed (except the login).
       if (method === "POST" && pathname === "/clients/admin/clients") {
         const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+        // Projects go by their names; the address id is made from the name (a number is added when
+        // another project has it). Without a login a project is not client facing: only the admin
+        // sees it.
         const entered = {
           name: String(form?.get("name") || "").trim(),
-          slug: String(form?.get("slug") || "").trim(),
           emails: String(form?.get("emails") || "").trim()
         };
         const clientPassword = String(form?.get("password") || "");
-        const slug = slugify(entered.slug || entered.name);
+        let slug = slugify(entered.name);
         const emails = parseEmailList(entered.emails);
         let clientError = "";
         if (!form) clientError = "The form could not be read. Please try again.";
         else if (!entered.name || entered.name.length > 120) clientError = "Enter the client or project name, up to 120 characters.";
-        else if (!isValidSlug(slug)) clientError = "Enter a portal id with letters or numbers, for example smith-residence.";
-        else if (clientPassword.length < 10 || clientPassword.length > 120) clientError = "The project login needs 10 to 120 characters.";
+        else if (!isValidSlug(slug)) clientError = "Enter a name with letters or numbers, for example Smith Residence.";
+        else if (clientPassword && (clientPassword.length < 10 || clientPassword.length > 120)) clientError = "The project login needs 10 to 120 characters, or leave it blank to keep the project admin only.";
         // The emails are optional, so only addresses that were typed are checked.
         else if (emails.addresses.length || emails.invalid.length) clientError = recipientProblem(emails);
-        if (!clientError) {
-          if (slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug))) clientError = `A client portal with the id ${slug} already exists. Choose a different portal id.`;
-          // Each login must open exactly one portal.
-          else if (await resolveLogin(env, store, clientPassword)) clientError = "That project login already opens another client portal. Choose a different login.";
-        }
-        if (clientError) return dashboard({ requested: null, newClient: { ...entered, slug: entered.slug ? slug : "" }, clientError, status: 400 });
+        // Each login must open exactly one portal.
+        if (!clientError && clientPassword && (await resolveLogin(env, store, clientPassword))) clientError = "That project login already opens another client portal. Choose a different login.";
+        if (clientError) return dashboard({ requested: null, newClient: entered, clientError, status: 400 });
+        const stem = slug.slice(0, 58).replace(/-+$/u, "");
+        for (let number = 2; slug === DEFAULT_CLIENT_SLUG || (await getClient(store, slug)); number += 1) slug = `${stem}-${number}`;
 
-        await putClient(store, { slug, name: entered.name, emails: emails.addresses, active: true, passwordHash: await hashPassword(clientPassword), createdAt: new Date().toISOString() });
-        await record(store, { actor: "admin", action: "client.created", clientSlug: slug, ip: requestIp(context.request), summary: `Created the client portal ${entered.name}${emails.addresses.length ? ` for ${emails.addresses.join(", ")}` : ""}` });
-        return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=client-added`);
+        await putClient(store, { slug, name: entered.name, emails: emails.addresses, active: true, passwordHash: clientPassword ? await hashPassword(clientPassword) : null, createdAt: new Date().toISOString() });
+        await record(store, { actor: "admin", action: "client.created", clientSlug: slug, ip: requestIp(context.request), summary: `Created the ${clientPassword ? "client portal" : "admin-only project"} ${entered.name}${emails.addresses.length ? ` for ${emails.addresses.join(", ")}` : ""}` });
+        return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${clientPassword ? "client-added" : "client-added-private"}`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|payments|expenses)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|payments|expenses)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -1979,6 +1986,21 @@ async function routePortalRequest(context) {
             await record(store, { actor: "admin", action: "client.emails-saved", clientSlug: slug, ip: requestIp(context.request), summary: `Saved the emails for ${target.name}: ${emails.addresses.join(", ") || "none"}` });
           }
           return redirectResponse(`${back}&notice=client-updated`);
+        }
+
+        // The project's client login: set it to make an admin-only project client facing, or
+        // change it. Each login opens exactly one portal.
+        if (area === "login" && !id && !action) {
+          if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+          if (target.managedBySecret) return redirectResponse(`${back}&notice=invalid`);
+          const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+          const login = String(form?.get("login") || "");
+          if (login.length < 10 || login.length > 120) return redirectResponse(`${back}&notice=login-invalid`);
+          const owner = await resolveLogin(env, store, login);
+          if (owner && owner !== slug) return redirectResponse(`${back}&notice=login-taken`);
+          await putClient(store, { ...target, passwordHash: await hashPassword(login) });
+          await record(store, { actor: "admin", action: "client.login-saved", clientSlug: slug, ip: requestIp(context.request), summary: `${target.passwordHash ? "Changed the client login for" : "Gave a client login to"} ${target.name}` });
+          return redirectResponse(`${back}&notice=login-saved`);
         }
 
         // The job site's address, printed on subcontractors' lien waivers for this job.

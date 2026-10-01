@@ -82,6 +82,8 @@ export function pageShell(content, { authenticated = false, admin = false, crew 
     nav.push('<a href="/clients">Home</a>');
     if (admin) {
       nav.push('<a href="/clients/admin">Admin panel</a>');
+      nav.push('<a href="/clients/admin/schedule">Schedule</a>');
+      nav.push('<a href="/clients/admin/notes">Important notes</a>');
       nav.push('<a href="/clients/admin/templates">Templates</a>');
       nav.push('<a href="/clients/admin/documents">Documents</a>');
       nav.push('<a href="/clients/admin/labor">Labor</a>');
@@ -264,7 +266,6 @@ function billingRows(items, { basePath, viewer }) {
     // Without scripts, the status opens the invoice and the trash button its delete page.
     const action = admin
       ? `<div class="billing-row-actions">
-            <a class="portal-secondary-link" href="${href}">Open</a>
             <a class="billing-trash" href="${href}/delete" data-delete-menu data-label="${escapeAttribute(name)}" data-kind="${item.kind}" data-note="${escapeAttribute(deleteNote(item))}"${item.status === "processing" ? " data-blocked" : ""} aria-label="Delete ${escapeAttribute(billingLabel(item))}" title="Delete">${TRASH_ICON}</a>
           </div>`
       : `<a class="portal-secondary-link" href="${href}">${item.kind === "invoice" && item.status === "open" ? "View and pay" : "View"}</a>`;
@@ -281,9 +282,9 @@ function billingRows(items, { basePath, viewer }) {
     const detailText = admin && item.status === "paid" && payment.source === "manual"
       ? `<a class="payment-change" href="${href}" data-payment-menu data-label="${escapeAttribute(name)}" data-method="${escapeAttribute(payment.method || "")}" data-method-name="${escapeAttribute(payment.methodName || "")}" data-reference="${escapeAttribute(payment.reference || "")}" data-paid-on="${escapeAttribute(String(item.paidAt || "").slice(0, 10))}" title="Change how it was paid">${escapeHtml(detail)}</a>`
       : escapeHtml(detail);
-    return `<tr>
+    return `<tr${admin ? ` class="billing-row-link" data-row-href="${href}"` : ""}>
           <td><span class="portal-number">${escapeHtml(item.number)}</span></td>
-          <td>${escapeHtml(item.title)}${dueLine}${note}</td>
+          <td>${admin ? `<a class="billing-row-title" href="${href}">${escapeHtml(item.title)}</a>` : escapeHtml(item.title)}${dueLine}${note}</td>
           <td>${money(item.amountCents, item.currency)}${partlyPaid(item) ? `<small>${money(balanceDue(item), item.currency)} due</small>` : ""}</td>
           <td>${status}${detail ? `<small class="status-detail">${detailText}</small>` : ""}</td>
           <td>${action}</td>
@@ -691,16 +692,21 @@ function adminShell(content, { title, scripts = [] }) {
   return pageShell(content, { authenticated: false, admin: true, bodyClass: "portal-page portal-admin", title, scripts });
 }
 
+// Choosing a template opens a new quote or invoice from it (billing.js); without scripts its
+// button does.
 function templatePicker(templates, action) {
   if (!templates.length) return "";
   const options = templates.map((template) => `<option value="${escapeAttribute(template.id)}">${escapeHtml(template.name)} (${template.kind === "invoice" ? "invoice" : "quote"})</option>`).join("");
   return `<form class="admin-template-picker" action="${escapeAttribute(action)}" method="get">
             <label for="template-pick">Start from a template
-              <select id="template-pick" name="template" required>${options}</select>
+              <select class="select-plain" id="template-pick" name="template" required data-autosubmit><option value="" selected disabled>Choose a template</option>${options}</select>
             </label>
-            <button class="portal-logout-button" type="submit">Use template</button>
+            <button class="portal-logout-button" type="submit" data-autosubmit-button>Use template</button>
           </form>`;
 }
+
+// A disk: the save button beside a single field.
+const SAVE_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M3.5 3.5h10.2l2.8 2.8v10.2h-13z"/><path d="M6.5 3.5v4h6v-4"/><path d="M6 16.5v-5.2h8v5.2"/></g></svg>`;
 
 // The popups the admin list opens (billing.js): change an invoice's status, and confirm a
 // delete. Due to paid asks how it was paid; paid to due removes a payment recorded by hand.
@@ -960,7 +966,8 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
   const clientLinks = clients.map((client) => {
     const current = selected && client.slug === selected.slug;
     const emails = clientEmails(client);
-    const detail = [client.managedBySecret ? "Login set in Render (MHB_CLIENT_PORTAL_PASSWORD)" : `Portal id: ${escapeHtml(client.slug)}`, emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].join(" · ");
+    const adminOnly = !client.passwordHash && !client.managedBySecret;
+    const detail = [adminOnly ? "Admin only" : "", emails.length ? escapeHtml(emails.join(", ")) : "No email on file"].filter(Boolean).join(" · ");
     return `<li><a class="admin-client-link${current ? " is-current" : ""}" href="/clients/admin?client=${encodeURIComponent(client.slug)}"${current ? ' aria-current="page"' : ""}>
         <strong>${escapeHtml(client.name)}</strong><small>${detail}</small></a></li>`;
   }).join("");
@@ -970,25 +977,23 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
       const base = `/clients/admin/clients/${encodeURIComponent(selected.slug)}`;
       return `<section class="admin-panel" aria-labelledby="selected-heading">
         <div class="admin-panel-head">
-          <p class="portal-kicker">Client portal</p>
           <h2 id="selected-heading">${escapeHtml(selected.name)}</h2>
-          <form class="admin-inline-form" action="${base}/profile" method="post">
-            ${emailsField({
-              id: "client-emails",
-              name: "emails",
-              label: "Client emails for quotes, invoices and receipts",
-              addresses: clientEmails(selected),
-              typed: typedEmails,
-              hint: "Every quote, invoice and receipt for this project is addressed to all of them. Addresses you email from this project are added here."
-            })}
-            <button class="portal-logout-button" type="submit">Save emails</button>
+          <form class="admin-inline-form admin-save-row" action="${base}/profile" method="post">
+            <button class="icon-save" type="submit" aria-label="Save client email" title="Save">${SAVE_ICON}</button>
+            ${emailsField({ id: "client-emails", name: "emails", label: "Client email", addresses: clientEmails(selected), typed: typedEmails })}
           </form>
-          <form class="admin-inline-form" action="${base}/site" method="post">
+          <form class="admin-inline-form admin-save-row" action="${base}/site" method="post">
+            <button class="icon-save" type="submit" aria-label="Save job site address" title="Save">${SAVE_ICON}</button>
             <label for="client-site">Job site address (printed on subcontractors' lien waivers)
               <input id="client-site" name="siteAddress" type="text" maxlength="200" value="${escapeAttribute(selected.siteAddress || "")}" placeholder="1234 Lakeshore Dr, Muskegon, MI 49441">
             </label>
-            <button class="portal-logout-button" type="submit">Save address</button>
           </form>
+          ${selected.managedBySecret ? "" : `<form class="admin-inline-form admin-save-row" action="${base}/login" method="post">
+            <button class="icon-save" type="submit" aria-label="Save client login" title="Save">${SAVE_ICON}</button>
+            <label for="client-login">Client login
+              <input id="client-login" name="login" type="text" minlength="10" maxlength="120" autocomplete="off" required placeholder="${selected.passwordHash ? "Set. Type a new one to change it." : "None, so only you can see this project. Type one to share it."}">
+            </label>
+          </form>`}
         </div>
 
         <div class="admin-section-head">
@@ -1034,42 +1039,31 @@ export function adminDashboardPage({ clients, selected, billing, documents, temp
     : `<section class="admin-panel"><p class="portal-empty">Choose a client portal to manage its quotes, invoices and documents.</p></section>`;
 
   return pageShell(`<div class="site-width portal-shell">
-      <section class="admin-intro">
-        <p class="portal-kicker">Admin panel</p>
-        <h1 class="portal-heading">Manage client portals.</h1>
-        <div class="admin-chips">
-          ${statusChip(readiness.store, "Portal storage")}
-          ${statusChip(readiness.files, "File storage")}
-          ${statusChip(readiness.stripe, "Stripe")}
-          ${statusChip(readiness.webhook, "Stripe webhook")}
-          ${statusChip(readiness.email, "Email")}
-        </div>
-        ${noticeMarkup(notice)}
-      </section>
+      <h1 class="visually-hidden">Admin panel</h1>
+      <details class="admin-add-client" id="add-client" data-collapsible${clientError ? " open" : ""}>
+        <summary>Add a client portal</summary>
+        <button class="admin-collapse" type="button" data-collapse aria-label="Close Add a client portal" title="Close">−</button>
+        <form class="admin-inline-form admin-add-client-form" action="/clients/admin/clients" method="post">
+          ${clientError ? `<p class="portal-error" role="alert">${escapeHtml(clientError)}</p>` : ""}
+          <label for="client-name">Client or project name
+            <input id="client-name" name="name" type="text" maxlength="120" required value="${escapeAttribute(newClient?.name || "")}" placeholder="Wolf Lake Views">
+          </label>
+          <label for="client-password">Project login (optional)
+            <input id="client-password" name="password" type="text" minlength="10" maxlength="120" autocomplete="off" placeholder="Leave blank to keep it admin only">
+          </label>
+          ${emailsField({ id: "new-client-emails", name: "emails", label: "Client email (optional)", typed: newClient?.emails ?? null })}
+          <button class="button button-solid" type="submit">Create portal</button>
+        </form>
+      </details>
+      ${[[readiness.store, "Portal storage"], [readiness.files, "File storage"], [readiness.stripe, "Stripe"], [readiness.webhook, "Stripe webhook"], [readiness.email, "Email"]].some(([ready]) => !ready)
+        ? `<div class="admin-chips">${[[readiness.store, "Portal storage"], [readiness.files, "File storage"], [readiness.stripe, "Stripe"], [readiness.webhook, "Stripe webhook"], [readiness.email, "Email"]].filter(([ready]) => !ready).map(([ready, label]) => statusChip(ready, label)).join("")}</div>`
+        : ""}
+      ${noticeMarkup(notice)}
 
       <div class="admin-layout">
         <aside class="admin-sidebar">
           <h2>Client portals</h2>
           <ul class="admin-client-list">${clientLinks}</ul>
-          <form class="portal-form admin-form" id="add-client" action="/clients/admin/clients" method="post">
-            <h3>Add a client portal</h3>
-            ${clientError ? `<p class="portal-error" role="alert">${escapeHtml(clientError)}</p>` : ""}
-            <label for="client-name">Client or project name
-              <input id="client-name" name="name" type="text" maxlength="120" required value="${escapeAttribute(newClient?.name || "")}" placeholder="Wolf Lake Views" data-slug-source>
-            </label>
-            <label for="client-slug">Portal id
-              <input id="client-slug" name="slug" type="text" maxlength="64" value="${escapeAttribute(newClient?.slug || "")}" placeholder="wolf-lake-views" data-slug-target>
-              <small class="admin-field-hint">Filled in from the name. Letters, numbers and hyphens; spaces become hyphens.</small>
-            </label>
-            <label for="client-password">Project login
-              <input id="client-password" name="password" type="text" minlength="10" maxlength="120" autocomplete="off" required>
-              <small class="admin-field-hint">At least 10 characters, and different from every other portal's login.</small>
-            </label>
-            ${emailsField({ id: "new-client-emails", name: "emails", label: "Client emails (optional)", typed: newClient?.emails ?? null })}
-            <button class="button button-solid" type="submit">Create portal</button>
-            <p class="portal-security-note">The login is hashed before it is stored. Share it with the client directly.</p>
-          </form>
-          <p class="admin-sidebar-link"><a class="portal-secondary-link" href="/clients/admin/templates">Quote and invoice templates</a></p>
         </aside>
         ${selectedSection}
       </div>

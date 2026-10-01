@@ -6,6 +6,7 @@ import { moneyInput } from "./billing.js";
 import { FORMS, PAPERWORK } from "./forms.js";
 import { WAIVERS, waiverAmount, waiverParagraphs } from "./waivers.js";
 import { CREW_SECTIONS, LABOR_PAYMENT_METHODS, LABOR_STATUS, WORKER_KINDS, firstName, hoursCost, hoursText } from "./labor.js";
+import { crewNotesSection, crewScheduleSection } from "./team-pages.js";
 
 const SIGN_SCRIPT = "/clients/portal/sign.js";
 const BILLING_SCRIPT = "/clients/portal/billing.js";
@@ -158,7 +159,7 @@ function historyRows(entries, clients) {
       </table>`;
 }
 
-export function crewHomePage({ worker, entries, clients, documents, today, secureReady, status = null }) {
+export function crewHomePage({ worker, entries, clients, documents, schedule = [], notes = null, today, secureReady, status = null }) {
   const employee = worker.kind === "employee";
   const sendForm = employee
     ? `<form class="portal-form crew-send" action="/clients/crew/hours" method="post">
@@ -240,6 +241,8 @@ export function crewHomePage({ worker, entries, clients, documents, today, secur
         <p class="portal-lead-actions"><a class="button button-outline" href="#upload-document">Upload document</a></p>
         ${notice(status)}
       </section>
+      ${crewScheduleSection({ entries: schedule, clients })}
+      ${notes ? crewNotesSection({ notes }) : ""}
       <section class="portal-section" aria-labelledby="paperwork-heading">
         <h2 id="paperwork-heading">Your paperwork</h2>
         ${paperworkRows(worker, documents, { secureReady })}
@@ -496,7 +499,7 @@ function crewRows(workers) {
     const { done, total } = paperworkCount(worker);
     return `<tr>
           <td><a class="portal-inline-link" href="/clients/admin/labor/workers/${encodeURIComponent(worker.id)}">${escapeHtml(worker.name)}</a><small>${escapeHtml(worker.company || worker.email)}</small></td>
-          <td>${escapeHtml(WORKER_KINDS[worker.kind])}${worker.trade ? `<small>${escapeHtml(worker.trade)}</small>` : ""}</td>
+          <td>${escapeHtml(WORKER_KINDS[worker.kind])}${worker.trade || worker.teamLeader ? `<small>${escapeHtml([worker.trade, worker.teamLeader ? "Team leader" : ""].filter(Boolean).join(" · "))}</small>` : ""}</td>
           <td><span class="portal-status portal-status-${done === total ? "paid" : "open"}">${done} of ${total} signed</span></td>
           <td>${escapeHtml(signInState(worker))}</td>
         </tr>`;
@@ -690,6 +693,7 @@ export function adminWorkerPage({ worker, entries, clients, documents, status = 
             <label for="profile-address">Address (for lien waivers) <input id="profile-address" name="address" type="text" maxlength="160" value="${escapeAttribute(worker.address || "")}"></label>
             ${employee ? `<label for="profile-rate">Hourly rate ($) <input id="profile-rate" name="rate" type="text" inputmode="decimal" maxlength="10" value="${escapeAttribute(moneyInput(worker.hourlyRateCents ?? null))}"></label>
             <label for="profile-start">Start date <input id="profile-start" name="startDate" type="date" value="${escapeAttribute(worker.startDate || "")}"></label>` : ""}
+            <label class="portal-check" for="profile-leader"><input id="profile-leader" name="teamLeader" type="checkbox" value="yes"${worker.teamLeader ? " checked" : ""}><span>Team leader: sees and adds to Important notes in the crew portal</span></label>
             <button class="button button-solid" type="submit">Save profile</button>
           </form>
         </section>

@@ -18,6 +18,8 @@ import { unfileLaborPayment } from "./bank.js";
 import { signPage } from "./pages.js";
 import { FORMS, PAPERWORK, fillOfficialForm, readAnswers, typesetDeposit } from "./forms.js";
 import { WAIVERS, typesetWaiver } from "./waivers.js";
+import { TEAM_NOTICES, addNote, changeNote, upcomingFor } from "./team.js";
+import { listNotes } from "./notes.js";
 import { getSecure, getSecureJson, putSecure, putSecureJson, secureReady } from "./secure.js";
 import {
   CREW_SECTIONS,
@@ -72,6 +74,9 @@ const CREW_NOTICES = {
   signed: { text: "Your signature was applied. A signed copy is now on file." },
   "upload-failed": { text: "That file could not be uploaded. Use a PDF or photo under 20 MB.", tone: "error" },
   "not-open": { text: "That is no longer waiting for you.", tone: "info" },
+  "note-added": TEAM_NOTICES["note-added"],
+  "note-updated": TEAM_NOTICES["note-updated"],
+  "note-invalid": TEAM_NOTICES["note-invalid"],
   invalid: { text: "Please check the form and try again.", tone: "error" }
 };
 
@@ -234,12 +239,15 @@ async function paperworkPdf(store, env, worker, key, kit) {
 
 async function crewHome(context, store, worker, { status = null, code = 200 } = {}) {
   const { kit, env } = context;
-  const [entries, clients, documents] = await Promise.all([
+  // Everyone sees their upcoming schedule; team leaders also see Important notes.
+  const [entries, clients, documents, schedule, notes] = await Promise.all([
     listLabor(store, { workerId: worker.id, limit: 100 }),
     activeClients(store),
-    listDocuments(store, crewSlug(worker.id))
+    listDocuments(store, crewSlug(worker.id)),
+    upcomingFor(store, worker.id),
+    worker.teamLeader ? listNotes(store) : null
   ]);
-  return kit.htmlResponse(crewHomePage({ worker, entries, clients, documents, today: todayInMichigan(), secureReady: secureReady(env), status }), code);
+  return kit.htmlResponse(crewHomePage({ worker, entries, clients, documents, schedule, notes, today: todayInMichigan(), secureReady: secureReady(env), status }), code);
 }
 
 async function signedInWorker(context, store) {
@@ -546,6 +554,20 @@ export async function handleCrew(context, store, pathname, url) {
   }
   if (!worker) return kit.redirectResponse("/clients/crew");
 
+  // Important notes, for team leaders: add one, or mark one In progress, Completed or Contingent.
+  const noteMatch = pathname.match(new RegExp(`^/clients/crew/notes(?:/${ID}/status)?$`, "u"));
+  if (noteMatch) {
+    if (method !== "POST") return kit.methodNotAllowedResponse(["POST"]);
+    if (!worker.teamLeader) return kit.redirectResponse("/clients/crew");
+    const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+    const ip = kit.requestIp(context.request);
+    const result = noteMatch[1]
+      ? await changeNote(store, noteMatch[1], String(form?.get("status") || ""), { by: worker.name, actor: "crew", ip })
+      : await addNote(store, { text: form?.get("text"), author: { kind: "crew", name: worker.name, workerId: worker.id }, ip });
+    if (!result) return kit.notFound();
+    return kit.redirectResponse(`/clients/crew?notice=${result}#${noteMatch[1] ? `note-${noteMatch[1]}` : "crew-notes-heading"}`);
+  }
+
   if (pathname === "/clients/crew/hours") {
     if (method !== "POST") return kit.methodNotAllowedResponse(["POST"]);
     if (worker.kind !== "employee") return kit.redirectResponse("/clients/crew");
@@ -608,6 +630,7 @@ function readProfile(form) {
     trade: clean(form?.get("trade"), 60),
     company: clean(form?.get("company"), 120),
     address: form?.has("address") ? clean(form.get("address"), 160) : undefined,
+    teamLeader: form?.get("teamLeader") === "yes",
     startDate: String(form?.get("startDate") || "").trim()
   };
   const rate = String(form?.get("rate") || "").trim();

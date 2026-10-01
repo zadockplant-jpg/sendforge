@@ -193,6 +193,47 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   - 20 sign-in or admin-code attempts and 120 form posts per visitor address per minute
   - 3 admin code requests per address and 12 overall per 10 minutes
 
+## Projects on the admin panel
+
+- **Add a client portal** is a bar at the top of the admin panel. Click it to open the fields and
+  click outside it, or its −, to fold it again. A project is named, not given an id: its id (for
+  addresses and records) is made from the name, with -2, -3 and so on when the name is taken.
+- **The project login is optional.** A project created without one is **admin only** (shown as
+  "Admin only" in the list). It is not client facing until the selected project's **Client
+  login** field is saved. Saving a new login there replaces the old one; a project whose login
+  comes from `MHB_CLIENT_PORTAL_PASSWORD` has no such field.
+- The selected project's **Client email**, **Job site address** and **Client login** each save
+  with the disk button on their left.
+- **Start from a template** opens the chosen template as soon as it is picked. Clicking anywhere
+  on a quote or invoice row opens it.
+- The panel shows nothing about setup while everything is ready. If portal storage, file storage,
+  Stripe, its webhook or email is not set up, a warning names what is missing.
+
+## Schedule and Important notes
+
+`team.js` (routes), `team-pages.js` (pages), `schedule.js` and `notes.js` (records). Migration
+`20261008_myhomebuilder_portal_notes_schedule.js` creates `mhb_schedule` and `mhb_notes`.
+
+- **Schedule** (`/clients/admin/schedule`) is a month calendar.
+  - Each entry has: a job (a client portal, or none for a note on those days), a start and an
+    optional end date, an optional time, the crew (employees and subcontractors from Labor), and
+    notes.
+  - A day's + opens the Add to the schedule popup for that day. Without scripts it opens a page
+    for it instead. Clicking an entry opens it to change or remove.
+  - Someone scheduled on two entries the same day is shown in pink on both.
+  - On phones the month is a list of the days that have something on them.
+- **Crew** see **Your schedule** at the top of the crew portal. It shows their own entries from
+  today through the next 45 days, with the job's site address, the time and the notes.
+- **Important notes** (`/clients/admin/notes`) are notes between the admin and the **team
+  leaders**: crew members whose Labor profile has **Team leader** checked.
+  - Team leaders see the same board in their crew portal (`/clients/crew/notes` posts). They can
+    add notes and mark them.
+  - Each note is marked **In progress**, **Completed** or **Contingent**; choosing its current mark
+    again sets it back to open. Each change keeps who made it and when.
+  - Completed notes fold under **Completed**.
+  - Only the admin deletes notes.
+- Adding, changing and removing schedule entries and notes is recorded in the activity log.
+
 ## Paying a bill down
 
 An invoice can be paid over time. **Add a payment** (on the invoice's admin page, or **Add

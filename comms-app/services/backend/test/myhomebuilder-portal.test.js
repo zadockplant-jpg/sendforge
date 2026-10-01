@@ -32,6 +32,7 @@ const { up: laborTables } = await import("../src/db/migrations/20261004_myhomebu
 const { up: bankTables } = await import("../src/db/migrations/20261005_myhomebuilder_portal_banking.js");
 const { up: sealActivity } = await import("../src/db/migrations/20261006_myhomebuilder_portal_activity_seal.js");
 const { up: expenseTables } = await import("../src/db/migrations/20261007_myhomebuilder_portal_expenses.js");
+const { up: teamTables } = await import("../src/db/migrations/20261008_myhomebuilder_portal_notes_schedule.js");
 const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
@@ -170,7 +171,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses", "mhb_notes", "mhb_schedule"];
 let server;
 let base;
 let renumbered = [];
@@ -238,6 +239,7 @@ before(async () => {
   await sealActivity(db);
   sealedBefore = await db("mhb_activity").orderBy("chain_seq").select("action", "chain_seq", "chain_hash");
   await expenseTables(db);
+  await teamTables(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -487,8 +489,8 @@ test("admin code goes to mb@myhomebuilderllc.com from billing@ and unlocks the a
   const dashboard = await request("/clients/admin", { headers: { Cookie: adminCookie } });
   assert.equal(dashboard.status, 200);
   const body = await dashboard.text();
-  assert.match(body, /Manage client portals/u);
-  assert.match(body, /Portal storage: ready/u);
+  assert.match(body, /<summary>Add a client portal<\/summary>/u);
+  assert.doesNotMatch(body, /Manage client portals|Portal storage: ready|Email: ready/u, "no title or ready labels when everything is set up");
   assert.equal((await request("/clients/admin", { headers: { Cookie: clientCookie } })).status, 303);
 });
 
@@ -615,36 +617,53 @@ test("admin creates a client portal whose hashed login opens its own portal", as
   assert.match(home, /Wolf Lake Views/u);
   assert.doesNotMatch(home, /Muskegon Addition Selections/u);
   assert.equal((await request("/clients/muskegon-addition/", { headers: { Cookie: cookie } })).status, 303);
-  const duplicate = await request("/clients/admin/clients", form({ name: "Again", slug: "wolf-lake-views", password: "another-login-2026" }, adminCookie));
-  assert.equal(duplicate.status, 400);
-  assert.match(await duplicate.text(), /A client portal with the id wolf-lake-views already exists/u);
+  // The same name again is its own project.
+  const again = await request("/clients/admin/clients", form({ name: "Wolf Lake Views", password: "another-login-2026" }, adminCookie));
+  assert.equal(again.headers.get("Location"), "/clients/admin?client=wolf-lake-views-2&notice=client-added");
 });
 
-test("adding a client portal fixes up the portal id and explains any problem, keeping what was typed", async () => {
+test("a project without a login is admin only until it is given one", async () => {
   const adminCookie = await loginAsAdmin();
-  const spaced = await request("/clients/admin/clients", form({ name: "Smith Residence", slug: "Smith Residence ", password: "smith-residence-2026" }, adminCookie));
+  const created = await request("/clients/admin/clients", form({ name: "Shop Rebuild", password: "" }, adminCookie));
+  assert.equal(created.headers.get("Location"), "/clients/admin?client=shop-rebuild&notice=client-added-private");
+  assert.equal((await projectRecord("shop-rebuild")).passwordHash, null);
+  const page = await (await request("/clients/admin?client=shop-rebuild", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /<strong>Shop Rebuild<\/strong><small>Admin only · No email on file<\/small>/u);
+  assert.match(page, /placeholder="None, so only you can see this project\. Type one to share it\."/u);
+  assert.match(page, /<button class="icon-save" type="submit" aria-label="Save client login" title="Save">/u);
+
+  assert.equal((await request("/clients/admin/clients/shop-rebuild/login", form({ login: "short" }, adminCookie))).headers.get("Location"), "/clients/admin?client=shop-rebuild&notice=login-invalid");
+  assert.equal((await request("/clients/admin/clients/shop-rebuild/login", form({ login: process.env.MHB_CLIENT_PORTAL_PASSWORD }, adminCookie))).headers.get("Location"), "/clients/admin?client=shop-rebuild&notice=login-taken");
+  const saved = await request("/clients/admin/clients/shop-rebuild/login", form({ login: "shop-rebuild-login-1" }, adminCookie));
+  assert.equal(saved.headers.get("Location"), "/clients/admin?client=shop-rebuild&notice=login-saved");
+  const cookie = await loginAsClient("shop-rebuild-login-1");
+  assert.match(await (await request("/clients", { headers: { Cookie: cookie } })).text(), /Shop Rebuild/u);
+});
+
+test("a client portal is named, not given an id, and a problem is explained keeping what was typed", async () => {
+  const adminCookie = await loginAsAdmin();
+  const spaced = await request("/clients/admin/clients", form({ name: "Smith Residence", password: "smith-residence-2026" }, adminCookie));
   assert.equal(spaced.headers.get("Location"), "/clients/admin?client=smith-residence&notice=client-added");
 
-  const blank = await request("/clients/admin/clients", form({ name: "Lakeshore Cottage & Dock", slug: "", password: "lakeshore-cottage-2026" }, adminCookie));
+  const blank = await request("/clients/admin/clients", form({ name: "Lakeshore Cottage & Dock", password: "lakeshore-cottage-2026" }, adminCookie));
   assert.equal(blank.headers.get("Location"), "/clients/admin?client=lakeshore-cottage-and-dock&notice=client-added");
 
-  const short = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: "short", emails: "pine@example.com, pat@example.com" }, adminCookie));
+  const short = await request("/clients/admin/clients", form({ name: "Pine Street", password: "short", emails: "pine@example.com, pat@example.com" }, adminCookie));
   assert.equal(short.status, 400);
   const shortBody = await short.text();
   assert.match(shortBody, /The project login needs 10 to 120 characters/u);
   assert.match(shortBody, /id="client-name" name="name" type="text" maxlength="120" required value="Pine Street"/u);
   assert.match(shortBody, /id="new-client-emails" name="emails"[^>]* value="pine@example\.com, pat@example\.com"/u);
 
-  const reused = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: process.env.MHB_CLIENT_PORTAL_PASSWORD }, adminCookie));
+  const reused = await request("/clients/admin/clients", form({ name: "Pine Street", password: process.env.MHB_CLIENT_PORTAL_PASSWORD }, adminCookie));
   assert.equal(reused.status, 400);
   assert.match(await reused.text(), /That project login already opens another client portal/u);
-  const reusedAgain = await request("/clients/admin/clients", form({ name: "Pine Street", slug: "", password: "smith-residence-2026" }, adminCookie));
+  const reusedAgain = await request("/clients/admin/clients", form({ name: "Pine Street", password: "smith-residence-2026" }, adminCookie));
   assert.match(await reusedAgain.text(), /That project login already opens another client portal/u);
 
   const dashboard = await (await request("/clients/admin", { headers: { Cookie: adminCookie } })).text();
-  assert.doesNotMatch(dashboard, /pattern="\[a-z0-9\]/u, "the portal id field has no pattern the browser would ignore");
-  assert.match(dashboard, /data-slug-source/u);
-  assert.match(dashboard, /Portal id: smith-residence/u);
+  assert.doesNotMatch(dashboard, /Portal id|name="slug"/u, "projects go by their names");
+  assert.doesNotMatch(dashboard, /Quote and invoice templates<\/a><\/p>/u, "the templates link is in the menu");
 });
 
 test("portal ids drop accents and symbols and stay within 64 characters", () => {
@@ -810,7 +829,11 @@ test("a new client portal can start with several emails", async () => {
   const created = await request("/clients/admin/clients", form({ name: "Smith Residence", password: "smith-residence-2026", emails: "pat@example.com; sam@example.com" }, adminCookie));
   assert.equal(created.headers.get("Location"), "/clients/admin?client=smith-residence&notice=client-added");
   assert.deepEqual((await projectRecord("smith-residence")).emails, ["pat@example.com", "sam@example.com"]);
-  assert.match(await (await request("/clients/admin?client=smith-residence", { headers: { Cookie: adminCookie } })).text(), /Portal id: smith-residence · pat@example\.com, sam@example\.com/u);
+  const panel = await (await request("/clients/admin?client=smith-residence", { headers: { Cookie: adminCookie } })).text();
+  assert.match(panel, /<strong>Smith Residence<\/strong><small>pat@example\.com, sam@example\.com<\/small>/u);
+  assert.match(panel, /<button class="icon-save" type="submit" aria-label="Save client email" title="Save">/u);
+  assert.match(panel, /Client email\s*<span|Client email\s*\n?\s*<input|>Client email</u);
+  assert.doesNotMatch(panel, /Save emails|Save address|Every quote, invoice and receipt for this project|<p class="portal-kicker">Client portal<\/p>/u);
 
   const bad = await request("/clients/admin/clients", form({ name: "Pine Street", password: "pine-street-2026", emails: "pine@example" }, adminCookie));
   assert.equal(bad.status, 400);
@@ -2910,4 +2933,178 @@ test("pages that answer a form never ask to resubmit it on Back, and a form's ad
   assert.equal(await back("/clients/admin/labor/workers"), "/clients/admin/labor");
   assert.equal(await back("/clients/admin/bank/upload"), "/clients/admin/bank");
   assert.equal(await back("/clients/crew/hours"), "/clients/crew");
+});
+
+// ---------- Important notes and the schedule ----------
+
+test("Important notes are added, marked In progress, Completed or Contingent, set back to open, and deleted", async () => {
+  const adminCookie = await loginAsAdmin();
+  const home = await (await request("/clients/admin", { headers: { Cookie: adminCookie } })).text();
+  assert.match(home, /<a href="\/clients\/admin">Admin panel<\/a>\s*<a href="\/clients\/admin\/schedule">Schedule<\/a>\s*<a href="\/clients\/admin\/notes">Important notes<\/a>/u);
+
+  const empty = await request("/clients/admin/notes", form({ text: "   " }, adminCookie));
+  assert.equal(empty.headers.get("Location"), "/clients/admin/notes?notice=note-invalid");
+  const tooLong = await request("/clients/admin/notes", form({ text: "x".repeat(1001) }, adminCookie));
+  assert.equal(tooLong.headers.get("Location"), "/clients/admin/notes?notice=note-invalid");
+  const added = await request("/clients/admin/notes", form({ text: "Order the trusses for Muskegon\r\nby Friday <soon>" }, adminCookie));
+  assert.equal(added.headers.get("Location"), "/clients/admin/notes?notice=note-added");
+  const [row] = await db("mhb_notes").select("id", "status");
+  assert.equal(row.status, "open");
+
+  const board = async () => (await request("/clients/admin/notes", { headers: { Cookie: adminCookie } })).text();
+  let page = await board();
+  assert.match(page, /<h1 class="portal-heading">Important notes\.<\/h1>/u);
+  assert.match(page, /<p class="note-text">Order the trusses for Muskegon<br>by Friday &lt;soon&gt;<\/p>/u);
+  for (const label of ["In progress", "Completed", "Contingent"]) assert.match(page, new RegExp(`aria-pressed="false">${label}</button>`, "u"));
+  assert.match(page, /aria-label="Delete this note"/u);
+
+  const mark = (status) => request(`/clients/admin/notes/${row.id}/status`, form({ status }, adminCookie));
+  const statusNow = async () => (await db("mhb_notes").where({ id: row.id }).first()).status;
+  assert.equal((await mark("in-progress")).headers.get("Location"), `/clients/admin/notes?notice=note-updated#note-${row.id}`);
+  assert.equal(await statusNow(), "in-progress");
+  assert.match(await board(), /note-step note-step-in-progress is-current" type="submit" aria-pressed="true">In progress<\/button>/u);
+  await mark("in-progress");
+  assert.equal(await statusNow(), "open", "choosing the current mark again sets the note back to open");
+  await mark("contingent");
+  assert.equal(await statusNow(), "contingent");
+  assert.equal((await mark("done")).headers.get("Location"), `/clients/admin/notes?notice=note-invalid#note-${row.id}`);
+  await mark("completed");
+  assert.equal(await statusNow(), "completed");
+  page = await board();
+  assert.match(page, /<p class="portal-empty">No open notes\.<\/p>/u);
+  assert.match(page, /<details class="notes-completed">\s*<summary>Completed \(1\)<\/summary>/u);
+  assert.match(page, /Completed by Admin/u);
+  assert.equal((await request(`/clients/admin/notes/${row.id}/status`, { headers: { Cookie: adminCookie } })).headers.get("Location"), "/clients/admin/notes", "Back to a note's form opens the board");
+
+  assert.equal((await request(`/clients/admin/notes/${row.id}/delete`, form({}, adminCookie))).headers.get("Location"), "/clients/admin/notes?notice=note-deleted");
+  assert.equal((await db("mhb_notes").count({ n: "*" }).first()).n, 0);
+  const logged = (await db("mhb_activity").whereLike("action", "note.%").orderBy("id").select("action")).map((entry) => entry.action);
+  assert.deepEqual(logged, ["note.added", "note.status", "note.status", "note.status", "note.status", "note.deleted"]);
+  assert.notEqual((await request("/clients/admin/notes")).status, 200, "the board needs an admin sign-in");
+});
+
+test("team leaders share Important notes from the crew portal; other crew do not see them", async () => {
+  const adminCookie = await loginAsAdmin();
+  await request("/clients/admin/notes", form({ text: "Dumpster swap Tuesday" }, adminCookie));
+  const [adminNote] = await db("mhb_notes").select("id");
+  const lead = await addCrew(adminCookie, { kind: "employee", name: "Lee Park", email: "lee@example.com" });
+  const crew = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com" });
+
+  const crewHome = async (cookie) => (await request("/clients/crew", { headers: { Cookie: cookie } })).text();
+  assert.doesNotMatch(await crewHome(lead.cookie), /Important notes/u, "not a team leader yet");
+  const refused = await request("/clients/crew/notes", form({ text: "Let me in" }, crew.cookie));
+  assert.equal(refused.headers.get("Location"), "/clients/crew");
+  assert.equal((await db("mhb_notes").count({ n: "*" }).first()).n, 1);
+
+  const saved = await request(`/clients/admin/labor/workers/${lead.worker.id}/profile`, form({ name: "Lee Park", email: "lee@example.com", teamLeader: "yes" }, adminCookie));
+  assert.equal(saved.headers.get("Location"), `/clients/admin/labor/workers/${lead.worker.id}?notice=profile-saved`);
+  assert.equal((await workerRecord("lee@example.com")).teamLeader, true);
+  assert.match(await (await request(`/clients/admin/labor/workers/${lead.worker.id}`, { headers: { Cookie: adminCookie } })).text(), /name="teamLeader" type="checkbox" value="yes" checked>/u);
+  assert.match(await (await request("/clients/admin/labor", { headers: { Cookie: adminCookie } })).text(), /<small>Team leader<\/small>/u);
+
+  let home = await crewHome(lead.cookie);
+  assert.match(home, /<h2 id="crew-notes-heading">Important notes<\/h2>/u);
+  assert.match(home, /Dumpster swap Tuesday/u);
+  assert.doesNotMatch(home, /Delete this note/u, "only the admin deletes notes");
+  assert.doesNotMatch(await crewHome(crew.cookie), /Important notes/u);
+
+  const posted = await request("/clients/crew/notes", form({ text: "Need more 2x6s at Muskegon" }, lead.cookie));
+  assert.equal(posted.headers.get("Location"), "/clients/crew?notice=note-added#crew-notes-heading");
+  const marked = await request(`/clients/crew/notes/${adminNote.id}/status`, form({ status: "completed" }, lead.cookie));
+  assert.equal(marked.headers.get("Location"), `/clients/crew?notice=note-updated#note-${adminNote.id}`);
+  home = await crewHome(lead.cookie);
+  assert.match(home, /Need more 2x6s at Muskegon/u);
+  assert.match(home, /Lee Park · /u);
+
+  const adminBoard = await (await request("/clients/admin/notes", { headers: { Cookie: adminCookie } })).text();
+  assert.match(adminBoard, /Need more 2x6s at Muskegon/u);
+  assert.match(adminBoard, /Completed by Lee Park/u);
+  assert.ok(await db("mhb_activity").where({ actor: "crew", action: "note.added" }).first());
+
+  await request(`/clients/admin/labor/workers/${lead.worker.id}/profile`, form({ name: "Lee Park", email: "lee@example.com" }, adminCookie));
+  assert.doesNotMatch(await crewHome(lead.cookie), /Important notes/u, "unchecking Team leader takes the board away");
+  assert.equal((await request("/clients/crew/notes", form({ text: "Again" }, lead.cookie))).headers.get("Location"), "/clients/crew");
+});
+
+test("the schedule puts crews on jobs over days with notes, marks anyone double-booked, and shows each person their days", async () => {
+  const adminCookie = await loginAsAdmin();
+  await withSite(adminCookie);
+  const deck = await addPortal(adminCookie, "Grand Haven Deck");
+  const sam = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com" });
+  const dana = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com", company: "Reyes Drywall LLC", trade: "Drywall" });
+  const today = todayInMichigan();
+  const [day1, day2, day3] = [addDays(today, 1), addDays(today, 2), addDays(today, 3)];
+
+  const calendar = await request("/clients/admin/schedule", { headers: { Cookie: adminCookie } });
+  assert.equal(calendar.status, 200);
+  const calendarPage = await calendar.text();
+  assert.match(calendarPage, /<h1 class="portal-heading">Schedule\.<\/h1>/u);
+  assert.match(calendarPage, new RegExp(`<h2>${new Date(`${today}T12:00:00Z`).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })}</h2>`, "u"));
+  assert.match(calendarPage, new RegExp(`<td class="cal-day[^"]*is-today[^"]*">[\\s\\S]*?data-schedule-add data-date="${today}"`, "u"));
+  assert.match(calendarPage, /<dialog class="admin-dialog schedule-dialog" id="schedule-dialog"/u);
+  assert.match(calendarPage, /<option value="muskegon-addition">Muskegon Addition<\/option>/u);
+  assert.match(calendarPage, /value="[^"]+"><span>Dana Reyes<small>Subcontractor · Drywall<\/small><\/span>/u);
+
+  const add = (fields) => request("/clients/admin/schedule", form({ job: "", startsOn: day1, endsOn: "", time: "", notes: "", ...fields }, adminCookie));
+  assert.equal((await add({})).headers.get("Location"), "/clients/admin/schedule?notice=schedule-empty");
+  assert.equal((await add({ job: "muskegon-addition", startsOn: "2026-02-30" })).headers.get("Location"), "/clients/admin/schedule?notice=schedule-date-invalid");
+  assert.equal((await add({ job: "muskegon-addition", startsOn: day3, endsOn: day1 })).headers.get("Location"), "/clients/admin/schedule?notice=schedule-date-invalid");
+  assert.equal((await add({ job: "somewhere-else" })).headers.get("Location"), "/clients/admin/schedule?notice=schedule-invalid");
+  assert.equal((await db("mhb_schedule").count({ n: "*" }).first()).n, 0);
+
+  const framing = await add({ job: "muskegon-addition", startsOn: day1, endsOn: day3, time: "7:30 AM", crew: [sam.worker.id, dana.worker.id, "not-a-worker"], notes: "Frame the north wall" });
+  assert.equal(framing.headers.get("Location"), `/clients/admin/schedule?month=${day1.slice(0, 7)}&notice=schedule-added`);
+  await add({ job: deck, startsOn: day2, crew: sam.worker.id, notes: "Footings" });
+  await add({ startsOn: today, notes: "Inspection window 9 to 11" });
+  const entries = await db("mhb_schedule").orderBy("created_at").select("id", "client_slug", "data");
+  assert.deepEqual(entries.map((entry) => entry.client_slug), ["muskegon-addition", deck, null]);
+  assert.deepEqual(json(entries[0].data).crew, [sam.worker.id, dana.worker.id], "only people in Labor are scheduled");
+
+  const month = await (await request(`/clients/admin/schedule?month=${day2.slice(0, 7)}`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(month, /<strong>Muskegon Addition<\/strong>\s*<span class="cal-time">7:30 AM<\/span>/u);
+  assert.match(month, /<span class="cal-person is-doubled" title="Also scheduled elsewhere this day">Sam<\/span>/u, "Sam is on two jobs on day 2");
+  assert.match(month, /<span class="cal-person">Sam<\/span>/u, "and on one job the other days");
+  assert.doesNotMatch(month, /is-doubled[^>]*>Dana</u);
+  assert.match(month, /<span class="cal-notes">Frame the north wall<\/span>/u);
+  if (today.slice(0, 7) === day2.slice(0, 7)) assert.match(month, /<a class="cal-entry is-note" href="\/clients\/admin\/schedule\/[^"]+">\s*<strong>Note<\/strong>/u);
+
+  const crewHome = async (cookie) => (await request("/clients/crew", { headers: { Cookie: cookie } })).text();
+  const samHome = await crewHome(sam.cookie);
+  assert.match(samHome, /<h2 id="schedule-heading">Your schedule<\/h2>/u);
+  assert.match(samHome, /<td data-label="Job">Muskegon Addition<small>5899 1\/2 White Rd, Muskegon, MI 49442<\/small><\/td>/u);
+  assert.match(samHome, /<small>7:30 AM<\/small>/u);
+  assert.match(samHome, /Footings/u);
+  assert.doesNotMatch(samHome, /Inspection window/u, "a note with no crew goes to no one");
+  const danaHome = await crewHome(dana.cookie);
+  assert.match(danaHome, /Frame the north wall/u);
+  assert.doesNotMatch(danaHome, /Footings/u);
+
+  const entryPath = `/clients/admin/schedule/${entries[0].id}`;
+  const editor = await (await request(entryPath, { headers: { Cookie: adminCookie } })).text();
+  assert.match(editor, /Change the schedule\./u);
+  assert.match(editor, new RegExp(`value="${sam.worker.id}" checked>`, "u"));
+  assert.match(editor, new RegExp(`name="endsOn" type="date" value="${day3}"`, "u"));
+  const changed = await request(entryPath, form({ job: "muskegon-addition", startsOn: day1, endsOn: day3, time: "8:00 AM", crew: dana.worker.id, notes: "Frame the north and east walls" }, adminCookie));
+  assert.equal(changed.headers.get("Location"), `/clients/admin/schedule?month=${day1.slice(0, 7)}&notice=schedule-saved`);
+  assert.equal((await request(entryPath, form({ job: "muskegon-addition", startsOn: "" }, adminCookie))).headers.get("Location"), `${entryPath}?notice=schedule-date-invalid`);
+  assert.doesNotMatch(await crewHome(sam.cookie), /north/u, "Sam was taken off the framing");
+  assert.match(await crewHome(dana.cookie), /Frame the north and east walls/u);
+
+  assert.match(await (await request(`/clients/admin/schedule/new?date=${day3}`, { headers: { Cookie: adminCookie } })).text(), new RegExp(`name="startsOn" type="date" required value="${day3}"`, "u"));
+  const removed = await request(`${entryPath}/delete`, form({}, adminCookie));
+  assert.equal(removed.headers.get("Location"), `/clients/admin/schedule?month=${day1.slice(0, 7)}&notice=schedule-deleted`);
+  assert.equal(await db("mhb_schedule").where({ id: entries[0].id }).first(), undefined);
+  assert.equal((await request(entryPath, { headers: { Cookie: adminCookie } })).status, 404);
+  assert.equal((await request(`/clients/admin/schedule/${entries[1].id}/delete`, { headers: { Cookie: adminCookie } })).headers.get("Location"), "/clients/admin/schedule", "Back to a schedule form opens the calendar");
+
+  const logged = (await db("mhb_activity").whereLike("action", "schedule.%").orderBy("id").select("action", "summary"));
+  assert.deepEqual(logged.map((entry) => entry.action), ["schedule.added", "schedule.added", "schedule.added", "schedule.changed", "schedule.deleted"]);
+  assert.match(logged[0].summary, /Scheduled Muskegon Addition, \d{4}-\d{2}-\d{2} to \d{4}-\d{2}-\d{2} \(Sam Ortiz, Dana Reyes\)/u);
+
+  const february = await (await request("/clients/admin/schedule?month=2026-02", { headers: { Cookie: adminCookie } })).text();
+  assert.match(february, /<h2>February 2026<\/h2>/u);
+  assert.match(february, /href="\/clients\/admin\/schedule\?month=2026-01">← January<\/a>/u);
+  assert.match(february, /href="\/clients\/admin\/schedule\?month=2026-03">March →<\/a>/u);
+  assert.equal((february.match(/<tr>/gu) || []).length, 1 + 4, "February 2026 starts on a Sunday and fills exactly four weeks, plus the header row");
+  assert.notEqual((await request("/clients/admin/schedule")).status, 200, "the schedule needs an admin sign-in");
 });
