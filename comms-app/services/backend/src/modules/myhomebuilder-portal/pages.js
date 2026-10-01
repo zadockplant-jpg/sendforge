@@ -1591,11 +1591,9 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
     ? `${report.from ? dateText(report.from) : "the start"} to ${report.to ? dateText(report.to) : "today"}`
     : "all time";
 
+  // Nothing shows while the books balance; a problem shows with the button that fixes it.
   const balance = check.balanced
-    ? `<section class="books-check books-check-ok" aria-labelledby="books-check-heading">
-          <h2 id="books-check-heading">The books balance.</h2>
-          <p>Debits and credits are equal (${money(check.debits)} each), and every invoice matches its entries.</p>
-        </section>`
+    ? ""
     : `<section class="books-check books-check-off" aria-labelledby="books-check-heading">
           <h2 id="books-check-heading">The books do not balance.</h2>
           ${check.debits !== check.credits ? `<p>Debits are ${money(check.debits)} and credits are ${money(check.credits)}.</p>` : ""}

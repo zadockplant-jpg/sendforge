@@ -1230,7 +1230,7 @@ test("the books follow an invoice's life in balanced entries, and log each step"
   assert.ok(logged.every((row) => row.actor === "admin"));
   assert.equal(logged[2].summary, "Edited Invoice 1: total $1,000.00 → $1,200.00");
   assert.equal(logged[1].summary, "Recorded a Zelle payment of $1,000.00 for Invoice 1, received Sep 12, 2026");
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("Stripe payments post with their fee, repeated events post nothing, and money with no invoice is kept as unapplied", async () => {
@@ -1266,7 +1266,7 @@ test("Stripe payments post with their fee, repeated events post nothing, and mon
   assert.equal(stripeLog[0].summary, "Stripe payment of $500.00 for Invoice 1 (Visa •••• 4242), Stripe fee $2.62");
   assert.ok(await db("mhb_activity").where({ actor: "client", action: "stripe.checkout" }).first(), "opening Checkout is logged");
   const check = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
-  assert.match(check, /The books balance\./u);
+  assert.doesNotMatch(check, /The books do not balance/u);
   assert.match(check, /<dt>Unapplied payments<\/dt><dd>\$1,500\.00<\/dd>/u);
 });
 
@@ -1307,7 +1307,7 @@ test("the webhook reads Stripe's copy of the session, and a payment that no long
   assert.equal((await db("mhb_activity").where({ action: "stripe.mismatch" })).length, 1);
   // The client's return from Checkout says the payment is being confirmed, not that it is paid.
   assert.match((await request(`/clients/pay/${later.shareToken}/return?session_id=${laterSession}`)).headers.get("Location"), /notice=payment-pending/u);
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("refunds and disputes reach the invoice and the books, and each Stripe event is kept by id", async () => {
@@ -1345,7 +1345,7 @@ test("refunds and disputes reach the invoice and the books, and each Stripe even
   await signedWebhook("charge.dispute.created", { id: "dp_1", charge: "ch_refund" }, { id: "evt_dispute_1" });
   assert.deepEqual(await ledgerBalances(), { 1200: 50000 - 262 - 50000 - 1500, 1250: 50000, 4000: -50000, 6100: 262, 6200: 1500 });
   const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
-  assert.match(books, /The books balance\./u);
+  assert.doesNotMatch(books, /The books do not balance/u);
   assert.match(books, /<dt>Held in disputes<\/dt><dd>\$500\.00<\/dd>/u);
   assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Disputed on Sep 27, 2026 \(needs response\)\. Respond in the Stripe dashboard\./u);
   stripe.disputes.get("dp_1").status = "won";
@@ -1356,7 +1356,7 @@ test("refunds and disputes reach the invoice and the books, and each Stripe even
     "A dispute opened on Invoice 1; Stripe is holding $500.00 and charged a $15.00 fee",
     "Won the dispute on Invoice 1; Stripe returned $500.00"
   ]);
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 
   // Each portal event handled is kept by id; an event for a payment made elsewhere is not.
   stripe.charges.set("ch_other", { id: "ch_other", payment_intent: "pi_other", amount_refunded: 500, refunded: false, metadata: {} });
@@ -1384,7 +1384,7 @@ test("a refund of a payment not applied to an invoice comes out of Unapplied pay
   const logged = await db("mhb_activity").where({ action: "stripe.refunded" });
   assert.equal(logged.length, 1);
   assert.equal(logged[0].summary, "Refunded $500.00 of a payment for Invoice 1 that was not applied to it");
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("the books open with the invoices already in the portal, and their history from their records", async () => {
@@ -1403,7 +1403,7 @@ test("the books open with the invoices already in the portal, and their history 
   assert.deepEqual(history.map((row) => row.action), ["invoice.created", "invoice.created", "invoice.emailed", "payment.recorded"]);
   assert.equal(history[3].summary, "Recorded a Check #12 payment of $1,000.00 for Invoice 2");
   const page = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
-  assert.match(page, /The books balance\./u);
+  assert.doesNotMatch(page, /The books do not balance/u);
   assert.match(page, /opening entry/u);
 });
 
@@ -1419,7 +1419,7 @@ test("the balance check finds an invoice whose entries do not match, and correct
   assert.equal(corrected.headers.get("Location"), "/clients/admin/books?notice=books-corrected");
   const page = await (await request(corrected.headers.get("Location"), { headers: { Cookie: adminCookie } })).text();
   assert.match(page, /Corrections posted\. The books balance again\./u);
-  assert.match(page, /The books balance\./u);
+  assert.doesNotMatch(page, /books-check/u, "balanced books show nothing about it");
   assert.deepEqual(await ledgerBalances(), { 1100: 100000, 4000: -100000 });
   assert.match((await db("mhb_activity").where({ action: "books.corrected" }).first()).summary, /Posted corrections for Invoice 1 to balance the books/u);
   assert.equal((await request("/clients/admin/books/correct", form({}, adminCookie))).headers.get("Location"), "/clients/admin/books?notice=books-balanced");
@@ -2264,7 +2264,7 @@ test("approving labor to a job books its cost, paying clears what is owed, and t
   assert.deepEqual(await ledgerBalances(), { 2000: -100000, 5100: 100000 });
 
   const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
-  assert.match(books, /The books balance\./u);
+  assert.doesNotMatch(books, /The books do not balance/u);
   assert.match(books, /Owed to crew/u);
   assert.match(books, /books-jobs/u);
   assert.match(books, /Subcontractors/u);
@@ -2304,7 +2304,7 @@ test("an employee's hours are costed at their rate on approval, and returned hou
   // Undoing an approval takes its cost back out.
   await request(`/clients/admin/labor/entries/${eight.id}/unapprove`, form({}, adminCookie));
   assert.deepEqual(await ledgerBalances(), {});
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("paperwork is filled out and signed on the site, stored encrypted, and the I-9 is completed by the admin", async () => {
@@ -2505,7 +2505,7 @@ test("a statement upload is filed with one click to a job, overhead or a Stripe 
   assert.match(await (await request("/clients/admin/bank", { headers: { Cookie: adminCookie } })).text(), /title="File to Muskegon Addition · Materials"/u);
 
   const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
-  assert.match(books, /The books balance\./u);
+  assert.doesNotMatch(books, /The books do not balance/u);
   assert.match(books, /<dt>Overhead<\/dt><dd>\$151\.19<\/dd>/u);
   assert.match(books, /<a class="portal-inline-link" href="\/clients\/admin\/books\/jobs\/muskegon-addition">Muskegon Addition<\/a>/u, "the job's row in the jobs ledger");
 });
@@ -2545,7 +2545,7 @@ test("crew work is paid from the bank, a payment recorded by hand is matched to 
   assert.equal((await laborRecords())[0].status, "approved");
   assert.equal((await bankRecords())[0].target, null);
   assert.deepEqual(await ledgerBalances(), { 2000: -30000, 5100: 30000 });
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("hours paid through payroll post no cash; the payroll run's withdrawal clears wages payable", async () => {
@@ -2730,7 +2730,7 @@ test("payments toward an invoice leave the rest due, show on the invoice, and po
   assert.equal(saved.status, "open");
   assert.equal(saved.installments.length, 2);
   assert.deepEqual(await ledgerBalances(), { 1100: 50000, 1300: 50000, 4000: -100000 });
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("online payment charges only the balance, and a payment added by mistake can be removed", async () => {
@@ -2790,7 +2790,7 @@ test("Add payment beside New invoice records a payment toward any open invoice o
   assert.equal(whole.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-recorded");
   assert.equal((await stored(two)).status, "paid");
   assert.equal((await request("/clients/admin/clients/muskegon-addition/payments", form({ invoice: "", amount: "5", method: "cash", paidOn: "2026-09-16" }, adminCookie))).headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-invoice-required");
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("deleting an invoice with payments toward it takes them out of the books too", async () => {
@@ -2801,7 +2801,7 @@ test("deleting an invoice with payments toward it takes them out of the books to
   assert.match(await (await request(`${base}/delete`, { headers: { Cookie: adminCookie } })).text(), /Payments toward it \(\$300\.00 · Zelle · Sep 10, 2026\) are deleted with it\./u);
   await request(`${base}/delete`, form({}, adminCookie));
   assert.deepEqual(await ledgerBalances(), {});
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 // ---------- Job expenses ----------
@@ -2839,12 +2839,12 @@ test("Add expense records a job cost with its receipt, posts it to the books, an
   assert.match(receipt.headers.get("Content-Disposition"), /receipt\.pdf/u);
   assert.doesNotMatch(await (await request("/clients", { headers: { Cookie: await loginAsClient() } })).text(), /Home Depot/u, "clients never see expenses");
   const books = await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text();
-  assert.match(books, /The books balance\./u);
+  assert.doesNotMatch(books, /The books do not balance/u);
 
   const removed = await request(`/clients/admin/clients/muskegon-addition/expenses/${depot.id}/delete`, form({}, adminCookie));
   assert.equal(removed.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=expense-deleted");
   assert.equal((await ledgerBalances())["5200"], undefined);
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 test("a bank withdrawal for a recorded expense is matched to it and posts nothing more", async () => {
@@ -2910,7 +2910,7 @@ test("a new invoice can list payments already received: less than the total leav
   const tooMuchPage = await tooMuch.text();
   assert.match(tooMuchPage, /The payments listed \(\$150\.00\) are more than the invoice total \(\$100\.00\)\./u);
   assert.match(tooMuchPage, /name="paymentAmount"[^>]*value="150"/u, "what was typed is kept");
-  assert.match(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books balance\./u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
 });
 
 // ---------- The Back button ----------
@@ -3247,7 +3247,7 @@ test("each job has its own book, and the Books ledger shows one job per row, the
   assert.equal((await db("mhb_expenses").where({ id: records.find((expense) => expense.description === "Railing").id }).first()).client_slug, deck);
 
   const page = await books();
-  assert.match(page, /The books balance\./u);
+  assert.doesNotMatch(page, /The books do not balance/u);
   const row = (name, income, expenses, profit) => new RegExp(">" + name + "</a></td>\\s*<td class=\"books-money\" data-label=\"Gross income\">\\$" + income + "</td>\\s*<td class=\"books-money\" data-label=\"Gross expenses\">\\$" + expenses + "</td>\\s*<td class=\"books-money\" data-label=\"Gross profit\">\\$" + profit + "</td>", "u");
   assert.match(page, row("Grand Haven Deck", "800\\.00", "350\\.00", "450\\.00"));
   assert.match(page, row("Muskegon Addition", "5,000\\.00", "1,200\\.00", "3,800\\.00"));
@@ -3277,5 +3277,5 @@ test("each job has its own book, and the Books ledger shows one job per row, the
   assert.equal(removed.headers.get("Location"), "/clients/admin/books?notice=expense-deleted");
   const after = await books();
   assert.match(after, /<dt>Overhead<\/dt><dd>\$100\.00<\/dd>/u);
-  assert.match(after, /The books balance\./u);
+  assert.doesNotMatch(after, /The books do not balance/u);
 });
