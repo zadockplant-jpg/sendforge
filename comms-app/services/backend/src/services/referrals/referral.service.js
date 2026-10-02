@@ -1655,6 +1655,9 @@ export async function productReferralSummary(userId, referralCode = null, trx = 
       label: PRODUCT_REFERRAL_PROGRAMS[slug].label,
       mode: perSaleCents === null ? "milestones" : "per_sale",
       perSaleCents,
+      // Every DropForge owner is paid per sale now; only an affiliate also
+      // gets what the affiliate level adds (Cloud pickup's share).
+      affiliate: Boolean(referralCode) && isAffiliateReferralCode(referralCode),
       perReferralCents: PRODUCT_REFERRAL_PROGRAMS[slug].perReferralCents || null,
       referredCustomers,
       tiers,

@@ -406,6 +406,7 @@ test("DropForge pays every owner $10 on every sale, and a refund takes one back"
     { productSlug: summary.productSlug, mode: summary.mode, perSaleCents: summary.perSaleCents,
       referredCustomers: summary.referredCustomers, earnedCents: summary.earnedCents, tiers: summary.tiers },
     { productSlug: "forgedrop", mode: "per_sale", perSaleCents: 1000, referredCustomers: 4, earnedCents: 4000, tiers: [] });
+  assert.equal(summary.affiliate, false, "an owner, not an affiliate: no Cloud pickup share on the account page");
   assert.equal(await rewardPayoutEligibility(fay, "forgedrop"), true);
 });
 
@@ -421,6 +422,7 @@ test("a DropForge affiliate is paid $10 on every DropForge sale", async () => {
   const [rcg, drop] = await productReferralSummary(ace, await db("referral_codes").where({ code: "ACE10" }).first());
   assert.equal(rcg.mode, "milestones");
   assert.deepEqual({ mode: drop.mode, perSaleCents: drop.perSaleCents, earnedCents: drop.earnedCents }, { mode: "per_sale", perSaleCents: 1000, earnedCents: 3000 });
+  assert.equal(drop.affiliate, true);
 });
 
 test("a purchase made before the email is verified counts once it is", async () => {
