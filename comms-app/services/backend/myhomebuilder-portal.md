@@ -107,8 +107,10 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
   guidance. It is a native `<details>` disclosure and needs no script.
 - Payments received outside Stripe are recorded with a "Paid by" choice. The choices are
   Check, Cash, Zelle, Venmo, Cash App, PayPal, Bank transfer (ACH), Wire transfer, Credit or
-  debit card, Money order, or Other with a typed method, plus an optional reference.
-  - A paid invoice's recorded payment can be corrected (method, reference, date) or marked
+  debit card, Money order, or Other with a typed method, plus the date received and optional
+  notes (`note`, shown to the admin only). Payments recorded before notes may carry a reference
+  in their label ("Check #1042"); changing such a payment keeps it.
+  - A paid invoice's recorded payment can be corrected (method, date, notes) or marked
     unpaid. Marking it unpaid reopens it and forgets its receipt and payment notice, so a
     later payment sends fresh ones.
   - Stripe payments keep what Stripe recorded.
@@ -131,11 +133,12 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
     `email` a list. A project with none started with the addresses its most recent quote or
     invoice was emailed to. The migration also set hand-recorded payment amounts to their
     invoice totals.
-- A quote or invoice can go to another project from its admin page ("Another project" card).
-  - **Copy to another project** opens that project's new quote or invoice editor, filled in
+- A quote or invoice can go to another project from its admin page (Another project, shown when
+  there is another project).
+  - **Copy** opens that project's new quote or invoice editor, filled in
     from it. It is reviewed and posted there with its own number and link. A due date that has
     already passed is left blank.
-  - **Send to another project** moves one entered in the wrong project. It keeps its number
+  - **Send** moves one entered in the wrong project. It keeps its number
     and link. A quote and the invoice made from it move together.
   - The moved item's sent-email records (keyed by project) move with it, so a receipt is not
     sent twice.
@@ -285,6 +288,17 @@ projects. Each export is in the activity log.
     the Templates page lists them apart, to delete.
   - **Save as template**, under Add another payment, opens the template's name; posting with a
     name saves the quote or invoice as a template too.
+- **A quote's or invoice's page** has its actions beside the heading (a quote's **Create
+  invoice** or its invoice, **Edit**, **Save as template**, **Mark void** while allowed, and the
+  trash button, whose page confirms what goes with it). Beside the document (above it on a phone)
+  are one-line folds, each with a short status at its end:
+  - **Payment** (open to start on an open invoice): payments toward the balance, with Remove,
+    and Add payment ("$568.00 due"); on a paid one, its payment to change and Mark as unpaid
+    ("Check · Sep 25, 2026"), or what Stripe recorded.
+  - **Email** ("Sent Sep 25, 2026"), **Receipt** on a paid invoice, **Share** (its links),
+    **Another project** and **History** (what happened to it, and when).
+  - On a phone, action buttons keep their own widths, and the project's Quote, Invoice, Purchase
+    and Payment share one row.
 - The panel shows nothing about setup while everything is ready. If portal storage, file storage,
   Stripe, its webhook or email is not set up, a warning names what is missing.
 

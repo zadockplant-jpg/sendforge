@@ -289,14 +289,18 @@ export function parseListedPayments(form) {
 
 // Reads the record-payment and edit-payment forms. Returns the payment fields and the label shown
 // on the invoice ("Zelle", "Check #1042", or the typed name for Other), or { error } with a notice code.
-export function parseManualPayment(form) {
+// The forms now take notes rather than a reference; a payment saved with a reference keeps it
+// (`keep.reference`) when a form without one changes it. Notes are left out when empty.
+export function parseManualPayment(form, keep = {}) {
   const method = String(form?.get("method") || "");
   const methodName = String(form?.get("methodName") || "").trim().replaceAll(/\s+/gu, " ");
-  const reference = String(form?.get("reference") || "").trim().replaceAll(/\s+/gu, " ");
+  const typedReference = form?.has && !form.has("reference") ? keep.reference || "" : form?.get("reference");
+  const reference = String(typedReference || "").trim().replaceAll(/\s+/gu, " ");
+  const note = String(form?.get("note") || "").trim().replaceAll(/\s+/gu, " ");
   const paidOn = String(form?.get("paidOn") || "").trim();
   if (!Object.hasOwn(PAYMENT_METHODS, method)) return { error: "invalid" };
   if (method === "other" && !methodName) return { error: "payment-other-required" };
-  if (methodName.length > MAX_METHOD_NAME || reference.length > MAX_PAYMENT_REFERENCE) return { error: "invalid" };
+  if (methodName.length > MAX_METHOD_NAME || reference.length > MAX_PAYMENT_REFERENCE || note.length > MAX_PAYMENT_NOTE) return { error: "invalid" };
   if (!isValidDate(paidOn)) return { error: "payment-date-invalid" };
   const name = method === "other" ? methodName : PAYMENT_METHODS[method];
   return {
@@ -304,6 +308,7 @@ export function parseManualPayment(form) {
     methodName: method === "other" ? methodName : "",
     reference,
     paidOn,
-    label: [name, reference].filter(Boolean).join(" ")
+    label: [name, reference].filter(Boolean).join(" "),
+    ...(note ? { note } : {})
   };
 }

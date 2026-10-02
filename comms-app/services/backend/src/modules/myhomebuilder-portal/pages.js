@@ -282,7 +282,7 @@ function billingRows(items, { basePath, viewer, readOnly = false }) {
     // date). A Stripe payment keeps what Stripe recorded.
     const payment = item.payment || {};
     const detailText = admin && item.status === "paid" && payment.source === "manual"
-      ? `<a class="payment-change" href="${href}" data-payment-menu data-label="${escapeAttribute(name)}" data-method="${escapeAttribute(payment.method || "")}" data-method-name="${escapeAttribute(payment.methodName || "")}" data-reference="${escapeAttribute(payment.reference || "")}" data-paid-on="${escapeAttribute(String(item.paidAt || "").slice(0, 10))}" title="Change how it was paid">${escapeHtml(detail)}</a>`
+      ? `<a class="payment-change" href="${href}" data-payment-menu data-label="${escapeAttribute(name)}" data-method="${escapeAttribute(payment.method || "")}" data-method-name="${escapeAttribute(payment.methodName || "")}" data-note="${escapeAttribute(payment.note || "")}" data-paid-on="${escapeAttribute(String(item.paidAt || "").slice(0, 10))}" title="Change how it was paid">${escapeHtml(detail)}</a>`
       : escapeHtml(detail);
     return `<tr${admin ? ` class="billing-row-link" data-row-href="${href}"` : ""}>
           <td><span class="portal-number">${escapeHtml(item.number)}</span></td>
@@ -842,7 +842,6 @@ function statusDialogs(client, readiness) {
           </div>
           <form class="admin-stack-form" method="post" data-status-paid hidden>
             <input type="hidden" name="return" value="list">
-            <p class="admin-meta">How was it paid?</p>
             ${paymentFields("list-payment", { date: todayInMichigan() })}
             ${receipt}
             <button class="button button-solid" type="submit">Mark as paid</button>
@@ -852,7 +851,7 @@ function statusDialogs(client, readiness) {
             <p class="admin-meta" data-status-due-text></p>
             <button class="button button-solid" type="submit">Mark as due</button>
           </form>
-          <p class="portal-security-note" data-status-stripe hidden>Paid online through Stripe. Stripe payments keep the details Stripe recorded, so this one stays paid.</p>
+          <p class="portal-security-note" data-status-stripe hidden>Paid through Stripe, so it stays paid.</p>
         </dialog>
         <dialog class="admin-dialog" id="payment-dialog" aria-labelledby="payment-dialog-title">
           <div class="admin-dialog-head">
@@ -863,7 +862,6 @@ function statusDialogs(client, readiness) {
             <input type="hidden" name="return" value="list">
             ${paymentFields("list-edit-payment", { date: todayInMichigan() })}
             <button class="button button-solid" type="submit">Save payment</button>
-            <p class="portal-security-note">The receipt is not sent again. Resend receipt on the invoice's page sends the corrected one.</p>
           </form>
         </dialog>
         <dialog class="admin-dialog" id="delete-dialog" aria-labelledby="delete-dialog-title">
@@ -981,7 +979,6 @@ function addPaymentFields({ client, billing, readiness, selected = "", prefix })
               <span>Email a receipt to ${escapeHtml(addressesText(emails))}</span>
             </label>` : ""}
             <button class="button button-solid" type="submit">Add payment</button>
-            <p class="portal-security-note">A payment less than the balance leaves the rest due, and the invoice shows each payment. The balance marks it paid.</p>
           </form>`;
 }
 
@@ -1366,11 +1363,11 @@ export function adminPhotoDatePage({ client, photo, base }) {
     </div>`, { title: "Photo date" });
 }
 
-// A one-line heading on a project's panel that opens to what is under it. billing.js remembers
-// which ones are open, in this browser.
-function fold(id, title, body, { open = false } = {}) {
+// A one-line heading (a project's panel, an invoice's page) that opens to what is under it, with
+// an optional short status at its end. billing.js remembers which ones are open, in this browser.
+function fold(id, title, body, { open = false, status = "" } = {}) {
   return `<details class="admin-fold" id="${id}" data-remember${open ? " open" : ""}>
-          <summary><h3>${title}</h3></summary>
+          <summary><h3>${title}</h3>${status ? `<span class="admin-fold-status">${status}</span>` : ""}</summary>
           <div class="admin-fold-body">
           ${body}
           </div>
@@ -1895,8 +1892,8 @@ function activity(item, receipt) {
   return `<ol class="admin-activity">${entries.map(([label, when]) => `<li><span>${escapeHtml(label)}</span><time datetime="${escapeAttribute(when)}">${dateText(when)}</time></li>`).join("")}</ol>`;
 }
 
-// Method, the name when the method is Other, reference and date: shared by "Record a payment"
-// and "Edit payment". billing.js shows the Other box only when Other is chosen.
+// Paid by (with Other method when Other is chosen), received on and notes: shared by every form
+// that records or changes a payment. billing.js shows the Other box only when Other is chosen.
 function paymentFields(prefix, { payment = null, date }) {
   const chosen = payment?.method && Object.hasOwn(PAYMENT_METHODS, payment.method) ? payment.method : "check";
   const methods = Object.entries(PAYMENT_METHODS)
@@ -1905,195 +1902,144 @@ function paymentFields(prefix, { payment = null, date }) {
   return `<label for="${prefix}-method">Paid by
               <select id="${prefix}-method" name="method" data-payment-method>${methods}</select>
             </label>
-            <label for="${prefix}-other" data-payment-other>Other method (when Other is chosen)
-              <input id="${prefix}-other" name="methodName" type="text" maxlength="60" value="${escapeAttribute(payment?.methodName || "")}" placeholder="How it was paid">
-            </label>
-            <label for="${prefix}-reference">Reference (optional)
-              <input id="${prefix}-reference" name="reference" type="text" maxlength="80" value="${escapeAttribute(payment?.reference || "")}" placeholder="Check #1042 or confirmation number">
+            <label for="${prefix}-other" data-payment-other>Other method
+              <input id="${prefix}-other" name="methodName" type="text" maxlength="60" value="${escapeAttribute(payment?.methodName || "")}">
             </label>
             <label for="${prefix}-date">Received on
               <input id="${prefix}-date" name="paidOn" type="date" value="${escapeAttribute(date)}" required>
+            </label>
+            <label for="${prefix}-note">Notes
+              <input id="${prefix}-note" name="note" type="text" maxlength="${MAX_PAYMENT_NOTE}" value="${escapeAttribute(payment?.note || "")}">
             </label>`;
 }
 
 // Copy to another project opens that project's editor filled in from this quote or invoice. Send
 // to another project moves it there, with the quote or invoice linked to it, for one entered in
-// the wrong project. One project list serves both buttons.
-function otherProjectCard({ base, client, item, projects }) {
-  const noun = item.kind === "invoice" ? "invoice" : "quote";
+// the wrong project. One project list serves both buttons. Nothing when there is no other project.
+function otherProjectFold({ base, client, item, projects }) {
   const others = projects.filter((entry) => entry.slug !== client.slug);
-  if (!others.length) {
-    return `<section class="admin-card">
-          <h2>Another project</h2>
-          <p class="admin-meta">Add another client portal to copy this ${noun} to it or send it there.</p>
-        </section>`;
-  }
-  const partner = item.kind === "quote" && item.invoiceNumber
-    ? ` with Invoice ${escapeHtml(item.invoiceNumber)}, which was made from it; both keep their numbers and links`
-    : item.kind === "invoice" && item.fromQuoteNumber
-      ? ` with Quote ${escapeHtml(item.fromQuoteNumber)}, which it was made from; both keep their numbers and links`
-      : "; it keeps its number and link";
-  const send = item.status === "processing"
-    ? `<p class="portal-security-note">A bank payment is still processing, so this invoice can be sent to another project once it finishes.</p>`
-    : `<p class="portal-security-note">Send to another project moves this ${noun} there${partner}.</p>`;
-  return `<section class="admin-card">
-          <h2>Another project</h2>
-          <form class="admin-stack-form" action="${base}/copy" method="get">
+  if (!others.length) return "";
+  const processing = item.status === "processing";
+  return fold("billing-project", "Another project", `<form class="admin-stack-form" action="${base}/copy" method="get">
             <label for="other-project">Project
               <select id="other-project" name="to" required>
-                <option value="" selected disabled>Choose a project</option>
+                <option value="" selected disabled hidden>Choose a project</option>
                 ${others.map((entry) => `<option value="${escapeAttribute(entry.slug)}">${escapeHtml(entry.label || entry.name)}</option>`).join("")}
               </select>
             </label>
             <div class="admin-manage">
-              <button class="button button-solid" type="submit">Copy to another project</button>
-              ${item.status === "processing" ? "" : `<button class="portal-logout-button" type="submit" formaction="${base}/move" formmethod="post">Send to another project</button>`}
+              <button class="button button-solid" type="submit">Copy</button>
+              ${processing ? "" : `<button class="button button-outline" type="submit" formaction="${base}/move" formmethod="post">Send</button>`}
             </div>
-            <p class="portal-security-note">Copy to another project opens a new ${noun} for that project with these lines filled in, to review and post.</p>
-            ${send}
-          </form>
-        </section>`;
+            ${processing ? '<p class="portal-security-note">A bank payment is still processing, so it can be sent once that finishes.</p>' : ""}
+          </form>`);
 }
 
-// `typed` keeps what was typed into a Send to field ({ field: "send" | "receipt", value }) when
-// the addresses had a problem. `projects` lists every client portal, for Copy and Send.
+// Payments toward the balance, each with Remove while the invoice is open.
+function installmentList(item, base, { removable }) {
+  const installments = item.installments || [];
+  if (!installments.length) return "";
+  return `<ul class="admin-activity">${installments.map((entry) => `<li><span>${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}</span>${removable
+    ? `
+            <form class="admin-manage" action="${base}/remove-payment" method="post"><input type="hidden" name="installment" value="${escapeAttribute(entry.id)}"><button class="portal-logout-button" type="submit">Remove</button></form>`
+    : ""}</li>`).join("")}</ul>`;
+}
+
+// A quote's or invoice's admin page: its actions beside the heading, then the document with
+// one-line folds beside it (on a phone, above it): Payment, Email, Receipt, Share, Another project
+// and History, each with a short status. `typed` keeps what was typed into a Send to field
+// ({ field: "send" | "receipt", value }) when the addresses had a problem. `projects` lists every
+// client portal, for Copy and Send.
 export function adminBillingPage({ client, item, links, receipt = null, recipients = [], projects = [], readiness, notice = null, typed = null }) {
   const base = `/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.id)}`;
   const invoice = item.kind === "invoice";
+  const noun = invoice ? "invoice" : "quote";
   const projectEmails = clientEmails(client);
-  const cards = [];
-
-  const linkFields = invoice
-    ? [copyField("pay-link", "Pay link (goes straight to Stripe Checkout)", links.pay), copyField("view-link", "Invoice link", links.view)]
-    : [copyField("view-link", "Quote link", links.view)];
-  cards.push(`<section class="admin-card">
-          <h2>Share</h2>
-          ${linkFields.join("\n          ")}
-          <p class="portal-security-note">Anyone with a link can view this ${invoice ? "invoice and pay it" : "quote and accept it"} without a login. The client also sees it in their portal.</p>
-        </section>`);
-
-  if (item.status !== "void") {
-    const sendBody = !readiness.email
-      ? '<p class="portal-security-note">Email delivery is not set up yet.</p>'
-      : `<form class="admin-inline-form" action="${base}/send" method="post">
-            ${emailsField({
-              id: "send-to",
-              name: "to",
-              label: "Send to",
-              addresses: projectEmails,
-              typed: typed?.field === "send" ? typed.value : null,
-              required: true,
-              hint: `Filled in from this project's emails. New addresses are added to the project.`
-            })}
-            <button class="button button-solid" type="submit">Email ${invoice ? "invoice" : "quote"}</button>
-          </form>`;
-    cards.push(`<section class="admin-card">
-          <h2>Email</h2>
-          ${item.sentAt ? `<p class="admin-meta">Last emailed to ${escapeHtml(item.sentTo)} on ${dateText(item.sentAt)}.</p>` : ""}
-          ${sendBody}
-        </section>`);
-  }
+  const sent = (when) => `Sent ${dateText(when)}`;
+  const folds = [];
 
   if (invoice && item.status === "open") {
-    const installments = item.installments || [];
-    const listed = installments.length
-      ? `<ul class="admin-activity">${installments.map((entry) => `<li><span>${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}</span>
-            <form class="admin-manage" action="${base}/remove-payment" method="post"><input type="hidden" name="installment" value="${escapeAttribute(entry.id)}"><button class="portal-logout-button" type="submit">Remove</button></form></li>`).join("")}</ul>
-          <p class="admin-meta">Paid so far ${money(installmentsTotal(item), item.currency)} of ${money(item.amountCents, item.currency)}; ${money(balanceDue(item), item.currency)} is due.</p>`
-      : "";
-    cards.push(`<section class="admin-card">
-          <h2>Add a payment</h2>
-          <p class="admin-meta">For checks, Zelle, cash and other payments received outside Stripe. A payment less than the balance leaves the rest due; the balance marks the invoice paid.</p>
-          ${listed}
+    folds.push(fold("billing-payment", "Payment", `${installmentList(item, base, { removable: true })}
           <form class="admin-stack-form" action="${base}/record-payment" method="post">
-            <label for="payment-amount">Amount received ($)
+            <label for="payment-amount">Amount ($)
               <input id="payment-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required value="${escapeAttribute(moneyInput(balanceDue(item)))}">
             </label>
             ${paymentFields("payment", { date: links.today })}
             ${readiness.email && projectEmails.length ? `<label class="portal-check" for="payment-receipt">
               <input id="payment-receipt" name="sendReceipt" type="checkbox" value="yes" checked>
-              <span>Email a receipt to ${escapeHtml(addressesText(projectEmails))}</span>
+              <span>Email a receipt</span>
             </label>` : ""}
             <button class="button button-solid" type="submit">Add payment</button>
-          </form>
-        </section>`);
+          </form>`, { open: true, status: `${money(balanceDue(item), item.currency)} due` }));
   }
 
   if (invoice && item.status === "paid") {
     const payment = item.payment || {};
-    const summary = [payment.label || "Payment", formatDate(item.paidAt), money(payment.amountCents ?? item.amountCents, item.currency), payment.note].filter(Boolean).join(" · ");
-    const earlier = (item.installments || []).length
-      ? `<p class="admin-meta">Paid earlier toward the balance: ${item.installments.map((entry) => `${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}`).join("; ")}.</p>`
-      : "";
-    cards.push(payment.source === "manual"
-      ? `<section class="admin-card">
-          <h2>Payment</h2>
-          <p class="admin-meta">Recorded as ${escapeHtml(summary)}.</p>
-          ${earlier}
+    const status = [payment.label || (payment.source === "stripe" ? "Stripe" : "Paid"), dateText(item.paidAt)].filter(Boolean).join(" · ");
+    folds.push(fold("billing-payment", "Payment", payment.source === "manual"
+      ? `${installmentList(item, base, { removable: false })}
           <form class="admin-stack-form" action="${base}/payment" method="post">
             ${paymentFields("edit-payment", { payment, date: String(item.paidAt || links.today).slice(0, 10) })}
             <button class="button button-solid" type="submit">Save payment</button>
           </form>
           <form class="admin-danger" action="${base}/reopen" method="post">
             <button class="portal-logout-button" type="submit">Mark as unpaid</button>
-            <p class="portal-security-note">Reopens the invoice for payment if it was marked paid by mistake.</p>
-          </form>
-        </section>`
-      : `<section class="admin-card">
-          <h2>Payment</h2>
-          <p class="admin-meta">Paid online through Stripe: ${escapeHtml(summary)}.</p>
-          ${earlier}
-          ${stripeAftermath(item)}
-          <p class="portal-security-note">Stripe payments keep the details Stripe recorded. Refunds are made in Stripe.</p>
-        </section>`);
+          </form>`
+      : `${installmentList(item, base, { removable: false })}
+          <p class="admin-meta">Paid online through Stripe · ${money(payment.amountCents ?? item.amountCents, item.currency)}</p>
+          ${stripeAftermath(item)}`, { status }));
+  }
+
+  if (item.status !== "void") {
+    folds.push(fold("billing-email", "Email", readiness.email
+      ? `<form class="admin-inline-form" action="${base}/send" method="post">
+            ${emailsField({ id: "send-to", name: "to", label: "Send to", addresses: projectEmails, typed: typed?.field === "send" ? typed.value : null, required: true })}
+            <button class="button button-solid" type="submit">Email ${noun}</button>
+          </form>`
+      : '<p class="portal-security-note">Email is not set up.</p>', { open: typed?.field === "send", status: item.sentAt ? sent(item.sentAt) : "" }));
   }
 
   if (invoice && item.status === "paid" && readiness.email) {
     const receiptTo = projectEmails.length ? projectEmails : [item.payment?.email].filter(Boolean);
-    cards.push(`<section class="admin-card">
-          <h2>Receipt</h2>
-          ${receipt ? `<p class="admin-meta">Emailed to ${escapeHtml(receipt.to)} on ${dateText(receipt.sentAt)}.</p>` : '<p class="admin-meta">No receipt has been emailed yet.</p>'}
-          <form class="admin-inline-form" action="${base}/receipt" method="post">
+    folds.push(fold("billing-receipt", "Receipt", `<form class="admin-inline-form" action="${base}/receipt" method="post">
             ${emailsField({ id: "receipt-to", name: "to", label: "Send to", addresses: receiptTo, typed: typed?.field === "receipt" ? typed.value : null, required: true })}
-            <button class="portal-logout-button" type="submit">${receipt ? "Resend receipt" : "Send receipt"}</button>
-          </form>
-        </section>`);
+            <button class="button button-solid" type="submit">${receipt ? "Resend receipt" : "Send receipt"}</button>
+          </form>`, { open: typed?.field === "receipt", status: receipt ? sent(receipt.sentAt) : "" }));
   }
 
-  if (!invoice && (item.status === "open" || item.status === "accepted")) {
-    cards.push(`<section class="admin-card">
-          <h2>Invoice</h2>
-          ${item.invoiceNumber
-            ? `<p class="admin-meta">Invoiced as <a class="portal-inline-link" href="/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.invoiceId)}">Invoice ${escapeHtml(item.invoiceNumber)}</a>.</p>`
-            : `<form action="${base}/invoice" method="post">
-            <button class="button button-solid" type="submit">Create invoice from this quote</button>
-          </form>
-          <p class="portal-security-note">Copies the title, line items and notes into a new open invoice.</p>`}
-        </section>`);
+  folds.push(fold("billing-share", "Share", (invoice
+    ? [copyField("pay-link", "Pay link", links.pay), copyField("view-link", "Invoice link", links.view)]
+    : [copyField("view-link", "Quote link", links.view)]).join("\n          ")));
+  folds.push(otherProjectFold({ base, client, item, projects }));
+  folds.push(fold("billing-history", "History", activity(item, receipt)));
+
+  // Beside the heading: a quote's invoice, Edit, Save as template, Mark void and Delete (its page
+  // confirms what goes with it).
+  const actions = [];
+  if (!invoice && item.invoiceNumber) {
+    actions.push(`<a class="button button-outline" href="/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.invoiceId)}">Invoice ${escapeHtml(item.invoiceNumber)}</a>`);
+  } else if (!invoice && (item.status === "open" || item.status === "accepted")) {
+    actions.push(`<form action="${base}/invoice" method="post"><button class="button button-solid" type="submit">Create invoice</button></form>`);
   }
-
-  cards.push(otherProjectCard({ base, client, item, projects }));
-
-  const manage = [];
-  if (isEditable(item)) manage.push(`<a class="button button-outline" href="${base}/edit">Edit ${invoice ? "invoice" : "quote"}</a>`);
+  if (isEditable(item)) actions.push(`<a class="button ${!invoice && !item.invoiceNumber ? "button-outline" : "button-solid"}" href="${base}/edit">Edit</a>`);
+  actions.push(`<form action="/clients/admin/templates/from-billing" method="post"><input type="hidden" name="client" value="${escapeAttribute(client.slug)}"><input type="hidden" name="id" value="${escapeAttribute(item.id)}"><button class="button button-outline" type="submit">Save as template</button></form>`);
   // An invoice with payments toward it is not voided (its payments would have nothing to apply to).
-  if (item.status === "open" && !installmentsTotal(item)) manage.push(`<form action="${base}/void" method="post"><button class="portal-logout-button" type="submit">Mark void</button></form>`);
-  manage.push(`<form action="/clients/admin/templates/from-billing" method="post"><input type="hidden" name="client" value="${escapeAttribute(client.slug)}"><input type="hidden" name="id" value="${escapeAttribute(item.id)}"><button class="portal-logout-button" type="submit">Save as a template</button></form>`);
-  cards.push(`<section class="admin-card">
-          <h2>Manage</h2>
-          <div class="admin-manage">${manage.join("\n            ")}</div>
-          <div class="admin-danger"><a class="portal-logout-button" href="${base}/delete">Delete ${invoice ? "invoice" : "quote"}</a></div>
-          ${activity(item, receipt)}
-        </section>`);
+  if (item.status === "open" && !installmentsTotal(item)) actions.push(`<form action="${base}/void" method="post"><button class="button button-outline" type="submit">Mark void</button></form>`);
+  actions.push(`<a class="billing-trash" href="${base}/delete" aria-label="Delete ${escapeAttribute(billingLabel(item))}" title="Delete">${TRASH_ICON}</a>`);
 
   return adminShell(`<div class="site-width portal-shell">
       <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a></p>
-      <h1 class="portal-heading portal-heading-sm">${kindLabel(item)} ${escapeHtml(item.number)}</h1>
+      <div class="billing-admin-head">
+        <h1 class="portal-heading portal-heading-sm">${kindLabel(item)} ${escapeHtml(item.number)}</h1>
+        <div class="billing-admin-actions">
+          ${actions.join("\n          ")}
+        </div>
+      </div>
       ${noticeMarkup(notice)}
       <div class="billing-layout billing-layout-admin">
         ${billingDocument({ item, client })}
-        <div class="admin-cards">
-          ${cards.join("\n        ")}
+        <div class="admin-folds billing-folds">
+        ${folds.filter(Boolean).join("\n        ")}
         </div>
       </div>
       ${recipientList(recipients)}

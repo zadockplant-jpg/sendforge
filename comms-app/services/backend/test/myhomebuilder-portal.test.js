@@ -797,7 +797,7 @@ test("a quote or invoice goes to several addresses at once, and they fill in the
   const receipt = email.delivered.at(-1);
   assert.equal(receipt.subject, `Receipt for invoice ${first.number} from My Home Builder LLC`);
   assert.deepEqual(receipt.to, ["pcm@example.com", "Spouse@Example.com", "office@example.com"]);
-  assert.match(await (await request(firstPath, { headers: { Cookie: adminCookie } })).text(), /Emailed to pcm@example\.com, Spouse@Example\.com, office@example\.com on/u);
+  assert.match(await (await request(firstPath, { headers: { Cookie: adminCookie } })).text(), /<span>Receipt emailed to pcm@example\.com, Spouse@Example\.com, office@example\.com<\/span>/u);
 
   // Stripe Checkout takes one address: the project's first.
   await request(`/clients/pay/${second.shareToken}`);
@@ -903,14 +903,14 @@ test("an invoice copied to another project opens that project's editor, and post
   const adminCookie = await loginAsAdmin();
   const { item } = await postInvoice(adminCookie, { title: "Cabinet package", dueDate: "2026-01-15", description: "Net 15.", ...lines(["Base cabinets", "12", "450"], ["Hardware", "1", "380.50"]) });
   const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
-  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Add another client portal to copy this invoice to it or send it there/u);
+  assert.doesNotMatch(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /id="billing-project"/u, "no other project: no Another project");
 
   const smith = await addPortal(adminCookie, "Smith Residence", "pat@example.com, sam@example.com");
   const page = await (await request(path, { headers: { Cookie: adminCookie } })).text();
   assert.match(page, /<option value="smith-residence">Smith Residence<\/option>/u);
   assert.doesNotMatch(page, /<option value="muskegon-addition">/u, "the project it is in is not offered");
-  assert.match(page, />Copy to another project<\/button>/u);
-  assert.match(page, /formaction="[^"]+\/move" formmethod="post">Send to another project<\/button>/u);
+  assert.match(page, /<button class="button button-solid" type="submit">Copy<\/button>/u);
+  assert.match(page, /formaction="[^"]+\/move" formmethod="post">Send<\/button>/u);
 
   const editor = await request(`${path}/copy?to=${smith}`, { headers: { Cookie: adminCookie } });
   assert.equal(editor.status, 200);
@@ -991,7 +991,7 @@ test("a quote sent to another project takes the invoice made from it, and a proc
   const quotePath = `/clients/admin/clients/muskegon-addition/billing/${quote.id}`;
   await request(`${quotePath}/invoice`, form({}, adminCookie));
   const invoice = (await billingRecords()).find((entry) => entry.kind === "invoice");
-  assert.match(await (await request(quotePath, { headers: { Cookie: adminCookie } })).text(), /Send to another project moves this quote there with Invoice 1, which was made from it/u);
+  assert.ok((await (await request(quotePath, { headers: { Cookie: adminCookie } })).text()).includes(`formaction="${quotePath}/move" formmethod="post">Send</button>`));
 
   const moved = await request(`${quotePath}/move`, form({ to: smith }, adminCookie));
   assert.match(moved.headers.get("Location"), /notice=moved-pair/u);
@@ -1029,7 +1029,7 @@ test("deleting an invoice asks first, says what goes with it, and removes it and
   await request(`/clients/pay/${invoice.shareToken}`);
   const session = [...stripe.sessions.keys()].at(-1);
 
-  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /<div class="admin-danger"><a class="portal-logout-button" href="[^"]+\/delete">Delete invoice<\/a><\/div>/u);
+  assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /<a class="billing-trash" href="[^"]+\/delete" aria-label="Delete Invoice 1" title="Delete">/u);
   const confirm = await (await request(`${path}/delete`, { headers: { Cookie: adminCookie } })).text();
   assert.match(confirm, /Delete Invoice 1\?/u);
   assert.match(confirm, /It was emailed to pat@example\.com\. The link in that email will stop working\./u);
@@ -1047,7 +1047,7 @@ test("deleting an invoice asks first, says what goes with it, and removes it and
   assert.equal((await request(`/clients/invoice/${invoice.shareToken}`)).status, 404);
   assert.match(await (await request(deleted.headers.get("Location"), { headers: { Cookie: adminCookie } })).text(), /Invoice deleted\. Its link no longer works\./u);
   assert.equal((await stored(quote)).invoiceId, undefined);
-  assert.match(await (await request(quotePath, { headers: { Cookie: adminCookie } })).text(), /Create invoice from this quote/u, "the quote can be invoiced again");
+  assert.match(await (await request(quotePath, { headers: { Cookie: adminCookie } })).text(), />Create invoice<\/button>/u, "the quote can be invoiced again");
 
   // A payment through its old Checkout is not lost: the builder is told, once.
   await signedWebhook("checkout.session.completed", payStripeSession(session, { amount_total: 400000 }));
@@ -1138,7 +1138,7 @@ test("the admin list says how each invoice was paid or when it is due, and chang
   const base = "/clients/admin/clients/muskegon-addition/billing";
   assert.match(page, /<small class="status-detail">Due Oct 1, 2099<\/small>/u);
   assert.match(page, /<small class="status-detail">No due date<\/small>/u);
-  assert.match(page, /<small class="status-detail"><a class="payment-change" href="[^"]+" data-payment-menu data-label="Invoice 3 · Deposit" data-method="zelle" data-method-name="" data-reference="" data-paid-on="2026-09-28" title="Change how it was paid">Zelle · Sep 28, 2026<\/a><\/small>/u);
+  assert.match(page, /<small class="status-detail"><a class="payment-change" href="[^"]+" data-payment-menu data-label="Invoice 3 · Deposit" data-method="zelle" data-method-name="" data-note="" data-paid-on="2026-09-28" title="Change how it was paid">Zelle · Sep 28, 2026<\/a><\/small>/u);
   assert.ok(page.includes(`<a class="status-change" href="${base}/${paid.id}" data-status-menu data-label="Invoice 3 · Deposit" data-state="paid" data-source="manual" data-method="Zelle"`), "the status opens its popup, or the invoice without scripts");
   assert.ok(page.includes(`<a class="billing-trash" href="${base}/${due.id}/delete" data-delete-menu data-label="Invoice 1 · Framing" data-kind="invoice"`));
   assert.match(page, /aria-label="Delete Invoice 1" title="Delete"><svg/u);
@@ -1151,7 +1151,7 @@ test("the admin list says how each invoice was paid or when it is due, and chang
   const marked = await request(`${base}/${open.id}/record-payment`, form({ method: "check", reference: "#88", paidOn: "2026-09-29", return: "list" }, adminCookie));
   assert.equal(marked.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-recorded");
   assert.equal((await stored(open)).payment.label, "Check #88");
-  assert.match(await list(), /data-reference="#88" data-paid-on="2026-09-29" title="Change how it was paid">Check #88 · Sep 29, 2026<\/a><\/small>/u);
+  assert.match(await list(), /data-note="" data-paid-on="2026-09-29" title="Change how it was paid">Check #88 · Sep 29, 2026<\/a><\/small>/u);
 
   // How it was paid, changed from the list's popup.
   assert.match(page, /<dialog class="admin-dialog" id="payment-dialog"/u);
@@ -1667,7 +1667,7 @@ test("admin builds an itemized invoice, emails it, and the client pays from the 
   assert.equal(email.delivered.length, deliveredBefore, "a repeated webhook does not repeat the receipt");
 
   const adminPage = await (await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}`, { headers: { Cookie: adminCookie } })).text();
-  assert.match(adminPage, /Emailed to client@example\.com on/u);
+  assert.match(adminPage, /<span>Receipt emailed to client@example\.com<\/span>/u);
   assert.match(await (await request(`/clients/invoice/${item.shareToken}`)).text(), /Balance due/u);
 });
 
@@ -1699,7 +1699,7 @@ test("a stale return after the webhook neither resends the receipt nor erases th
   assert.match((await request(`/clients/pay/${item.shareToken}/return?session_id=${sessionId}`)).headers.get("Location"), /notice=paid/u);
   assert.equal(deliveredTo("race@example.com").filter((message) => message.subject.startsWith("Receipt")).length, 1);
   const adminPage = await (await request(`/clients/admin/clients/muskegon-addition/billing/${item.id}`, { headers: { Cookie: adminCookie } })).text();
-  assert.match(adminPage, /Emailed to race@example\.com on/u);
+  assert.match(adminPage, /<span>Receipt emailed to race@example\.com<\/span>/u);
 });
 
 test("without a webhook, the client's return from Checkout sends the receipt once", async () => {
@@ -1937,6 +1937,49 @@ test("a project's panel: its name opens its details, then Quote, Invoice, Purcha
   assert.match(panel, /<details class="admin-fold" id="project-invoices" data-remember open>/u, "Invoices starts open");
   assert.match(panel, /<div class="admin-export"><a class="button button-outline client-export" href="\/clients\/admin\/clients\/muskegon-addition\/export\?costs=yes&amp;photos=yes" data-export-client data-export-name="Muskegon Addition">Export Client to PDF<\/a><\/div>/u);
   assert.doesNotMatch(panel, /client-project-menu/u, "one project: nothing to fold");
+});
+
+test("an invoice's page: its actions beside the heading, one-line folds with a status, and notes on payments", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000", sendNow: "yes" });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  const page = async () => (await request(path, { headers: { Cookie: adminCookie } })).text();
+
+  const open = await page();
+  const actions = open.match(/<div class="billing-admin-actions">([\s\S]*?)<\/div>/u)[1];
+  assert.deepEqual([...actions.matchAll(/>(Edit|Save as template|Mark void)</gu)].map((match) => match[1]), ["Edit", "Save as template", "Mark void"]);
+  assert.match(actions, new RegExp(`<a class="billing-trash" href="${path}/delete" aria-label="Delete Invoice 1" title="Delete">`, "u"));
+  const order = ['id="billing-payment"', 'id="billing-email"', 'id="billing-share"', 'id="billing-history"'].map((text) => open.indexOf(text));
+  assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), "Payment, Email, Share, History");
+  assert.match(open, /<details class="admin-fold" id="billing-payment" data-remember open>\s*<summary><h3>Payment<\/h3><span class="admin-fold-status">\$1,000\.00 due<\/span><\/summary>/u);
+  assert.match(open, /<summary><h3>Email<\/h3><span class="admin-fold-status">Sent [A-Z][a-z]{2} \d{1,2}, \d{4}<\/span><\/summary>/u, "posting emailed it");
+  assert.doesNotMatch(open, /Anyone with a link|For checks, Zelle, cash|Filled in from this project|Reference \(optional\)|goes straight to Stripe Checkout|<h2>Manage<\/h2>/u);
+  assert.match(open, /<label for="payment-note">Notes\s*<input id="payment-note" name="note"/u);
+
+  // A payment with notes.
+  await request(`${path}/record-payment`, form({ amount: "400", method: "check", paidOn: "2026-09-20", note: "Check #2001" }, adminCookie));
+  let saved = await stored(item);
+  assert.deepEqual([saved.installments[0].label, saved.installments[0].note], ["Check", "Check #2001"]);
+  const partly = await page();
+  assert.match(partly, /\$400\.00 · Check · Sep 20, 2026 · Check #2001/u);
+  assert.match(partly, /<span class="admin-fold-status">\$600\.00 due<\/span>/u);
+  assert.doesNotMatch(partly, />Mark void</u, "payments toward it: not voided");
+
+  // Settled, its payment can change: notes change or clear, and a reference saved before notes stays.
+  await request(`${path}/record-payment`, form({ method: "zelle", paidOn: "2026-09-25", sendReceipt: "yes" }, adminCookie));
+  saved = await stored(item);
+  assert.equal(saved.status, "paid");
+  await db("mhb_billing").where({ id: item.id }).update({ data: JSON.stringify({ ...saved, payment: { ...saved.payment, reference: "#77", label: "Zelle #77" } }) });
+  await request(`${path}/payment`, form({ method: "zelle", paidOn: "2026-09-26", note: "Final draw" }, adminCookie));
+  saved = await stored(item);
+  assert.deepEqual([saved.payment.label, saved.payment.note, saved.paidAt], ["Zelle #77", "Final draw", "2026-09-26"]);
+  await request(`${path}/payment`, form({ method: "zelle", paidOn: "2026-09-26", note: "" }, adminCookie));
+  assert.equal((await stored(item)).payment.note, undefined);
+  const paid = await page();
+  assert.match(paid, /<summary><h3>Payment<\/h3><span class="admin-fold-status">Zelle #77 · Sep 26, 2026<\/span><\/summary>/u);
+  assert.match(paid, /<summary><h3>Receipt<\/h3><span class="admin-fold-status">Sent /u, "the payment emailed a receipt");
+  assert.match(paid, />Mark as unpaid<\/button>/u);
 });
 
 test("a quote link lets the client accept by name, the builder is told, and the quote becomes an invoice", async () => {

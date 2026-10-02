@@ -1687,19 +1687,21 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     return back("partial-removed");
   }
 
-  // Corrects a payment recorded by hand (method, reference or date; the amount is the invoice
-  // total). Stripe payments keep what Stripe recorded. The receipt is not re-sent; "Resend
-  // receipt" sends the corrected one.
+  // Corrects a payment recorded by hand (method, date or notes; the amount is the invoice total).
+  // Stripe payments keep what Stripe recorded. The receipt is not re-sent; "Resend receipt" sends
+  // the corrected one. A reference saved before notes stays.
   // Saved from the invoice page, or from the admin list's How it was paid popup (return=list).
   if (action === "payment") {
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
     const back = (notice) => redirectResponse(form?.get("return") === "list" ? `/clients/admin?client=${encodeURIComponent(slug)}&notice=${notice}` : `${itemPath}?notice=${notice}`);
     if (item.kind !== "invoice" || item.status !== "paid") return back("not-payable");
     if (item.payment?.source !== "manual") return back("payment-from-stripe");
-    const entered = parseManualPayment(form);
+    const entered = parseManualPayment(form, { reference: item.payment?.reference });
     if (entered.error) return back(entered.error);
     const { paidOn, ...details } = entered;
-    const corrected = { ...item, paidAt: paidOn, payment: { ...item.payment, ...details, amountCents: item.amountCents - installmentsTotal(item), updatedAt: new Date().toISOString() } };
+    // Notes cleared in the form are cleared on the payment.
+    const { note: _note, ...previous } = item.payment;
+    const corrected = { ...item, paidAt: paidOn, payment: { ...previous, ...details, amountCents: item.amountCents - installmentsTotal(item), updatedAt: new Date().toISOString() } };
     await putBilling(store, corrected);
     const was = `${item.payment?.label || "payment"}, ${formatDate(item.paidAt)}`;
     const now = `${corrected.payment.label}, ${formatDate(corrected.paidAt)}`;
