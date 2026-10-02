@@ -3262,8 +3262,8 @@ test("the client login shows in plain text on the admin panel, kept sealed; a pr
   // A login saved before logins were kept is asked for again.
   await db("mhb_secure").where({ key: `client-login:${slug}` }).delete();
   assert.match(await panel(), /value="" placeholder="Set, but not on file\. Type it again to show it here\."/u);
-  // The Muskegon login is set in Render, and shown as it is there.
-  assert.match(await panel("muskegon-addition"), new RegExp(`id="client-login" type="text" readonly value="${process.env.MHB_CLIENT_PORTAL_PASSWORD}"`, "u"));
+  // The Muskegon login, first set in Render, is an ordinary login now: shown, and changed here.
+  assert.match(await panel("muskegon-addition"), new RegExp(`id="client-login" name="login" type="text"[^>]*value="${process.env.MHB_CLIENT_PORTAL_PASSWORD}"`, "u"));
 
   const home = await panel();
   assert.match(home, /<label for="new-client-site">Job site address \(optional\)/u);
@@ -3500,14 +3500,14 @@ test("the gallery takes photos with a note from the client, the crew and the adm
   assert.match((await request("/clients/admin/clients/muskegon-addition/photos", photoForm({ note: "" }, [{ bytes: pdf, name: "x.png", type: "image/png" }], adminCookie))).headers.get("Location"), /notice=photos-invalid$/u);
 
   const panel = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
-  assert.match(panel, /<h3>Documents<\/h3>[\s\S]*<div class="admin-subhead admin-gallery-head" id="gallery">\s*<h3>Gallery<\/h3>/u);
+  assert.match(panel, /<h3>Documents<\/h3>[\s\S]*<details class="admin-fold" id="gallery" data-remember>\s*<summary><h3>Gallery<\/h3><span class="admin-fold-status">3 photos<\/span><\/summary>/u);
   assert.match(panel, /<form class="gallery-master" action="\/clients\/admin\/clients\/muskegon-addition\/gallery" method="post">\s*<label class="portal-check" for="photos-visible">\s*<input id="photos-visible" name="shown" type="checkbox" value="yes" checked data-autosubmit>\s*<span>Show photos in the client portal<\/span>/u);
   assert.equal((panel.match(/<span>Shown<\/span>/gu) || []).length, 3);
   assert.match(panel, new RegExp(`<form class="photo-shown" action="/clients/admin/clients/muskegon-addition/photos/${wall.id}/shown" method="post">\\s*<label class="portal-check" for="photo-shown-${wall.id}">\\s*<input id="photo-shown-${wall.id}" name="shown" type="checkbox" value="yes" checked data-autosubmit>`, "u"));
   assert.match(panel, new RegExp(`<form method="post" action="/clients/admin/clients/muskegon-addition/photos/${wall.id}/delete" data-confirm="Delete this photo\\? This can't be undone\\.">\\s*<button class="billing-trash"`, "u"));
   assert.match(panel, new RegExp(`<p class="photo-note">Framing done</p>\\s*<small class="photo-meta">My Home Builder · <a class="photo-date" href="/clients/admin/clients/muskegon-addition/photos/${framing.id}/date" data-photo-date data-date="\\d{4}-\\d{2}-\\d{2}" title="Change the date">[A-Z][a-z]{2} \\d{1,2}, \\d{4}</a></small>`, "u"));
   assert.match(panel, /<small class="photo-meta">Client · /u);
-  assert.match(panel, /<form class="portal-form admin-form photo-upload" action="\/clients\/admin\/clients\/muskegon-addition\/photos" method="post" enctype="multipart\/form-data">\s*<h3>Add photos<\/h3>/u);
+  assert.match(panel, /<details class="admin-upload" id="add-photos">\s*<summary>Add photos<\/summary>\s*<form class="portal-form admin-form photo-upload" action="\/clients\/admin\/clients\/muskegon-addition\/photos" method="post" enctype="multipart\/form-data">/u);
 
   // The crew add photos to an active job, and see the ones they added.
   const { worker, cookie } = await addCrew(adminCookie, { kind: "employee", name: "Sam Ortiz", email: "sam@example.com" });
@@ -3808,7 +3808,7 @@ test("Inside another portal makes a client portal a project there, under that po
   // another portal, which asks which client portal.
   const before = await page(smith);
   assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=smith-deck" data-portal-menu="smith-deck" data-portal-name="Smith Deck" data-portal-client="Smith Deck">/u);
-  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=muskegon-addition" data-portal-menu="muskegon-addition" data-portal-name="Muskegon Addition" data-portal-client="Muskegon Addition" data-portal-secret>/u);
+  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=muskegon-addition" data-portal-menu="muskegon-addition" data-portal-name="Muskegon Addition" data-portal-client="Muskegon Addition">/u);
   assert.match(before, /<div class="portal-menu" id="portal-menu" role="menu" aria-label="Client portal" hidden>\s*<form method="post" data-portal-menu-archive><button type="submit" role="menuitem">Send to archive<\/button><\/form>\s*<button type="button" role="menuitem" data-portal-menu-inside>Inside another portal<\/button>/u);
   assert.match(before, /<select id="inside-to" name="to" required><option value="" selected disabled>Choose a client portal<\/option><option value="jones-barn">Jones Barn<\/option><option value="muskegon-addition">Muskegon Addition<\/option><option value="smith-deck">Smith Deck<\/option><option value="smith-residence">Smith Residence<\/option><\/select>/u);
   // The same actions, without the menu, fold at the bottom of each project's panel.
@@ -3860,12 +3860,9 @@ test("Inside another portal makes a client portal a project there, under that po
   assert.equal((await clientHome(await loginAsClient("smith-family-2026"))).heading, "Smith Residence");
   assert.match((await request(`/clients/admin/clients/${barn}/login`, form({ login: "smith-family-2026" }, adminCookie))).headers.get("Location"), /notice=login-taken$/u);
 
-  // Not inside itself, where it already is, a project, or nowhere; the Muskegon project's login is
-  // set in Render, so it stays a client portal of its own.
+  // Not inside itself, where it already is, a project, or nowhere.
   for (const to of [deck, smith, "nowhere", ""]) assert.match(await inside(deck, to), /notice=project-invalid$/u);
   assert.match(await inside(barn, deck), /notice=project-invalid$/u, "a project holds no projects");
-  assert.equal(await inside("muskegon-addition", barn), "/clients/admin?client=muskegon-addition&notice=inside-secret");
-  assert.match((await page("muskegon-addition")), /Its login is set in Render, so it stays a client portal of its own\./u);
 
   // A client portal goes inside another with its projects, as projects of that portal.
   assert.equal(await inside(smith, barn), `/clients/admin?client=${smith}&notice=inside-saved`);
@@ -4080,11 +4077,41 @@ test("Send to archive takes a client portal or project off the client portal scr
   assert.match(await page("/clients/admin/archive"), /No client portals are in the archive\./u);
   assert.equal((await db("mhb_activity").where({ action: "client.restored" }).select("id")).length, 3);
 
-  // The Muskegon project too: while it is in the archive, its login (set in Render) opens nothing.
+  // The Muskegon project too: while it is in the archive, its login opens nothing.
   await request("/clients/admin/clients/muskegon-addition/archive", form({}, adminCookie));
   assert.equal((await request("/clients/login", form({ password: process.env.MHB_CLIENT_PORTAL_PASSWORD }))).status, 401);
   await request("/clients/admin/clients/muskegon-addition/restore", form({}, adminCookie));
   assert.equal((await clientHome(await loginAsClient())).heading, "Muskegon Addition");
+});
+
+test("the Muskegon login, first set in Render, becomes an ordinary login: same sign-in, changed on the panel, and it can go inside another portal", async () => {
+  const secret = process.env.MHB_CLIENT_PORTAL_PASSWORD;
+  // Before the admin panel opens, Render's login signs in as always.
+  assert.equal((await clientHome(await loginAsClient())).heading, "Muskegon Addition");
+
+  const adminCookie = await loginAsAdmin();
+  const page = async (slug) => (await request(`/clients/admin?client=${slug}`, { headers: { Cookie: adminCookie } })).text();
+  const panel = await page("muskegon-addition");
+  const record = await projectRecord("muskegon-addition");
+  assert.equal(record.managedBySecret, false);
+  assert.ok(record.passwordHash);
+  assert.match(panel, new RegExp(`<input id="client-login" name="login" type="text"[^>]*value="${secret}"`, "u"), "shown in plain text, and saved like any other");
+  assert.doesNotMatch(panel, /data-portal-secret|Set in Render|set in Render/u);
+  await page("muskegon-addition");
+  assert.equal((await db("mhb_activity").where({ action: "client.login-normalized" }).select("id")).length, 1, "once");
+  assert.equal((await clientHome(await loginAsClient())).heading, "Muskegon Addition", "the client signs in as before");
+
+  // It goes inside another client portal and opens with that portal's login, its files too.
+  const barn = await addPortal(adminCookie, "Jones Barn");
+  assert.equal((await request("/clients/admin/clients/muskegon-addition/inside", form({ to: barn }, adminCookie))).headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=inside-saved");
+  const moved = await projectRecord("muskegon-addition");
+  assert.deepEqual([moved.parentSlug, moved.passwordHash, moved.managedBySecret], [barn, null, false]);
+  assert.equal((await request("/clients/login", form({ password: secret }))).status, 401, "its old login opens nothing now");
+  const barnCookie = await loginAsClient("jones-barn-login-2026");
+  assert.deepEqual((await clientHome(barnCookie)).projects, ["Jones Barn", "Muskegon Addition"]);
+  const switched = await request("/clients/switch", form({ project: "muskegon-addition" }, barnCookie));
+  const files = await request("/clients/muskegon-addition/", { headers: { Cookie: cookieValue(switched) } });
+  assert.equal(files.headers.get("X-MHB-Asset"), "/clients/muskegon-addition/");
 });
 
 // ---------- Sign-in protection ----------

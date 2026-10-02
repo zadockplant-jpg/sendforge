@@ -1280,8 +1280,8 @@ function archiveOrMove(selected, portals) {
         </details>`;
 }
 
-// The project's gallery: the master switch, the photos (each with its Shown checkbox and trash
-// button) and Add photos.
+// The project's gallery, folded under its heading: the master switch, the photos (each with its
+// Shown checkbox and trash button) and Add photos.
 function adminGallery(selected, photos, base) {
   // Who added it, then its date: a click on the date opens a popup to change or delete it
   // (billing.js; without scripts, a page). A deleted date shows nothing; the empty spot still
@@ -1309,22 +1309,24 @@ function adminGallery(selected, photos, base) {
               </form>
             </div>`;
   };
-  return `<div class="admin-subhead admin-gallery-head" id="gallery">
-          <h3>Gallery</h3>
-          <form class="gallery-master" action="${base}/gallery" method="post">
+  // A one-line fold like the panel's others (its id is the #gallery the photo pages return to),
+  // with Add photos folded at its foot. The date popup sits outside it.
+  const count = photos.length ? `${photos.length} photo${photos.length === 1 ? "" : "s"}` : "";
+  return `${fold("gallery", "Gallery", `<form class="gallery-master" action="${base}/gallery" method="post">
             <label class="portal-check" for="photos-visible">
               <input id="photos-visible" name="shown" type="checkbox" value="yes"${selected.photosVisible === false ? "" : " checked"} data-autosubmit>
               <span>Show photos in the client portal</span>
             </label>
             <button class="portal-logout-button" type="submit" data-autosubmit-button>Save</button>
           </form>
-        </div>
         ${photos.length ? photoGrid(photos, { href: (photo) => `${base}/photos/${encodeURIComponent(photo.id)}`, meta, extra }) : '<p class="portal-empty">No photos yet.</p>'}
+        <details class="admin-upload" id="add-photos">
+        <summary>Add photos</summary>
         <form class="portal-form admin-form photo-upload" action="${base}/photos" method="post" enctype="multipart/form-data">
-          <h3>Add photos</h3>
           ${photoFields("admin-photos")}
           <button class="button button-solid" type="submit">Add photos</button>
         </form>
+        </details>`, { status: count })}
         ${photos.length ? `<dialog class="admin-dialog" id="photo-date-dialog" aria-labelledby="photo-date-title">
           <div class="admin-dialog-head">
             <h2 id="photo-date-title">Photo date</h2>
@@ -1541,9 +1543,8 @@ export function adminDashboardPage({ clients, selected, root = selected, project
           <button class="button button-solid" type="submit">Share with client</button>
         </form>
         </details>`)}
-        </div>
-
         ${adminGallery(selected, photos, base)}
+        </div>
         <form class="admin-access" action="${base}/access" method="post">
           <label class="portal-check" for="client-read-only">
             <input id="client-read-only" name="readOnly" type="checkbox" value="yes"${selected.readOnly ? " checked" : ""} data-autosubmit>

@@ -1867,6 +1867,25 @@ async function forgetLogin(store, slug) {
   }
 }
 
+// The Muskegon project's login was first set only in Render (MHB_CLIENT_PORTAL_PASSWORD). The
+// first time the admin panel opens, it becomes an ordinary client login, hashed and kept sealed
+// like every other: the client signs in with it as before, and the project can be moved and its
+// login changed on the panel. Render's variable is not read for it after that. Without one, the
+// project is admin only until it is given a login.
+async function normalizeSecretLogin(env, store) {
+  const muskegon = await getClient(store, DEFAULT_CLIENT_SLUG);
+  if (!muskegon?.managedBySecret) return;
+  const login = env.CLIENT_PORTAL_PASSWORD || "";
+  await putClient(store, { ...muskegon, managedBySecret: false, passwordHash: login ? await hashPassword(login) : null });
+  if (login) await keepLogin(env, store, muskegon.slug, login);
+  await record(store, {
+    actor: "system", action: "client.login-normalized", clientSlug: muskegon.slug,
+    summary: login
+      ? `Moved ${muskegon.name}'s client login out of Render into the portal; the client signs in with it as before, and it can be changed or moved like any other`
+      : `${muskegon.name} had no client login in Render, so it is admin only until it is given one`
+  });
+}
+
 async function keptLogin(env, store, client) {
   if (!client) return null;
   if (client.managedBySecret) return env.CLIENT_PORTAL_PASSWORD || null;
@@ -2225,6 +2244,7 @@ async function routePortalRequest(context) {
     // Admin panel.
     if (pathname === "/clients/admin" || pathname.startsWith("/clients/admin/")) {
       if (!admin) return redirectResponse("/clients");
+      if (store) await normalizeSecretLogin(env, store);
 
       const dashboard = async ({ requested, notice = noticeFromQuery(url), newClient = null, clientError = "", typedEmails = null, newProject = null, projectError = "", status = 200 }) => {
         // Invoice numbers follow the invoice dates (the same date: the order they were entered).

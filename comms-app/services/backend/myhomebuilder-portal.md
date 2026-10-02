@@ -53,8 +53,10 @@ the same way jayje.com forwards its account pages. Everything else lives here:
 - `MHB_PORTAL_ENABLED=true` turns the module on (otherwise every route answers 503).
 - `MHB_PROXY_SECRET`: shared with the website's Pages Function (at least 32 characters).
 - `MHB_SESSION_SECRET`: signs client and admin session cookies.
-- `MHB_CLIENT_PORTAL_PASSWORD`: the Muskegon Addition client's project login. Portals created
-  in the admin panel store PBKDF2-hashed logins in `mhb_clients` instead.
+- `MHB_CLIENT_PORTAL_PASSWORD`: the Muskegon Addition client's first project login. Portals
+  created in the admin panel store PBKDF2-hashed logins in `mhb_clients`. The first time the
+  admin panel opens, Muskegon's login is stored the same way (hash, sealed copy; activity
+  `client.login-normalized`), and after that this variable is not read.
 - `MHB_STRIPE_SECRET_KEY` and `MHB_STRIPE_WEBHOOK_SECRET`: My Home Builder LLC's own Stripe
   account, not SendForge's `STRIPE_SECRET_KEY`.
 - `SENDGRID_API_KEY`: the backend's existing key. `myhomebuilderllc.com` is domain-authenticated
@@ -255,7 +257,8 @@ projects. Each export is in the activity log.
 - **The client login shows in plain text** in that field, so a client's access is never lost.
   Besides its hash, each login is kept sealed in `mhb_secure` (`client-login:<slug>`, secure.js,
   AES-256-GCM). A login saved before this is not on file: the field asks for it again. The
-  Muskegon project's login comes from `MHB_CLIENT_PORTAL_PASSWORD` and is shown read only.
+  Muskegon project's login, first set in Render, is stored like the others (see
+  `MHB_CLIENT_PORTAL_PASSWORD`), so it shows and changes here too.
 - **Add a client portal** also takes the job site address, and at its very bottom **Display all
   data to client portal (read only)**.
 - **Display all data to client portal (read only)**, also at the very bottom of each project,
@@ -401,8 +404,9 @@ under `photos/<slug>/<id>/<name>`.
   - Crew: **Add photos** in the crew portal (`POST /clients/crew/photos`), to one of the active
     jobs. Crew see the photos they added, with their notes, and open only those
     (`/clients/crew/photos/<id>`).
-  - Admin: **Gallery** on the project's panel, under Documents (`POST
-    /clients/admin/clients/<slug>/photos`), with every photo, its note, who added it and when.
+  - Admin: **Gallery** on the project's panel, a one-line fold under Documents with its photo
+    count (`POST /clients/admin/clients/<slug>/photos`, Add photos folded at its foot), with
+    every photo, its note, who added it and when. Returning to `#gallery` opens it.
 - **What the client sees:** the photos shown appear at the very top of the client portal home,
   above Project resources, each opening the full image (`/clients/photos/<id>`, served inline).
   Nothing renders when none are shown. A read-only project still shows them.
@@ -451,8 +455,8 @@ the crew portal and Another project.
 - **Logins:** a project has no login of its own; it uses its client portal's. One login opens the
   client portal (first) and every project in it, and the client switches between them at the top
   of their portal (`/clients/switch`). A login saved on a project's panel is its client portal's.
-  The Muskegon project's login is set in Render: projects can go inside it (its login opens them
-  too), but it stays a client portal of its own.
+  The Muskegon project moves like any other once its login is stored in the portal (the first
+  admin panel visit); its project files open for whichever login opens it.
   - Put inside another portal, a portal or project drops its own login (hash and sealed copy) and
     uses its new client portal's. Made its own client portal, a project has no login (admin only)
     until it is given one.
