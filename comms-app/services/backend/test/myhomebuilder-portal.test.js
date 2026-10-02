@@ -44,6 +44,7 @@ const { ADMIN_SESSION_TTL_SECONDS, CLIENT_SESSION_TTL_SECONDS, createAdminSessio
   "../src/modules/myhomebuilder-portal/security.js"
 );
 const { addressesText, parseEmailList } = await import("../src/modules/myhomebuilder-portal/email.js");
+const { formatDate } = await import("../src/modules/myhomebuilder-portal/format.js");
 const { parseLineItems, parseMoney, addDays, todayInMichigan } = await import("../src/modules/myhomebuilder-portal/billing.js");
 const { STRIPE_API_VERSION } = await import("../src/modules/myhomebuilder-portal/stripe.js");
 const { createStore, putBilling } = await import("../src/modules/myhomebuilder-portal/store.js");
@@ -766,7 +767,7 @@ test("email fields read several addresses, however they are separated or pasted"
 test("a quote or invoice goes to several addresses at once, and they fill in the project's other quotes, invoices and receipts", async () => {
   const adminCookie = await loginAsAdmin();
   const newInvoice = async () => (await request("/clients/admin/clients/muskegon-addition/billing/new?kind=invoice", { headers: { Cookie: adminCookie } })).text();
-  assert.match(await newInvoice(), /Add client emails on the client panel/u);
+  assert.doesNotMatch(await newInvoice(), /Email it to|Add client emails on the client panel/u, "no client email yet: nothing to email it to, and no hint about it");
 
   const { item: first } = await postInvoice(adminCookie, { title: "Pre Construction Services", amount: "5,000" });
   const firstPath = `/clients/admin/clients/muskegon-addition/billing/${first.id}`;
@@ -920,7 +921,8 @@ test("an invoice copied to another project opens that project's editor, and post
   assert.match(editorBody, /Net 15\./u);
   assert.match(editorBody, /id="billing-due" name="dueDate" type="date" value=""/u, "a due date already past is left to set");
   assert.match(editorBody, /Email it to pat@example\.com and sam@example\.com after posting/u);
-  assert.ok(editorBody.includes(`href="${path}">Cancel`), "Cancel goes back to the original");
+  assert.doesNotMatch(editorBody, />Cancel</u, "no Cancel beside Post invoice to click by accident");
+  assert.match(editorBody, /<p class="portal-kicker"><a class="portal-inline-link" href="\/clients\/admin\?client=smith-residence">Smith Residence<\/a><\/p>/u, "the way back is the project it posts to");
 
   // Posting it there makes a new invoice in that project; the original stays as it was.
   const posted = await request(`/clients/admin/clients/${smith}/billing`, form({ kind: "invoice", title: "Cabinet package", description: "Net 15.", sendNow: "yes", ...lines(["Base cabinets", "12", "450"], ["Hardware", "1", "380.50"]) }, adminCookie));
@@ -1884,6 +1886,59 @@ test("templates are saved, listed, used for a new quote, edited and deleted", as
   assert.equal(await db("mhb_templates").where({ id: template.id }).first(), undefined);
 });
 
+test("the editor: Templates beside its heading, Save as template by name, and notes and terms saved with Create new", async () => {
+  const adminCookie = await loginAsAdmin();
+  const newInvoice = async () => (await request("/clients/admin/clients/muskegon-addition/billing/new?kind=invoice", { headers: { Cookie: adminCookie } })).text();
+  assert.doesNotMatch(await newInvoice(), /admin-template-picker/u, "no templates yet, so no Templates box");
+
+  // Save as template: a name in its box saves the template with the invoice.
+  const saved = await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "invoice", title: "Rough plumbing", templateName: "Rough plumbing", ...lines(["Rough-in", "1", "6,500"]) }, adminCookie));
+  assert.match(saved.headers.get("Location"), /also=template-saved/u);
+  const [template] = (await db("mhb_templates").select("data")).map((row) => json(row.data));
+  assert.equal(template.name, "Rough plumbing");
+
+  // Templates sits beside the heading: a box with no arrow, no wording around it, and choosing one
+  // opens it. The line items carry no hint under them.
+  const editor = await newInvoice();
+  assert.match(editor, new RegExp(`<div class="billing-editor-head">\\s*<h1 class="portal-heading portal-heading-sm" data-kind-heading>New invoice</h1>\\s*<form class="admin-template-picker" action="/clients/admin/clients/muskegon-addition/billing/new" method="get">\\s*<select class="select-plain" id="template-pick" name="template" required aria-label="Templates" data-autosubmit><option value="" selected disabled hidden>Templates</option><option value="${template.id}">Rough plumbing \\(invoice\\)</option></select>\\s*<noscript>`, "u"));
+  assert.doesNotMatch(editor, /Start from a template|Choose a template|Blank rows are ignored/u);
+
+  // Notes and terms: Use template, whose first choice is Create new. Posting with a name saves the
+  // notes under it; the same name again takes the new text.
+  assert.match(editor, /<label for="billing-description">Notes and terms<\/label>\s*<select class="select-plain notes-picker" aria-label="Notes and terms templates" data-notes-template hidden>\s*<option value="" selected disabled hidden>Use template<\/option>\s*<option value="new">Create new<\/option>\s*<\/select>/u);
+  await postInvoice(adminCookie, { title: "Framing", amount: "900", description: "Net 15. Checks to My Home Builder LLC.", notesTemplateName: "Standard terms" });
+  let [notes] = (await db("mhb_templates").select("data")).map((row) => json(row.data)).filter((entry) => entry.type === "notes");
+  assert.deepEqual([notes.name, notes.text], ["Standard terms", "Net 15. Checks to My Home Builder LLC."]);
+  assert.ok(await db("mhb_activity").where({ action: "template.saved" }).where("summary", "like", "%notes and terms template Standard terms%").first());
+  await postInvoice(adminCookie, { title: "Roofing", amount: "700", description: "Net 30.", notesTemplateName: "standard terms" });
+  [notes] = (await db("mhb_templates").select("data")).map((row) => json(row.data)).filter((entry) => entry.type === "notes");
+  assert.deepEqual([notes.name, notes.text], ["Standard terms", "Net 30."], "the same template, its name as first given");
+  assert.equal((await db("mhb_templates").count("* as n").first()).n, 2);
+  assert.match(await newInvoice(), new RegExp(`<option value="new">Create new</option>\\s*<option value="${notes.id}" data-text="Net 30\\.">Standard terms</option>`, "u"));
+  assert.doesNotMatch(await newInvoice(), new RegExp(`<option value="${notes.id}">`, "u"), "notes are not quote and invoice templates");
+
+  // The templates page lists them apart, and deletes them; they have no editor page.
+  const list = await (await request("/clients/admin/templates", { headers: { Cookie: adminCookie } })).text();
+  assert.match(list, /<h2 id="notes-templates-heading">Notes and terms<\/h2>[\s\S]*<strong>Standard terms<\/strong><small>Net 30\.<\/small>/u);
+  assert.equal((await request(`/clients/admin/templates/${notes.id}`, { headers: { Cookie: adminCookie } })).status, 404);
+  await request(`/clients/admin/templates/${notes.id}/delete`, form({}, adminCookie));
+  assert.equal(await db("mhb_templates").where({ id: notes.id }).first(), undefined);
+});
+
+test("a project's panel: its name opens its details, then Quote, Invoice, Purchase and Payment, then Ledger, Invoices, Payments, Purchases and Documents, and Export Client to PDF at the very bottom", async () => {
+  const adminCookie = await loginAsAdmin();
+  const panel = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  assert.match(panel, /<details class="admin-panel-head">\s*<summary class="admin-title-row">\s*<h2 id="selected-heading">Muskegon Addition<\/h2>\s*<a class="portal-secondary-link" href="\/clients\/designer\/\?project=muskegon-addition">Designer<\/a>\s*<\/summary>\s*<div class="admin-panel-fields">\s*<form class="admin-inline-form admin-save-row" action="\/clients\/admin\/clients\/muskegon-addition\/profile"/u);
+  const buttons = panel.match(/<div class="admin-actions-bar admin-project-actions">([\s\S]*?)<\/div>/u)[1];
+  assert.deepEqual([...buttons.matchAll(/>([A-Za-z]+)<\/a>/gu)].map((match) => match[1]), ["Quote", "Invoice", "Purchase", "Payment"]);
+  assert.doesNotMatch(panel, /<h3>Quotes and invoices<\/h3>|Start from a template|Choose a template|<h3>Finances<\/h3>|Upload a contract or document/u);
+  const order = ["admin-project-actions", "<h3>Ledger</h3>", "<h3>Invoices</h3>", "<h3>Payments</h3>", "<h3>Purchases</h3>", "<h3>Documents</h3>", "<summary>Upload Document</summary>", 'id="gallery"', "<summary>Archive or move</summary>", 'class="admin-export"', 'id="status-dialog"'].map((text) => panel.indexOf(text));
+  assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), `in order: ${order.join(", ")}`);
+  assert.match(panel, /<details class="admin-fold" id="project-invoices" data-remember open>/u, "Invoices starts open");
+  assert.match(panel, /<div class="admin-export"><a class="button button-outline client-export" href="\/clients\/admin\/clients\/muskegon-addition\/export\?costs=yes&amp;photos=yes" data-export-client data-export-name="Muskegon Addition">Export Client to PDF<\/a><\/div>/u);
+  assert.doesNotMatch(panel, /client-project-menu/u, "one project: nothing to fold");
+});
+
 test("a quote link lets the client accept by name, the builder is told, and the quote becomes an invoice", async () => {
   const adminCookie = await loginAsAdmin();
   await setClientEmail(adminCookie, "quote@example.com");
@@ -2795,7 +2850,7 @@ test("Add payment beside New invoice records a payment toward any open invoice o
   const { item: one } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
   const { item: two } = await postInvoice(adminCookie, { title: "Roofing", amount: "400" });
   const list = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
-  assert.match(list, /<a class="button button-outline" href="\/clients\/admin\/clients\/muskegon-addition\/payments\/new" data-add-payment>Add payment<\/a>/u);
+  assert.match(list, /<a class="button button-outline" href="\/clients\/admin\/clients\/muskegon-addition\/payments\/new" data-add-payment>Payment<\/a>/u);
   assert.match(list, /<dialog class="admin-dialog" id="add-payment-dialog"/u);
   assert.match(list, new RegExp(`<option value="${two.id}" data-balance="400\\.00"( selected)?>Invoice ${(await stored(two)).number} · Roofing · \\$400\\.00 due</option>`, "u"));
 
@@ -2833,7 +2888,7 @@ async function expenseRecords() {
 test("Add expense records a job cost with its receipt, posts it to the books, and deleting takes it out", async () => {
   const adminCookie = await loginAsAdmin();
   const list = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
-  assert.match(list, /<a class="button button-outline" href="\/clients\/admin\/clients\/muskegon-addition\/expenses\/new" data-add-expense>Add expense<\/a>/u);
+  assert.match(list, /<a class="button button-outline" href="\/clients\/admin\/clients\/muskegon-addition\/expenses\/new" data-add-expense>Purchase<\/a>/u);
   assert.match(list, /<dialog class="admin-dialog expense-dialog" id="add-expense-dialog"/u);
   assert.match(list, /<option value="account:1000">Business checking<\/option><option value="personal">The owner&#39;s own money<\/option><option value="unpaid">Not paid yet \(a bill to pay later\)<\/option>/u);
   const today = todayInMichigan();
@@ -2910,13 +2965,27 @@ test("Upload document is near the top of the client portal and the crew portal, 
 test("a new invoice can list payments already received: less than the total leaves the rest due, the total marks it paid", async () => {
   const adminCookie = await loginAsAdmin();
   const editor = await (await request("/clients/admin/clients/muskegon-addition/billing/new?kind=invoice", { headers: { Cookie: adminCookie } })).text();
-  assert.match(editor, /<legend>Payments already received \(optional, invoices only\)<\/legend>/u);
+  // Payments: one row of Amount, Paid by, Received on and Notes (Other method shows only for
+  // Other), then Add another payment and Save as template, then Post invoice.
+  assert.match(editor, /<legend>Payments<\/legend>/u);
+  assert.doesNotMatch(editor, /already received|Blank rows are ignored|Reference \(optional\)/u);
+  assert.equal(editor.match(/data-listed-payment>/gu).length, 1);
+  assert.match(editor, /<label for="listed-0-other" data-listed-other hidden>Other method/u);
+  assert.match(editor, /<label for="listed-0-date">Received on[\s\S]*?<label class="listed-payment-note" for="listed-0-note">Notes\s*<input id="listed-0-note" name="paymentNote"/u);
+  const order = ["data-listed-payment-add hidden>Add another payment</button>", "data-save-template-open hidden>Save as template</button>", 'name="templateName"', ">Post invoice</button>"].map((text) => editor.indexOf(text));
+  assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), "Add another payment, Save as template and its name, then Post invoice");
+  assert.doesNotMatch(editor, /Also save this as a template|>Cancel</u);
 
-  const { item } = await postInvoice(adminCookie, { title: "Addition", amount: "5,000", paymentAmount: ["1,000", "500", ""], paymentMethod: ["check", "zelle", "check"], paymentReference: ["#2001", "", ""], paymentPaidOn: ["2026-09-02", "2026-09-15", ""], paymentMethodName: ["", "", ""] });
+  const { item } = await postInvoice(adminCookie, { title: "Addition", amount: "5,000", paymentAmount: ["1,000", "500", ""], paymentMethod: ["check", "zelle", "check"], paymentReference: ["#2001", "", ""], paymentPaidOn: ["2026-09-02", "2026-09-15", ""], paymentMethodName: ["", "", ""], paymentNote: ["", "Deposit for windows", ""] });
   const saved = await stored(item);
   assert.equal(saved.status, "open");
-  assert.deepEqual(saved.installments.map((entry) => [entry.amountCents, entry.label, entry.paidOn]), [[100000, "Check #2001", "2026-09-02"], [50000, "Zelle", "2026-09-15"]]);
+  assert.deepEqual(saved.installments.map((entry) => [entry.amountCents, entry.label, entry.paidOn, entry.note]), [[100000, "Check #2001", "2026-09-02", undefined], [50000, "Zelle", "2026-09-15", "Deposit for windows"]]);
   assert.deepEqual(await ledgerBalances(), { 1100: 350000, 1300: 150000, 4000: -500000 });
+  // The project's Payments list each one, newest first, with its notes.
+  const panel = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
+  const payments = panel.match(/<details class="admin-fold" id="project-payments" data-remember>([\s\S]*?)<\/details>/u)[1];
+  assert.match(payments, /<td>Zelle<\/td>\s*<td>Deposit for windows<\/td>\s*<td>\$500\.00<\/td>[\s\S]*<td>Check #2001<\/td>\s*<td><\/td>\s*<td>\$1,000\.00<\/td>/u);
+  assert.match(payments, /<dt>Received<\/dt><dd>\$1,500\.00<\/dd>/u);
 
   const { item: whole } = await postInvoice(adminCookie, { title: "Deposit", amount: "800", paymentAmount: ["300", "500"], paymentMethod: ["cash", "check"], paymentReference: ["", "#88"], paymentPaidOn: ["2026-09-01", "2026-09-03"], paymentMethodName: ["", ""] });
   const paid = await stored(whole);
@@ -3831,17 +3900,29 @@ test("Add project puts a new project in the client portal, and each project's fi
   await request(`/clients/admin/clients/kitchen-remodel/billing/${cabinets.id}/record-payment`, form({ method: "check", amount: "3,000", paidOn: today }, adminCookie));
   await request("/clients/admin/clients/kitchen-remodel/expenses", crewForm({ spentOn: today, paidWith: "account:1000", vendor: "", description: "Cabinet boxes", category: "Materials", amount: "4,200" }, null, adminCookie));
 
-  // Clicking a project opens it with its finances.
+  // Clicking a project opens it with its Ledger: its full book, with the gross profit after each
+  // entry, then the totals.
   const kitchenPanel = await page("kitchen-remodel");
-  assert.match(kitchenPanel, /<h3>Finances<\/h3>\s*<a class="portal-secondary-link" href="\/clients\/admin\/books\/jobs\/kitchen-remodel">Job book<\/a>\s*<\/div>\s*<dl class="billing-totals">\s*<div><dt>Gross income<\/dt><dd>\$8,000\.00<\/dd><\/div>\s*<div><dt>Gross expenses<\/dt><dd>\$4,200\.00<\/dd><\/div>\s*<div class="billing-totals-due"><dt>Gross profit<\/dt><dd>\$3,800\.00<\/dd><\/div>/u);
+  const ledger = kitchenPanel.match(/<details class="admin-fold" id="project-ledger" data-remember>([\s\S]*?)<\/details>/u)[1];
+  assert.match(ledger, /<summary><h3>Ledger<\/h3><\/summary>/u);
+  assert.match(ledger, /Cabinets<\/a><\/td>\s*<td data-label="Category">Income<\/td>\s*<td class="books-money" data-label="Income">\$8,000\.00<\/td>\s*<td class="books-money" data-label="Expense"><\/td>\s*<td class="books-money" data-label="Profit">\$8,000\.00<\/td>/u);
+  assert.match(ledger, /Cabinet boxes<\/td>\s*<td data-label="Category">Materials<\/td>\s*<td class="books-money" data-label="Income"><\/td>\s*<td class="books-money" data-label="Expense">\$4,200\.00<\/td>\s*<td class="books-money" data-label="Profit">\$3,800\.00<\/td>/u);
+  assert.match(ledger, /<th class="fit-table-name" scope="row" colspan="3">Gross<\/th><td class="books-money" data-label="Income">\$8,000\.00<\/td><td class="books-money" data-label="Expense">\$4,200\.00<\/td><td class="books-money" data-label="Profit">\$3,800\.00<\/td>/u);
+  assert.match(ledger, /<a class="portal-secondary-link" href="\/clients\/admin\/books\/jobs\/kitchen-remodel">Job book<\/a>/u);
 
-  // Show finances for all projects under this client: each project, then all of them.
+  // More than one project: they fold under the client portal's name.
+  assert.match(kitchenPanel, /<details class="client-project-menu" data-collapsible>\s*<summary>Smith Residence<\/summary>\s*<nav class="client-project-tabs"/u);
+
+  // Show finances for all projects under this client: each project with its date (its earliest
+  // invoice), then all of them.
   const finances = kitchenPanel.match(/<details class="client-finances" id="client-finances">([\s\S]*?)<\/details>/u)[1];
+  assert.match(finances, /<thead><tr><th scope="col">Date<\/th><th scope="col">Project<\/th>/u);
+  assert.match(finances, new RegExp(`<td class="fit-table-date" data-label="Date">${formatDate(today)}</td>\\s*<td class="fit-table-name"><a class="portal-inline-link" href="/clients/admin\\?client=kitchen-remodel">Kitchen Remodel</a>`, "u"));
   const row = (name, ...amounts) => new RegExp(`>${name}</a></td>\\s*${["Invoiced", "Paid", "Outstanding", "Gross income", "Gross expenses", "Gross profit"].map((label, index) => `<td class="books-money" data-label="${label}">\\$${amounts[index].replaceAll(".", "\\.")}</td>`).join("\\s*")}`, "u");
   assert.match(finances, row("Smith Residence", "1,000.00", "0.00", "1,000.00", "1,000.00", "0.00", "1,000.00"));
   assert.match(finances, row("Kitchen Remodel", "8,000.00", "3,000.00", "5,000.00", "8,000.00", "4,200.00", "3,800.00"));
   assert.match(finances, row("Deck", "2,500.00", "0.00", "2,500.00", "2,500.00", "0.00", "2,500.00"));
-  assert.match(finances, /<th scope="row">All projects<\/th><td class="books-money" data-label="Invoiced">\$11,500\.00<\/td>\s*<td class="books-money" data-label="Paid">\$3,000\.00<\/td>\s*<td class="books-money" data-label="Outstanding">\$8,500\.00<\/td>\s*<td class="books-money" data-label="Gross income">\$11,500\.00<\/td>\s*<td class="books-money" data-label="Gross expenses">\$4,200\.00<\/td>\s*<td class="books-money" data-label="Gross profit">\$7,300\.00<\/td>/u);
+  assert.match(finances, /<th class="fit-table-name" scope="row" colspan="2">All projects<\/th><td class="books-money" data-label="Invoiced">\$11,500\.00<\/td>\s*<td class="books-money" data-label="Paid">\$3,000\.00<\/td>\s*<td class="books-money" data-label="Outstanding">\$8,500\.00<\/td>\s*<td class="books-money" data-label="Gross income">\$11,500\.00<\/td>\s*<td class="books-money" data-label="Gross expenses">\$4,200\.00<\/td>\s*<td class="books-money" data-label="Gross profit">\$7,300\.00<\/td>/u);
   assert.doesNotMatch(finances, /Muskegon Addition/u, "only this client's projects");
 
   // The Books page and other job lists put the client portal's name first.

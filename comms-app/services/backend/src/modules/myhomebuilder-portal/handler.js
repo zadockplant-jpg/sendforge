@@ -48,6 +48,7 @@ import {
   listClients,
   listDocuments,
   listPhotos,
+  listNotesTemplates,
   listRecipients,
   listTemplates,
   moveBilling,
@@ -1315,6 +1316,24 @@ function templateRecord(values, existing = null) {
   };
 }
 
+// The quote, invoice and template editor, with the saved notes and terms beside Notes and terms.
+async function editorResponse(store, options, status) {
+  return scriptedHtmlResponse(billingEditorPage({ ...options, notes: await listNotesTemplates(store) }), status);
+}
+
+// Create new beside Notes and terms: the notes typed are saved under the name given when the form
+// is posted. A name already in use takes the new text. `log` records it in the activity log.
+async function saveNotesTemplate(store, values, log) {
+  const name = values.notesTemplateName || "";
+  if (!name || !values.description) return null;
+  const existing = (await listNotesTemplates(store)).find((entry) => entry.name.toLowerCase() === name.toLowerCase());
+  const now = new Date().toISOString();
+  const template = { id: existing?.id || `notes-${randomId(9)}`, type: "notes", name: existing?.name || name, text: values.description, createdAt: existing?.createdAt || now, updatedAt: now };
+  await putTemplate(store, template);
+  await log({ action: "template.saved", summary: `${existing ? "Changed" : "Saved"} the notes and terms template ${template.name}` });
+  return template;
+}
+
 // A new invoice with payments already received: the earliest are payments toward the balance, and
 // when they reach the total the last one settles it.
 function withListedPayments(item, payments) {
@@ -1438,18 +1457,19 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const templates = await listTemplates(store);
     const template = url.searchParams.get("template") ? templates.find((entry) => entry.id === url.searchParams.get("template")) : null;
     const values = { ...(template ? editorValuesFromTemplate(template, today) : { kind: url.searchParams.get("kind") === "quote" ? "quote" : "invoice", lineItems: [] }), issuedOn: today };
-    return scriptedHtmlResponse(billingEditorPage({ mode: "create", client: target, values, actionPath: billingBase, backPath: `/clients/admin?client=${encodeURIComponent(slug)}`, templates, readiness }));
+    return editorResponse(store, { mode: "create", client: target, values, actionPath: billingBase, backPath: `/clients/admin?client=${encodeURIComponent(slug)}`, templates, readiness });
   }
 
   if (!id) {
     if (method !== "POST") return methodNotAllowedResponse(["POST"]);
     const form = await readBoundedForm(context.request, MAX_BILLING_FORM_BYTES);
-    const renderError = async (values, error) => scriptedHtmlResponse(billingEditorPage({
+    const renderError = async (values, error) => editorResponse(store, {
       mode: "create", client: target, values, error, actionPath: billingBase, backPath: `/clients/admin?client=${encodeURIComponent(slug)}`, templates: await listTemplates(store), readiness
-    }), 400);
+    }, 400);
     if (!form) return renderError({ kind: "invoice", lineItems: [] }, "The form could not be read. Try again with fewer or shorter lines.");
 
-    const saveTemplate = form.get("saveTemplate") === "yes";
+    // Save as template: a name typed in its box saves this as a template too.
+    const saveTemplate = form.get("saveTemplate") === "yes" || Boolean(String(form.get("templateName") || "").trim());
     const sendNow = form.get("sendNow") === "yes";
     const parsed = parseBillingForm(form);
     // Payments already received, listed on a new invoice (quotes take none).
@@ -1459,7 +1479,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (listed.error) return renderError(echo, listed.error);
     const listedCents = (listed.payments || []).reduce((sum, entry) => sum + entry.amountCents, 0);
     if (listedCents > parsed.values.amountCents) return renderError(echo, `The payments listed (${money(listedCents)}) are more than the invoice total (${money(parsed.values.amountCents)}).`);
-    if (saveTemplate && (!parsed.values.templateName || parsed.values.templateName.length > 80)) return renderError(echo, "Give the template a name of 80 characters or fewer, or untick Also save this as a template.");
+    if (saveTemplate && (!parsed.values.templateName || parsed.values.templateName.length > 80)) return renderError(echo, "Give the template a name of 80 characters or fewer.");
 
     // Saved (and numbered in date order) before it is emailed, so the email carries its number.
     const built = withListedPayments(await buildBillingItem(store, target, parsed.values), listed.payments || []);
@@ -1484,6 +1504,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
       await putTemplate(store, templateRecord({ ...parsed.values, dueInDays: null }));
       await note({ action: "template.saved", summary: `Saved the template ${parsed.values.templateName}` });
     }
+    await saveNotesTemplate(store, parsed.values, note);
     const also = [saveTemplate ? "&also=template-saved" : "", saved.renumbered ? "&also=renumbered" : ""].join("");
     return redirectResponse(`${adminBillingPath(slug, item.id)}?notice=${notice}${also}`);
   }
@@ -1532,7 +1553,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     // How a paid invoice was paid ("manual" or "stripe"), for the editor's note; "" when unpaid.
     const paid = item.status === "paid" ? (item.payment?.source === "stripe" ? "stripe" : "manual") : "";
     if (isRead) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: { ...editorValuesFromItem(item), issuedOn: issuedDate(item) }, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }));
+      return editorResponse(store, { mode: "edit", client: target, values: { ...editorValuesFromItem(item), issuedOn: issuedDate(item) }, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid });
     }
     if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
     const form = await readBoundedForm(context.request, MAX_BILLING_FORM_BYTES);
@@ -1540,10 +1561,10 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     form.set("kind", item.kind);
     const parsed = parseBillingForm(form);
     if (parsed.error) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }), 400);
+      return editorResponse(store, { mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }, 400);
     }
     if (parsed.values.amountCents < installmentsTotal(item)) {
-      return scriptedHtmlResponse(billingEditorPage({ mode: "edit", client: target, values: parsed.values, error: `The total cannot be less than the ${money(installmentsTotal(item), item.currency)} already paid toward this invoice.`, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }), 400);
+      return editorResponse(store, { mode: "edit", client: target, values: parsed.values, error: `The total cannot be less than the ${money(installmentsTotal(item), item.currency)} already paid toward this invoice.`, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }, 400);
     }
     if (item.checkoutSessionId && parsed.values.amountCents !== item.amountCents) await expireCheckoutSession(env, item.checkoutSessionId);
     const { title, description, lineItems, amountCents, dueDate } = parsed.values;
@@ -1555,6 +1576,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     await putBilling(store, edited);
     const renumbered = issuedOn !== issuedDate(item) && (await keepInvoicesInDateOrder(store, item.kind));
     await note({ action: `${item.kind}.edited`, item: (await getBilling(store, slug, item.id)) || edited, amountCents, summary: editSummary(item, edited) });
+    await saveNotesTemplate(store, parsed.values, note);
     return redirectResponse(`${itemPath}?notice=billing-updated${renumbered ? "&also=renumbered" : ""}`);
   }
 
@@ -1566,9 +1588,9 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     if (!destination) return redirectResponse(`${itemPath}?notice=project-invalid`);
     const values = { ...editorValuesFromItem(item), lineItems: billingLineItems(item), dueDate: item.dueDate && item.dueDate >= today ? item.dueDate : "", issuedOn: today };
     const notice = { text: `Copied from ${billingLabel(item)} in ${target.name}. Review it, then post it to ${destination.name}.` };
-    return scriptedHtmlResponse(billingEditorPage({
+    return editorResponse(store, {
       mode: "create", client: destination, values, notice, actionPath: `/clients/admin/clients/${encodeURIComponent(destination.slug)}/billing`, backPath: itemPath, readiness
-    }));
+    });
   }
 
   // Delete: a page confirming what goes with it, then the quote or invoice is removed with its
@@ -1861,13 +1883,13 @@ async function handleAdminTemplates(context, store, id, action) {
   const listPath = "/clients/admin/templates";
 
   if (!id) {
-    if (isRead) return htmlResponse(adminTemplatesPage({ templates: await listTemplates(store), notice: noticeFromQuery(url) }));
+    if (isRead) return scriptedHtmlResponse(adminTemplatesPage({ templates: await listTemplates(store), notes: await listNotesTemplates(store), notice: noticeFromQuery(url) }));
     if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
   }
 
   if (id === "new") {
     if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
-    return scriptedHtmlResponse(billingEditorPage({ mode: "template-new", values: { kind: "invoice", lineItems: [] }, actionPath: listPath, backPath: listPath }));
+    return editorResponse(store, { mode: "template-new", values: { kind: "invoice", lineItems: [] }, actionPath: listPath, backPath: listPath });
   }
 
   if (id === "from-billing") {
@@ -1884,6 +1906,8 @@ async function handleAdminTemplates(context, store, id, action) {
 
   const existing = id ? await getTemplate(store, id) : null;
   if (id && !existing) return notFoundResponse(null, true);
+  // Saved notes and terms are only deleted here; Create new in the editor changes them.
+  if (existing?.type === "notes" && action !== "delete") return notFoundResponse(null, true);
   const editorPath = existing ? `${listPath}/${encodeURIComponent(existing.id)}` : listPath;
 
   if (existing && action === "delete") {
@@ -1896,18 +1920,20 @@ async function handleAdminTemplates(context, store, id, action) {
 
   if (existing && isRead) {
     const values = { ...editorValuesFromItem(existing), templateName: existing.name, dueInDays: existing.dueInDays ?? "" };
-    return scriptedHtmlResponse(billingEditorPage({ mode: "template-edit", values, actionPath: editorPath, backPath: listPath, notice: noticeFromQuery(url) }));
+    return editorResponse(store, { mode: "template-edit", values, actionPath: editorPath, backPath: listPath, notice: noticeFromQuery(url) });
   }
   if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
 
   const form = await readBoundedForm(context.request, MAX_BILLING_FORM_BYTES);
   const mode = existing ? "template-edit" : "template-new";
-  if (!form) return scriptedHtmlResponse(billingEditorPage({ mode, values: { kind: "invoice", lineItems: [] }, error: "The form could not be read.", actionPath: editorPath, backPath: listPath }), 400);
+  if (!form) return editorResponse(store, { mode, values: { kind: "invoice", lineItems: [] }, error: "The form could not be read.", actionPath: editorPath, backPath: listPath }, 400);
   const parsed = parseBillingForm(form, { template: true });
-  if (parsed.error) return scriptedHtmlResponse(billingEditorPage({ mode, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: listPath }), 400);
+  if (parsed.error) return editorResponse(store, { mode, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: listPath }, 400);
   const template = templateRecord(parsed.values, existing);
   await putTemplate(store, template);
-  await record(store, { actor: "admin", ip: requestIp(context.request), action: "template.saved", summary: `${existing ? "Changed" : "Created"} the template ${template.name}` });
+  const log = (event) => record(store, { actor: "admin", ip: requestIp(context.request), ...event });
+  await log({ action: "template.saved", summary: `${existing ? "Changed" : "Created"} the template ${template.name}` });
+  await saveNotesTemplate(store, parsed.values, log);
   return redirectResponse(`${listPath}?notice=template-saved`);
 }
 
@@ -2215,7 +2241,7 @@ async function routePortalRequest(context) {
         const family = root ? [root, ...projectsOf(clients, root)] : [];
         const projects = root?.archivedAt ? family : family.filter((entry) => !entry.archivedAt || entry.slug === selected.slug);
         const counted = root?.archivedAt ? projects : projects.filter((entry) => !entry.archivedAt);
-        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin, photos, projectBilling, projectBooks, blockedCount] = await Promise.all([
+        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin, photos, projectBilling, projectBooks, blockedCount, book] = await Promise.all([
           selected ? listBilling(store, selected.slug) : [],
           selected ? listDocuments(store, selected.slug) : [],
           listTemplates(store),
@@ -2227,10 +2253,12 @@ async function routePortalRequest(context) {
           selected ? listPhotos(store, selected.slug) : [],
           listBillingFor(store, counted.map((entry) => entry.slug)),
           jobTotals(store, projects.map((entry) => entry.slug)),
-          countSignInBlocks(store)
+          countSignInBlocks(store),
+          // The selected project's Ledger.
+          selected ? jobBook(store, selected.slug) : null
         ]);
         return scriptedHtmlResponse(adminDashboardPage({
-          clients, selected, root, projects, counted, projectBilling, projectBooks, blockedCount, billing, documents, templates, recipients, readiness, notice, authenticated,
+          clients, selected, root, projects, counted, projectBilling, projectBooks, book, blockedCount, billing, documents, templates, recipients, readiness, notice, authenticated,
           newClient, clientError, typedEmails, newProject, projectError, expenses, payers: paidWithOptions(accounts), paidTo, selectedLogin, photos, today: todayInMichigan()
         }), status);
       };

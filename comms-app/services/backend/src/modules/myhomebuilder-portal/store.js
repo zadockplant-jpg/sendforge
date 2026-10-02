@@ -234,9 +234,16 @@ export async function getShareLink(store, token) {
 
 // ---------- Templates ----------
 
+// Quote and invoice templates. Saved notes and terms share the table, marked type "notes" ({ id,
+// type, name, text }), and are listed on their own.
 export async function listTemplates(store) {
   const rows = await store.db("mhb_templates").select("data").timeout(QUERY_TIMEOUT_MS);
-  return rows.map(data).sort((left, right) => left.name.localeCompare(right.name));
+  return rows.map(data).filter((entry) => entry.type !== "notes").sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export async function listNotesTemplates(store) {
+  const rows = await store.db("mhb_templates").select("data").timeout(QUERY_TIMEOUT_MS);
+  return rows.map(data).filter((entry) => entry.type === "notes").sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export async function getTemplate(store, id) {

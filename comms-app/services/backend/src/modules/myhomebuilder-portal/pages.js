@@ -1,4 +1,4 @@
-import { balanceDue, billingLabel, billingLineItems, installmentsTotal, isEditable, isPayable, issuedDate, moneyInput, PAYMENT_METHODS, quantityText, todayInMichigan } from "./billing.js";
+import { balanceDue, billingLabel, billingLineItems, installmentsTotal, isEditable, isPayable, issuedDate, MAX_PAYMENT_NOTE, moneyInput, PAYMENT_METHODS, quantityText, todayInMichigan } from "./billing.js";
 import { addressesText, clientEmails, MAX_RECIPIENTS } from "./email.js";
 import { escapeHtml, formatDate, money } from "./format.js";
 import { DOCUMENT_SECTIONS, awaitingSignature, groupBySection, sectionName, sectionOf } from "./documents.js";
@@ -806,17 +806,15 @@ function adminShell(content, { title, scripts = [] }) {
   return pageShell(content, { authenticated: false, admin: true, bodyClass: "portal-page portal-admin", title, scripts });
 }
 
-// Choosing a template opens a new quote or invoice from it (billing.js); without scripts its
-// button does.
+// Templates, beside a new quote or invoice's heading: choosing one opens the editor filled in from
+// it (billing.js). Without scripts its button does.
 function templatePicker(templates, action) {
   if (!templates.length) return "";
   const options = templates.map((template) => `<option value="${escapeAttribute(template.id)}">${escapeHtml(template.name)} (${template.kind === "invoice" ? "invoice" : "quote"})</option>`).join("");
   return `<form class="admin-template-picker" action="${escapeAttribute(action)}" method="get">
-            <label for="template-pick">Start from a template
-              <select class="select-plain" id="template-pick" name="template" required data-autosubmit><option value="" selected disabled>Choose a template</option>${options}</select>
-            </label>
-            <button class="portal-logout-button" type="submit" data-autosubmit-button>Use template</button>
-          </form>`;
+          <select class="select-plain" id="template-pick" name="template" required aria-label="Templates" data-autosubmit><option value="" selected disabled hidden>Templates</option>${options}</select>
+          <noscript><button class="portal-logout-button" type="submit">Use template</button></noscript>
+        </form>`;
 }
 
 // A disk: the save button beside a single field.
@@ -1151,15 +1149,17 @@ function archiveContents(clients) {
   return { portals, projects, count: portals.length + projects.length, bySlug };
 }
 
-// Show finances for all projects under this client: each project's invoices (invoiced, paid and
-// outstanding, as its list totals them) and its job book (gross income, gross expenses and gross
-// profit), then all of them together. Folded until it is opened.
+// Show finances for all projects under this client: each project's date (its earliest invoice),
+// its invoices (invoiced, paid and outstanding, as its list totals them) and its job book (gross
+// income, gross expenses and gross profit), then all of them together. Folded until it is opened;
+// in a narrow window each project is a card instead of a row.
 function clientFinances(projects, billing, books) {
   const rows = projects.map((project) => {
     const invoices = billing.filter((item) => item.clientSlug === project.slug && item.kind === "invoice" && item.status !== "void");
     const book = books.get(project.slug) || { income: 0, expenses: 0, profit: 0 };
     return {
       project,
+      date: invoices.map(issuedDate).sort()[0] || "",
       invoiced: invoices.reduce((sum, item) => sum + item.amountCents, 0),
       paid: invoices.reduce((sum, item) => sum + item.amountCents - balanceDue(item), 0),
       outstanding: invoices.reduce((sum, item) => sum + balanceDue(item), 0),
@@ -1178,27 +1178,39 @@ function clientFinances(projects, billing, books) {
               <td class="books-money${row.profit < 0 ? " books-loss" : ""}" data-label="Gross profit">${money(row.profit)}</td>`;
   return `<details class="client-finances" id="client-finances">
           <summary>Show finances for all projects under this client</summary>
-          <table class="portal-table books-table client-finances-table">
-            <thead><tr><th scope="col">Project</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Paid</th><th scope="col" class="books-money">Outstanding</th><th scope="col" class="books-money">Gross income</th><th scope="col" class="books-money">Gross expenses</th><th scope="col" class="books-money">Gross profit</th></tr></thead>
+          <div class="fit-table-box">
+          <table class="portal-table books-table fit-table client-finances-table">
+            <thead><tr><th scope="col">Date</th><th scope="col">Project</th><th scope="col" class="books-money">Invoiced</th><th scope="col" class="books-money">Paid</th><th scope="col" class="books-money">Outstanding</th><th scope="col" class="books-money">Gross income</th><th scope="col" class="books-money">Gross expenses</th><th scope="col" class="books-money">Gross profit</th></tr></thead>
             <tbody>${rows.map((row) => `<tr>
-              <td><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(row.project.slug)}">${escapeHtml(row.project.name)}</a></td>
+              <td class="fit-table-date" data-label="Date">${row.date ? dateText(row.date) : ""}</td>
+              <td class="fit-table-name"><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(row.project.slug)}">${escapeHtml(row.project.name)}</a></td>
               ${cells(row)}
             </tr>`).join("")}</tbody>
-            <tfoot><tr><th scope="row">All projects</th>${cells(total)}</tr></tfoot>
+            <tfoot><tr><th class="fit-table-name" scope="row" colspan="2">All projects</th>${cells(total)}</tr></tfoot>
           </table>
+          </div>
         </details>`;
 }
 
+// Export Client to PDF, at the very bottom of a client portal's page.
+function exportLink(root) {
+  return `<a class="button button-outline client-export" href="/clients/admin/clients/${encodeURIComponent(root.slug)}/export?costs=yes&amp;photos=yes" data-export-client data-export-name="${escapeAttribute(root.name)}">Export Client to PDF</a>`;
+}
+
 // The top of a client portal's page: Add project, the list of its projects (the client portal
-// itself first; a click opens one, a right-click its menu) with Export Client to PDF beside it,
-// and Show finances for all projects under this client. A new project's job site address starts
-// as the client portal's.
+// itself first; a click opens one, a right-click its menu), folded under the client portal's name
+// when there is more than one, and Show finances for all projects under this client. A new
+// project's job site address starts as the client portal's.
 function clientProjects({ root, projects, selected, counted, projectBilling, projectBooks, newProject, projectError }) {
   const tabs = projects.map((project) => {
     const current = project.slug === selected.slug;
     return `<li><a class="client-project-tab${current ? " is-current" : ""}${project.archivedAt ? " is-archived" : ""}" href="/clients/admin?client=${encodeURIComponent(project.slug)}"${current ? ' aria-current="page"' : ""}${project.archivedAt ? "" : portalMenuData(project, root.name)}>${escapeHtml(project.name)}${project.archivedAt ? "<small>In archive</small>" : ""}</a></li>`;
   }).join("\n            ");
-  const exportLink = `<a class="button button-outline client-export" href="/clients/admin/clients/${encodeURIComponent(root.slug)}/export?costs=yes&amp;photos=yes" data-export-client data-export-name="${escapeAttribute(root.name)}">Export Client to PDF</a>`;
+  const list = `<nav class="client-project-tabs" aria-label="Projects of ${escapeAttribute(root.name)}">
+              <ul>
+              ${tabs}
+              </ul>
+            </nav>`;
   const add = root.archivedAt ? "" : `<details class="admin-add-project" id="add-project" data-collapsible${projectError ? " open" : ""}>
           <summary>Add project</summary>
           <form class="admin-inline-form admin-add-project-form" action="/clients/admin/clients/${encodeURIComponent(root.slug)}/projects" method="post">
@@ -1214,14 +1226,14 @@ function clientProjects({ root, projects, selected, counted, projectBilling, pro
         </details>`;
   return `<div class="client-projects">
           ${add}
-          <div class="client-project-row">
-            <nav class="client-project-tabs" aria-label="Projects of ${escapeAttribute(root.name)}">
-              <ul>
-              ${tabs}
-              </ul>
-            </nav>
-            ${exportLink}
-          </div>
+          ${projects.length > 1
+    ? `<details class="client-project-menu" data-collapsible>
+            <summary>${escapeHtml(root.name)}</summary>
+            ${list}
+          </details>`
+    : `<div class="client-project-row">
+            ${list}
+          </div>`}
           ${clientFinances(counted, projectBilling, projectBooks)}
         </div>`;
 }
@@ -1354,13 +1366,93 @@ export function adminPhotoDatePage({ client, photo, base }) {
     </div>`, { title: "Photo date" });
 }
 
+// A one-line heading on a project's panel that opens to what is under it. billing.js remembers
+// which ones are open, in this browser.
+function fold(id, title, body, { open = false } = {}) {
+  return `<details class="admin-fold" id="${id}" data-remember${open ? " open" : ""}>
+          <summary><h3>${title}</h3></summary>
+          <div class="admin-fold-body">
+          ${body}
+          </div>
+        </details>`;
+}
+
+// The project's full book (books.js jobBook), oldest first: each invoice's income and each cost,
+// with the gross profit as it stands after each, then the totals. The Job book page has periods
+// and the download.
+function projectLedger(book, slug) {
+  const jobBookLink = `<p class="admin-fold-links"><a class="portal-secondary-link" href="/clients/admin/books/jobs/${encodeURIComponent(slug)}">Job book</a></p>`;
+  const entries = [
+    ...book.income.map((row) => ({ ...row, income: row.amount })),
+    ...book.expenses.map((row) => ({ ...row, cost: row.amount }))
+  ].sort((left, right) => left.date.localeCompare(right.date));
+  if (!entries.length) return `<p class="portal-empty">Nothing in the books yet.</p>${jobBookLink}`;
+  let profit = 0;
+  const rows = entries.map((row) => {
+    profit += (row.income ?? 0) - (row.cost ?? 0);
+    const what = row.itemId
+      ? `<a class="portal-inline-link" href="/clients/admin/clients/${encodeURIComponent(slug)}/billing/${encodeURIComponent(row.itemId)}">${escapeHtml(row.what)}</a>`
+      : escapeHtml(row.what);
+    return `<tr>
+              <td class="fit-table-date" data-label="Date">${dateText(row.date)}</td>
+              <td class="fit-table-name">${what}${row.paidTo ? `<small>${escapeHtml(row.paidTo)}</small>` : ""}</td>
+              <td data-label="Category">${row.income === undefined ? escapeHtml(row.category) : "Income"}</td>
+              <td class="books-money" data-label="Income">${row.income === undefined ? "" : money(row.income)}</td>
+              <td class="books-money" data-label="Expense">${row.cost === undefined ? "" : money(row.cost)}</td>
+              <td class="books-money${profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(profit)}</td>
+            </tr>`;
+  }).join("");
+  const totals = book.totals;
+  return `<div class="fit-table-box">
+          <table class="portal-table books-table fit-table ledger-table">
+            <thead><tr><th scope="col">Date</th><th scope="col">Entry</th><th scope="col">Category</th><th scope="col" class="books-money">Income</th><th scope="col" class="books-money">Expense</th><th scope="col" class="books-money">Profit</th></tr></thead>
+            <tbody>${rows}</tbody>
+            <tfoot><tr><th class="fit-table-name" scope="row" colspan="3">Gross</th><td class="books-money" data-label="Income">${money(totals.income)}</td><td class="books-money" data-label="Expense">${money(totals.expenses)}</td><td class="books-money${totals.profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(totals.profit)}</td></tr></tfoot>
+          </table>
+          </div>
+          ${jobBookLink}`;
+}
+
+// Payments received on the project's invoices, newest first: each payment toward a balance and
+// the one that settled it, by hand or through Stripe, less Stripe refunds, with their notes.
+function paymentRows(items, basePath) {
+  const rows = [];
+  for (const item of items) {
+    if (item.kind !== "invoice" || item.status === "void") continue;
+    for (const entry of item.installments || []) {
+      rows.push({ item, date: entry.paidOn, how: entry.label, note: entry.note, amount: entry.amountCents });
+    }
+    if (item.status !== "paid") continue;
+    const payment = item.payment || {};
+    rows.push({ item, date: item.paidAt, how: payment.label || (payment.source === "stripe" ? "Stripe" : "Payment"), note: payment.note, amount: payment.amountCents ?? item.amountCents - installmentsTotal(item) });
+    for (const refund of liveRefunds(item)) rows.push({ item, date: refund.refundedAt, how: "Refund", note: "", amount: -refund.amountCents });
+  }
+  if (!rows.length) return '<p class="portal-empty">No payments yet.</p>';
+  rows.sort((left, right) => String(right.date || "").localeCompare(String(left.date || "")));
+  const total = rows.reduce((sum, row) => sum + row.amount, 0);
+  return `<table class="portal-table payments-table">
+          <thead><tr><th scope="col">Date</th><th scope="col">Invoice</th><th scope="col">Paid by</th><th scope="col">Notes</th><th scope="col">Amount</th></tr></thead>
+          <tbody>${rows.map((row) => `<tr>
+            <td>${row.date ? dateText(row.date) : ""}</td>
+            <td><a class="portal-inline-link" href="${basePath}/${encodeURIComponent(row.item.id)}">${escapeHtml(billingLabel(row.item))}</a><small>${escapeHtml(row.item.title)}</small></td>
+            <td>${escapeHtml(row.how || "")}</td>
+            <td>${escapeHtml(row.note || "")}</td>
+            <td>${money(row.amount, row.item.currency)}</td>
+          </tr>`).join("")}</tbody>
+        </table>
+        <dl class="billing-totals">
+          <div class="billing-totals-due"><dt>Received</dt><dd>${money(total)}</dd></div>
+        </dl>`;
+}
+
 // The client portal screen. The sidebar lists the client portals in use (a right-click opens each
 // one's menu); a portal's page starts with Add project, its projects and Show finances for all
 // projects under this client, then the selected project's panel. `root` is the client portal the
 // selected project is in (or the portal itself), `projects` its projects as listed, `counted` the
 // ones its finances add up, from `projectBilling` (their quotes and invoices) and `projectBooks`
-// (books.js jobTotals). `selectedLogin` is the client portal's login in plain text, when on file.
-export function adminDashboardPage({ clients, selected, root = selected, projects = selected ? [selected] : [], counted = projects, projectBilling = [], projectBooks = new Map(), blockedCount = 0, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, newProject = null, projectError = "", expenses = [], payers = [], paidTo = [], selectedLogin = null, photos = [], today = todayInMichigan() }) {
+// (books.js jobTotals). `book` is the selected project's job book (books.js jobBook), for its
+// Ledger. `selectedLogin` is the client portal's login in plain text, when on file.
+export function adminDashboardPage({ clients, selected, root = selected, projects = selected ? [selected] : [], counted = projects, projectBilling = [], projectBooks = new Map(), book = null, blockedCount = 0, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, newProject = null, projectError = "", expenses = [], payers = [], paidTo = [], selectedLogin = null, photos = [], today = todayInMichigan() }) {
   // Client portals in use; projects are listed on their client portal's page, and anything in the
   // archive under Archive in the footer.
   const portals = clients.filter((client) => !client.parentSlug && !client.archivedAt);
@@ -1388,11 +1480,12 @@ export function adminDashboardPage({ clients, selected, root = selected, project
       return `<section class="admin-panel" aria-labelledby="selected-heading">
         ${archivedNote(selected, root)}
         ${clientProjects({ root: loginRoot, projects, selected, counted, projectBilling, projectBooks, newProject, projectError })}
-        <div class="admin-panel-head">
-          <div class="admin-subhead admin-title-row">
+        <details class="admin-panel-head"${typedEmails === null ? "" : " open"}>
+          <summary class="admin-title-row">
             <h2 id="selected-heading">${escapeHtml(selected.name)}</h2>
             <a class="portal-secondary-link" href="/clients/designer/?project=${encodeURIComponent(selected.slug)}">Designer</a>
-          </div>
+          </summary>
+          <div class="admin-panel-fields">
           <form class="admin-inline-form admin-save-row" action="${base}/profile" method="post">
             <button class="icon-save" type="submit" aria-label="Save client email" title="Save">${SAVE_ICON}</button>
             ${emailsField({ id: "client-emails", name: "emails", label: "Client email", addresses: clientEmails(selected), typed: typedEmails })}
@@ -1416,33 +1509,24 @@ export function adminDashboardPage({ clients, selected, root = selected, project
               ${shared ? `<small class="admin-field-hint">${escapeHtml(loginRoot.name)}'s login, for every project in it.</small>` : ""}
             </label>
           </form>`}
-        </div>
-
-        <div class="admin-section-head">
-          <h3>Quotes and invoices</h3>
-          <div class="admin-actions-bar">
-            <a class="button button-solid" href="${base}/billing/new?kind=invoice">New invoice</a>
-            <a class="button button-outline" href="${base}/billing/new?kind=quote">New quote</a>
-            <a class="button button-outline" href="${base}/payments/new" data-add-payment>Add payment</a>
-            <a class="button button-outline" href="${base}/expenses/new" data-add-expense>Add expense</a>
           </div>
-          ${templatePicker(templates, `${base}/billing/new`)}
+        </details>
+
+        <div class="admin-actions-bar admin-project-actions">
+          <a class="button button-outline" href="${base}/billing/new?kind=quote">Quote</a>
+          <a class="button button-solid" href="${base}/billing/new?kind=invoice">Invoice</a>
+          <a class="button button-outline" href="${base}/expenses/new" data-add-expense>Purchase</a>
+          <a class="button button-outline" href="${base}/payments/new" data-add-payment>Payment</a>
         </div>
-        ${billingRows(billing, { basePath: `${base}/billing`, viewer: "admin" })}
-
-        <div class="admin-subhead">
-          <h3>Finances</h3>
-          <a class="portal-secondary-link" href="/clients/admin/books/jobs/${encodeURIComponent(selected.slug)}">Job book</a>
-        </div>
-        ${grossFigures(projectBooks.get(selected.slug) || { income: 0, expenses: 0, profit: 0 })}
-
-        <h3>Expenses</h3>
-        ${expenseRows(expenses, { base })}
-
-        <h3>Documents</h3>
-        ${documentSections(documents, { basePath: `${base}/documents`, viewer: "admin" })}
+        <div class="admin-folds">
+        ${fold("project-ledger", "Ledger", projectLedger(book || { income: [], expenses: [], totals: { income: 0, expenses: 0, profit: 0 } }, selected.slug))}
+        ${fold("project-invoices", "Invoices", billingRows(billing, { basePath: `${base}/billing`, viewer: "admin" }), { open: true })}
+        ${fold("project-payments", "Payments", paymentRows(billing, `${base}/billing`))}
+        ${fold("project-purchases", "Purchases", expenseRows(expenses, { base }))}
+        ${fold("project-documents", "Documents", `${documentSections(documents, { basePath: `${base}/documents`, viewer: "admin" })}
+        <details class="admin-upload" id="upload-document">
+        <summary>Upload Document</summary>
         <form class="portal-form admin-form" action="${base}/documents" method="post" enctype="multipart/form-data">
-          <h3>Upload a contract or document</h3>
           <label for="admin-upload">File
             <input id="admin-upload" name="file" type="file" required>
           </label>
@@ -1459,6 +1543,8 @@ export function adminDashboardPage({ clients, selected, root = selected, project
           </label>
           <button class="button button-solid" type="submit">Share with client</button>
         </form>
+        </details>`)}
+        </div>
 
         ${adminGallery(selected, photos, base)}
         <form class="admin-access" action="${base}/access" method="post">
@@ -1469,6 +1555,7 @@ export function adminDashboardPage({ clients, selected, root = selected, project
           <button class="portal-logout-button" type="submit" data-autosubmit-button>Save</button>
         </form>
         ${archiveOrMove(selected, portals)}
+        <div class="admin-export">${exportLink(loginRoot)}</div>
         ${statusDialogs(selected, readiness)}
         ${addPaymentDialog({ client: selected, billing, readiness })}
         ${addExpenseDialog({ action: `${base}/expenses`, payers, today, paidTo })}
@@ -1621,8 +1708,9 @@ function lineRow(line, index) {
               </tr>`;
 }
 
-// One editor serves new quotes and invoices, edits to open ones, and saved templates.
-export function billingEditorPage({ mode, client = null, values, error = "", notice = null, actionPath, backPath, templates = [], readiness = {}, number = "", paid = false }) {
+// One editor serves new quotes and invoices, edits to open ones, and saved templates. `notes` are
+// the saved notes and terms (store.js listNotesTemplates), offered beside Notes and terms.
+export function billingEditorPage({ mode, client = null, values, error = "", notice = null, actionPath, backPath, templates = [], notes = [], readiness = {}, number = "", paid = false }) {
   const template = mode === "template-new" || mode === "template-edit";
   const creating = mode === "create";
   const lines = values.lineItems || [];
@@ -1634,7 +1722,10 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
   const heading = mode === "edit"
     ? `Edit ${kind === "invoice" ? "invoice" : "quote"} ${number}`
     : mode === "template-new" ? "New template" : mode === "template-edit" ? "Edit template" : `New ${kind}`;
-  const kicker = template ? "Quote and invoice templates" : client ? escapeHtml(client.name) : "";
+  // The way back (the editor has no Cancel): the project's panel, or the templates list.
+  const kicker = template
+    ? `<a class="portal-inline-link" href="${escapeAttribute(backPath)}">Quote and invoice templates</a>`
+    : client ? `<a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a>` : "";
 
   const kindField = mode === "edit"
     ? `<input type="hidden" name="kind" value="${kind}"><p class="billing-editor-kind">${kind === "invoice" ? "Invoice" : "Quote"} ${escapeHtml(number)}</p>`
@@ -1649,9 +1740,7 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
     const emails = clientEmails(client);
     if (!readiness.email) {
       sendOption = '<p class="portal-security-note">Email delivery is not set up, so the client cannot be emailed yet. You can still copy the link from the next page.</p>';
-    } else if (!emails.length) {
-      sendOption = '<p class="portal-security-note">Add client emails on the client panel, or email it from the next page, to email quotes, invoices and receipts. You can also copy its link there.</p>';
-    } else {
+    } else if (emails.length) {
       sendOption = `<label class="portal-check" for="send-now">
             <input id="send-now" name="sendNow" type="checkbox" value="yes"${values.sendNow === false ? "" : " checked"}>
             <span>Email it to ${escapeHtml(addressesText(emails))} after posting</span>
@@ -1659,42 +1748,34 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
     }
   }
 
-  const loadTemplate = creating && templates.length
-    ? `<form class="admin-template-picker billing-editor-template" action="${escapeAttribute(actionPath)}/new" method="get">
-          <label for="editor-template">Start from a template
-            <select id="editor-template" name="template" required>${templates.map((entry) => `<option value="${escapeAttribute(entry.id)}">${escapeHtml(entry.name)} (${entry.kind})</option>`).join("")}</select>
-          </label>
-          <button class="portal-logout-button" type="submit">Use template</button>
-        </form>`
-    : "";
+  const loadTemplate = creating ? templatePicker(templates, `${actionPath}/new`) : "";
 
   const submitLabel = mode === "edit" ? "Save changes" : template ? "Save template" : kind === "invoice" ? "Post invoice" : "Post quote";
 
   // A new invoice lists payments already received (a deposit, earlier checks); an existing one's
-  // are added and removed on its page.
+  // are added and removed on its page. A row left without an amount is skipped. Other method shows
+  // only when Other is chosen (billing.js).
   let paymentsSection = "";
   if (creating) {
-    const typed = values.payments?.length ? [...values.payments] : [];
-    while (typed.length < Math.max(2, (values.payments?.length || 0) + 1)) typed.push({});
+    const typed = values.payments?.length ? values.payments : [{}];
     const methods = (chosen) => Object.entries(PAYMENT_METHODS).map(([key, label]) => `<option value="${key}"${key === (chosen || "check") ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
-    paymentsSection = `<fieldset class="listed-payments" data-listed-payments>
-          <legend>Payments already received (optional, invoices only)</legend>
-          <p class="admin-field-hint">A deposit or payments the client made before this invoice. Less than the total leaves the rest due; the total marks it paid. Blank rows are ignored.</p>
+    paymentsSection = `<fieldset class="listed-payments" data-listed-payments${kind === "quote" ? " hidden" : ""}>
+          <legend>Payments</legend>
           ${typed.map((row, index) => `<div class="listed-payment" data-listed-payment>
             <label for="listed-${index}-amount">Amount ($)
               <input id="listed-${index}-amount" name="paymentAmount" type="text" inputmode="decimal" maxlength="12" value="${escapeAttribute(row.amount || "")}" placeholder="0.00">
             </label>
             <label for="listed-${index}-method">Paid by
-              <select id="listed-${index}-method" name="paymentMethod">${methods(row.method)}</select>
+              <select id="listed-${index}-method" name="paymentMethod" data-listed-method>${methods(row.method)}</select>
             </label>
-            <label for="listed-${index}-other">Other method
+            <label for="listed-${index}-other" data-listed-other${row.method === "other" ? "" : " hidden"}>Other method
               <input id="listed-${index}-other" name="paymentMethodName" type="text" maxlength="60" value="${escapeAttribute(row.methodName || "")}">
-            </label>
-            <label for="listed-${index}-reference">Reference (optional)
-              <input id="listed-${index}-reference" name="paymentReference" type="text" maxlength="80" value="${escapeAttribute(row.reference || "")}" placeholder="Check #1042">
             </label>
             <label for="listed-${index}-date">Received on
               <input id="listed-${index}-date" name="paymentPaidOn" type="date" value="${escapeAttribute(row.paidOn || "")}">
+            </label>
+            <label class="listed-payment-note" for="listed-${index}-note">Notes
+              <input id="listed-${index}-note" name="paymentNote" type="text" maxlength="${MAX_PAYMENT_NOTE}" value="${escapeAttribute(row.note || "")}">
             </label>
           </div>`).join("")}
           <button class="portal-logout-button" type="button" data-listed-payment-add hidden>Add another payment</button>
@@ -1703,11 +1784,31 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
     paymentsSection = '<p class="admin-field-hint">Payments on this invoice are added and removed on its page (Add a payment).</p>';
   }
 
+  // Notes and terms: Use template fills the box from a saved one; its Create new names this text,
+  // saved as a template when the form is posted (billing.js; without scripts it is left out).
+  const notesPicker = `<select class="select-plain notes-picker" aria-label="Notes and terms templates" data-notes-template hidden>
+              <option value="" selected disabled hidden>Use template</option>
+              <option value="new">Create new</option>${notes.map((entry) => `
+              <option value="${escapeAttribute(entry.id)}" data-text="${escapeAttribute(entry.text)}">${escapeHtml(entry.name)}</option>`).join("")}
+            </select>`;
+
+  // Save as template, on a new quote or invoice: a link that opens the template's name.
+  const saveAsTemplate = creating
+    ? `<div class="save-template" data-save-template>
+          <button class="portal-logout-button" type="button" data-save-template-open hidden>Save as template</button>
+          <label for="new-template-name" data-save-template-name>Template name
+            <input id="new-template-name" name="templateName" type="text" maxlength="80" value="${escapeAttribute(values.templateName || "")}" placeholder="Framing draw">
+          </label>
+        </div>`
+    : "";
+
   return adminShell(`<div class="site-width portal-shell">
       <p class="portal-kicker">${kicker}</p>
-      <h1 class="portal-heading portal-heading-sm">${escapeHtml(heading)}</h1>
+      <div class="billing-editor-head">
+        <h1 class="portal-heading portal-heading-sm"${creating ? " data-kind-heading" : ""}>${escapeHtml(heading)}</h1>
+        ${loadTemplate}
+      </div>
       ${noticeMarkup(notice)}
-      ${loadTemplate}
       <form class="portal-form admin-form billing-editor" action="${escapeAttribute(actionPath)}" method="post">
         ${error ? `<p class="portal-error" role="alert">${escapeHtml(error)}</p>` : ""}
         ${paid === "stripe"
@@ -1731,7 +1832,6 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
             <button class="portal-logout-button" type="button" data-line-add hidden>Add a line</button>
             <p class="line-editor-total">Total <output data-line-total>${total === null ? "" : money(total)}</output></p>
           </div>
-          <p class="portal-security-note">Blank rows are ignored. Use 0 for included items and a negative unit price for credits.</p>
         </div>
         ${template
           ? `<label for="due-in-days">Days until due (optional)
@@ -1744,21 +1844,21 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
         <label for="billing-due">${kind === "invoice" ? "Due date" : "Valid until"} (optional)
           <input id="billing-due" name="dueDate" type="date" value="${escapeAttribute(values.dueDate || "")}">
         </label>`}
-        <label for="billing-description">Notes and terms
+        <div class="notes-field" data-notes-field>
+          <div class="notes-head">
+            <label for="billing-description">Notes and terms</label>
+            ${notesPicker}
+          </div>
           <textarea id="billing-description" name="description" rows="4" maxlength="2000" placeholder="Scope, milestones or payment terms">${escapeHtml(values.description || "")}</textarea>
-        </label>
-        ${paymentsSection}
-        ${sendOption}
-        ${creating ? `<label class="portal-check" for="save-template">
-            <input id="save-template" name="saveTemplate" type="checkbox" value="yes"${values.saveTemplate ? " checked" : ""}>
-            <span>Also save this as a template</span>
+          <label for="notes-template-name" data-notes-name${values.notesTemplateName ? "" : " hidden"}>Notes template name
+            <input id="notes-template-name" name="notesTemplateName" type="text" maxlength="80" value="${escapeAttribute(values.notesTemplateName || "")}" placeholder="Standard terms">
           </label>
-          <label for="new-template-name">Template name (when saving as a template)
-            <input id="new-template-name" name="templateName" type="text" maxlength="80" value="${escapeAttribute(values.templateName || "")}" placeholder="Framing draw">
-          </label>` : ""}
+        </div>
+        ${paymentsSection}
+        ${saveAsTemplate}
         <div class="billing-editor-actions">
-          <button class="button button-solid" type="submit">${submitLabel}</button>
-          <a class="portal-secondary-link" href="${escapeAttribute(backPath)}">Cancel</a>
+          <button class="button button-solid" type="submit"${creating ? " data-kind-submit" : ""}>${submitLabel}</button>
+          ${sendOption}
         </div>
       </form>
       ${mode === "template-edit" ? `<form class="admin-danger" action="${escapeAttribute(actionPath)}/delete" method="post">
@@ -1897,7 +1997,7 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   if (invoice && item.status === "open") {
     const installments = item.installments || [];
     const listed = installments.length
-      ? `<ul class="admin-activity">${installments.map((entry) => `<li><span>${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}</span>
+      ? `<ul class="admin-activity">${installments.map((entry) => `<li><span>${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}</span>
             <form class="admin-manage" action="${base}/remove-payment" method="post"><input type="hidden" name="installment" value="${escapeAttribute(entry.id)}"><button class="portal-logout-button" type="submit">Remove</button></form></li>`).join("")}</ul>
           <p class="admin-meta">Paid so far ${money(installmentsTotal(item), item.currency)} of ${money(item.amountCents, item.currency)}; ${money(balanceDue(item), item.currency)} is due.</p>`
       : "";
@@ -1921,9 +2021,9 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
 
   if (invoice && item.status === "paid") {
     const payment = item.payment || {};
-    const summary = [payment.label || "Payment", formatDate(item.paidAt), money(payment.amountCents ?? item.amountCents, item.currency)].filter(Boolean).join(" · ");
+    const summary = [payment.label || "Payment", formatDate(item.paidAt), money(payment.amountCents ?? item.amountCents, item.currency), payment.note].filter(Boolean).join(" · ");
     const earlier = (item.installments || []).length
-      ? `<p class="admin-meta">Paid earlier toward the balance: ${item.installments.map((entry) => `${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}`).join("; ")}.</p>`
+      ? `<p class="admin-meta">Paid earlier toward the balance: ${item.installments.map((entry) => `${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}`).join("; ")}.</p>`
       : "";
     cards.push(payment.source === "manual"
       ? `<section class="admin-card">
@@ -2381,7 +2481,7 @@ export function billingDeletePage({ client, item, partner = null }) {
     </div>`, { title: `Delete ${label}` });
 }
 
-export function adminTemplatesPage({ templates, notice = null }) {
+export function adminTemplatesPage({ templates, notes = [], notice = null }) {
   const rows = templates.length
     ? `<table class="portal-table">
         <thead><tr><th scope="col">Template</th><th scope="col">Type</th><th scope="col">Total</th><th scope="col"><span class="visually-hidden">Action</span></th></tr></thead>
@@ -2392,7 +2492,23 @@ export function adminTemplatesPage({ templates, notice = null }) {
           <td><a class="portal-secondary-link" href="/clients/admin/templates/${encodeURIComponent(template.id)}">Edit</a></td>
         </tr>`).join("")}</tbody>
       </table>`
-    : '<p class="portal-empty">No templates yet. Create one here, or tick "Also save this as a template" when posting a quote or invoice.</p>';
+    : '<p class="portal-empty">No templates yet. Create one here, or use Save as template when posting a quote or invoice.</p>';
+  // Saved notes and terms (the editor's Use template beside Notes and terms). Create new with a
+  // name already here replaces its text.
+  const notesSection = notes.length
+    ? `<section class="templates-notes" aria-labelledby="notes-templates-heading">
+        <h2 id="notes-templates-heading">Notes and terms</h2>
+        <table class="portal-table">
+          <thead><tr><th scope="col">Template</th><th scope="col"><span class="visually-hidden">Action</span></th></tr></thead>
+          <tbody>${notes.map((entry) => `<tr>
+            <td><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(entry.text.length > 140 ? `${entry.text.slice(0, 137)}…` : entry.text)}</small></td>
+            <td class="portal-actions"><form method="post" action="/clients/admin/templates/${encodeURIComponent(entry.id)}/delete" data-confirm="${escapeAttribute(`Delete the notes and terms template ${entry.name}?`)}">
+              <button class="billing-trash" type="submit" aria-label="Delete ${escapeAttribute(entry.name)}" title="Delete">${TRASH_ICON}</button>
+            </form></td>
+          </tr>`).join("")}</tbody>
+        </table>
+      </section>`
+    : "";
 
   return adminShell(`<div class="site-width portal-shell">
       <p class="portal-kicker">Admin panel</p>
@@ -2404,5 +2520,6 @@ export function adminTemplatesPage({ templates, notice = null }) {
         <a class="portal-secondary-link" href="/clients/admin">Back to client portals</a>
       </div>
       ${rows}
-    </div>`, { title: "Templates" });
+      ${notesSection}
+    </div>`, { title: "Templates", scripts: [BILLING_SCRIPT] });
 }

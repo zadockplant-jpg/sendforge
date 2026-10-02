@@ -25,6 +25,7 @@ export const PAYMENT_METHODS = {
 };
 export const MAX_METHOD_NAME = 60;
 export const MAX_PAYMENT_REFERENCE = 80;
+export const MAX_PAYMENT_NOTE = 200;
 
 const MONEY_PATTERN = /^(-)?(\d{1,7})(?:\.(\d{1,2}))?$/u;
 const QUANTITY_PATTERN = /^(\d{1,6})(?:\.(\d{1,2}))?$/u;
@@ -116,8 +117,10 @@ export function parseBillingForm(form, { template = false } = {}) {
   const issuedOn = String(form.get("issuedOn") || "").trim();
   const dueInDaysText = String(form.get("dueInDays") || "").trim();
   const name = String(form.get("templateName") || "").trim();
+  // Create new beside Notes and terms: the name its text is saved under (handler.js).
+  const notesTemplateName = String(form.get("notesTemplateName") || "").trim().replaceAll(/\s+/gu, " ").slice(0, MAX_TEMPLATE_NAME);
 
-  const values = { kind: kind || "invoice", title, description, dueDate, issuedOn, dueInDays: dueInDaysText, templateName: name };
+  const values = { kind: kind || "invoice", title, description, dueDate, issuedOn, dueInDays: dueInDaysText, templateName: name, notesTemplateName };
   const lines = form.has("amount") && !form.has("itemDescription") ? singleAmountLine(form.get("amount"), title) : parseLineItems(form);
   values.lineItems = lines.lineItems || rawLineItems(form);
 
@@ -146,6 +149,7 @@ export function parseBillingForm(form, { template = false } = {}) {
       issuedOn: template ? "" : issuedOn,
       dueInDays,
       templateName: name,
+      notesTemplateName,
       lineItems: lines.lineItems,
       amountCents: lines.totalCents
     }
@@ -250,10 +254,11 @@ export function isEditable(item) {
 }
 
 // Payments already received, listed on a new invoice's form (a deposit, earlier checks): rows of
-// paymentAmount, paymentMethod, paymentMethodName, paymentReference and paymentPaidOn. Blank
-// rows are ignored. Returns { payments, typed } or { error, typed } (typed: the rows as entered).
+// paymentAmount, paymentMethod, paymentMethodName (for Other), paymentPaidOn and paymentNote
+// (paymentReference too, from forms before notes). Rows without an amount are skipped. Returns
+// { payments, typed } or { error, typed } (typed: the rows as entered).
 const LISTED_PAYMENT_PROBLEMS = {
-  invalid: "Check each payment's method and reference (up to 80 characters).",
+  invalid: "Check each payment's method (up to 60 characters).",
   "payment-other-required": "Type the payment method for each payment marked Other.",
   "payment-date-invalid": "Enter the date each payment was received."
 };
@@ -263,18 +268,21 @@ export function parseListedPayments(form) {
   const names = column("paymentMethodName");
   const references = column("paymentReference");
   const dates = column("paymentPaidOn");
+  const notes = column("paymentNote");
   const typed = column("paymentAmount").map((amount, index) => ({
-    amount: amount.trim(), method: methods[index] || "check", methodName: (names[index] || "").trim(), reference: (references[index] || "").trim(), paidOn: (dates[index] || "").trim()
+    amount: amount.trim(), method: methods[index] || "check", methodName: (names[index] || "").trim(), reference: (references[index] || "").trim(), paidOn: (dates[index] || "").trim(),
+    note: (notes[index] || "").trim().replaceAll(/\s+/gu, " ")
   }));
   const payments = [];
   for (const row of typed) {
     if (!row.amount) continue;
     const amountCents = parseMoney(row.amount);
     if (!amountCents) return { error: "Enter each payment's amount, like 500 or 500.00.", typed };
+    if (row.note.length > MAX_PAYMENT_NOTE) return { error: `Keep each payment's notes to ${MAX_PAYMENT_NOTE} characters.`, typed };
     const fields = new Map([["method", row.method], ["methodName", row.methodName], ["reference", row.reference], ["paidOn", row.paidOn]]);
     const entered = parseManualPayment({ get: (name) => fields.get(name) ?? "" });
     if (entered.error) return { error: LISTED_PAYMENT_PROBLEMS[entered.error] || LISTED_PAYMENT_PROBLEMS.invalid, typed };
-    payments.push({ ...entered, amountCents });
+    payments.push({ ...entered, amountCents, ...(row.note ? { note: row.note } : {}) });
   }
   return { payments, typed };
 }

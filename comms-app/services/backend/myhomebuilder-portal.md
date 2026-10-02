@@ -217,7 +217,7 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
 
 ## Export Client to PDF
 
-`export.js`. **Export Client to PDF** sits beside a client portal's projects, and in the
+`export.js`. **Export Client to PDF** sits at the very bottom of a client portal's page, and in the
 right-click menu of a client portal or project. It opens a popup that asks what goes in, then
 downloads `<client portal> - Project Breakdown <date>.pdf` (`GET
 /clients/admin/clients/<slug>/export`). Without scripts the link downloads the full breakdown.
@@ -262,10 +262,29 @@ projects. Each export is in the activity log.
   - Nothing can be done: paying, accepting a quote, uploading and documents are refused.
   - Documents read "Document view disabled for completed projects".
   - Public quote and invoice links are not affected.
-- The selected project's **Client email**, **Job site address** and **Client login** each save
-  with the disk button on their left.
-- **Start from a template** opens the chosen template as soon as it is picked. Clicking anywhere
-  on a quote or invoice row opens it.
+- The selected project's **Client email**, **Job site address** and **Client login** fold under
+  the project's name (a click on it opens them), and each saves with the disk button on its left.
+- **The project's panel**, under its name: **Quote**, **Invoice**, **Purchase** (Add expense) and
+  **Payment** (Add payment), then one-line headings that open on a click:
+  - **Ledger:** the project's full book (`books.js` `jobBook`), oldest first: each invoice's
+    income and each cost, with the gross profit after each, then the totals, and its Job book link
+    (periods and the download).
+  - **Invoices** (open to start): its quotes and invoices. Clicking anywhere on a row opens it.
+  - **Payments:** every payment received on its invoices, newest first, by hand or through Stripe
+    (less Stripe refunds), with its notes and the total received.
+  - **Purchases:** its expenses (see Job expenses).
+  - **Documents**, with **Upload Document** folded at their foot.
+  - Each one stays open or folded as it was left, in that browser (`localStorage`).
+- **No dropdown arrows** anywhere in the portal: a box that opens a list when clicked is the menu.
+- **The quote and invoice editor** has no Cancel (the project's name above the heading goes back).
+  - **Templates**, beside a new quote or invoice's heading, opens the chosen template as soon as it
+    is picked.
+  - **Notes and terms** has **Use template** to its right: a saved one fills the box, and **Create
+    new** names what is typed, saved as a notes and terms template when the form is posted (a name
+    already in use takes the new text). They share `mhb_templates`, marked `type: "notes"`, and
+    the Templates page lists them apart, to delete.
+  - **Save as template**, under Add another payment, opens the template's name; posting with a
+    name saves the quote or invoice as a template too.
 - The panel shows nothing about setup while everything is ready. If portal storage, file storage,
   Stripe, its webhook or email is not set up, a warning names what is missing.
 
@@ -296,9 +315,9 @@ projects. Each export is in the activity log.
 
 ## Paying a bill down
 
-An invoice can be paid over time. **Add a payment** (on the invoice's admin page, or **Add
-payment** beside New invoice and New quote, which asks which open invoice) records money received
-outside Stripe:
+An invoice can be paid over time. **Add a payment** (on the invoice's admin page, or **Payment**
+beside Quote, Invoice and Purchase, which asks which open invoice) records money received outside
+Stripe:
 
 - **Toward the balance or settling it:** less than the balance due, it is a payment toward it
   (`item.installments`) and the invoice stays open, shown as Partly paid. The balance, or no
@@ -314,15 +333,17 @@ outside Stripe:
 - **Limits:** an invoice with payments toward it cannot be voided, and its total cannot be edited
   below what has been paid. Deleting it deletes its payments, and they come out of the books.
 
-- **Payments already received on a new invoice:** the invoice editor's Payments already received
-  lists a deposit or earlier payments (amount, how, reference, date; Add another payment adds a
-  row). Less than the total leaves the rest due; the total marks the invoice paid (the last
-  payment settles it). More than the total is refused, keeping what was typed. An existing
-  invoice's payments are added and removed on its page.
+- **Payments on a new invoice:** the invoice editor's **Payments** lists a deposit or earlier
+  payments: amount, paid by (Other method shows when Other is chosen), received on and notes (kept
+  with the payment as `note`, shown to the admin only). Add another payment adds a row; a row
+  without an amount is skipped. Less than the total leaves the rest due; the total marks the
+  invoice paid (the last payment settles it). More than the total is refused, keeping what was
+  typed. Choosing Quote hides Payments. An existing invoice's payments are added and removed on
+  its page.
 
 ## Job expenses
 
-**Add expense** beside New invoice, New quote and Add payment (`expenses.js`, migrations
+**Purchase** beside Quote, Invoice and Payment (`expenses.js`, migrations
 `20261007_myhomebuilder_portal_expenses.js` and `20261009_myhomebuilder_portal_job_books.js`)
 records a cost of that client portal's job. The form is compact: each box says what goes in it.
 - **Expense** (what it was), **Paid to** and **Category**.
@@ -334,7 +355,7 @@ records a cost of that client portal's job. The form is compact: each box says w
 - The amount, the date, what paid it (a bank account from Banking, the owner's own money, or not
   paid yet), and an optional receipt (PDF or photo).
 
-The panel lists the job's expenses with their total, each with its receipt and a trash button that
+The panel's **Purchases** lists the job's expenses with their total, each with its receipt and a trash button that
 asks first. **Add expense on the Books page** does the same with a job choice. With no job it is
 overhead (`client_slug` empty), a typed category going to Other overhead. Clients see expenses only
 on a project shown read only.
@@ -394,14 +415,14 @@ and its `label` (worked out on reading, never saved) puts the client portal's na
 the crew portal and Another project.
 
 - **A client portal's page** starts with **Add project**, then its projects (the client portal
-  itself first, then the projects in it by name), then **Show finances for all projects under this
-  client**, then the panel of the project open. Clicking a project opens it with its **Finances**
-  (gross income, gross expenses and gross profit, beside its Job book link). The list on the left
-  keeps its client portal chosen and says how many projects it has.
+  itself first, then the projects in it by name; with more than one they fold under the client
+  portal's name, opening on a click), then **Show finances for all projects under this client**,
+  then the panel of the project open, with its **Ledger**. The list on the left keeps its client
+  portal chosen and says how many projects it has.
 - **Add project** takes a name and a job site address (the client portal's to start). The project
   starts with the client portal's emails.
 - **Show finances for all projects under this client** (folded until opened) lists each project's
-  invoiced, paid and outstanding (as its list totals them) and its gross income, gross expenses and
+  date (its earliest invoice), invoiced, paid and outstanding (as its list totals them) and its gross income, gross expenses and
   gross profit (as its job book totals them, `books.js` `jobTotals`), then all projects together.
 - **The right-click menu.** A right-click on a client portal in the list, or on a project at the
   top of its page (a long press on a phone), opens a menu (`site/clients/portal/billing.js`):
