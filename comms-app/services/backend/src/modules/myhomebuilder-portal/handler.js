@@ -127,10 +127,13 @@ import { handleAdminLabor, handleCrew } from "./crew.js";
 import { handleAdminBank, listBankAccounts, unfileExpenseMatch } from "./bank.js";
 import { handleAdminTeam } from "./team.js";
 import { DESIGNER_PATH, handleDesigner, hasRenders } from "./designer.js";
+import { countSignInBlocks, guardAddress, liftSignInBlock, listSignInGuard, signInBlock, signInFailed, signInSucceeded } from "./guard.js";
+import { breakdownPdf, clientBreakdown } from "./export.js";
 import { categoryName, deleteExpense, getExpense, listAllExpenses, listExpenses, paidToSuggestions, paidWithOptions, putExpense, resolveCategory } from "./expenses.js";
 import {
   adminArchivePage,
   adminBillingPage,
+  adminBlockedPage,
   adminBooksPage,
   adminDashboardPage,
   adminAddExpensePage,
@@ -242,6 +245,38 @@ function notFoundResponse(session, admin) {
   }), 404);
 }
 
+// A sign-in from an address blocked after failed sign-ins in a row (guard.js): nothing it sent is
+// checked.
+function blockedResponse(block, { authenticated = false } = {}) {
+  if (block.permanent) {
+    return htmlResponse(messagePage({
+      heading: "Sign-in is blocked.",
+      lead: 'Too many sign-ins failed in a row from your network, so signing in from it is blocked. If this is you, <a href="/#contact">contact My Home Builder</a>.',
+      authenticated
+    }), 403);
+  }
+  return htmlResponse(messagePage({
+    heading: "Sign-in is paused.",
+    lead: `Too many sign-ins failed in a row from your network. Try again in ${block.minutes} minute${block.minutes === 1 ? "" : "s"}.`,
+    authenticated
+  }), 429, { "Retry-After": String(block.minutes * 60) });
+}
+
+// Counts a failed sign-in (`where`: client, crew or admin) against the visitor's address. When
+// that starts a block, it goes in the activity log and the block is returned for its page.
+async function failedSignIn(store, request, where) {
+  const ip = requestIp(request);
+  const result = await signInFailed(store, ip, where);
+  if (!result?.started) return null;
+  await record(store, {
+    actor: "system", action: "sign-in.blocked", ip, data: { address: result.address, failures: result.failures, where },
+    summary: result.started === "permanent"
+      ? `Blocked sign-ins from ${result.address} for good after ${result.failures} failed sign-ins in a row`
+      : `Blocked sign-ins from ${result.address} for ${result.started} minutes after ${result.failures} failed sign-ins in a row`
+  });
+  return result.block;
+}
+
 function safeProjectDestination(value) {
   if (typeof value !== "string" || value.length > 4096) return "";
   try {
@@ -351,7 +386,8 @@ const NOTICES = {
   "inside-saved": { text: "It is a project in that client portal now, and uses that portal's client login." },
   "inside-saved-private": { text: "It is a project in that client portal now. That portal has no client login yet, so only you can see it." },
   "inside-secret": { text: "This project's login is set in Render, so it stays a client portal of its own. Other portals can go inside it.", tone: "error" },
-  "own-saved": { text: "It is a client portal of its own now. It has no client login yet, so only you can see it." }
+  "own-saved": { text: "It is a client portal of its own now. It has no client login yet, so only you can see it." },
+  unblocked: { text: "Unblocked. Sign-ins from that address count from zero again." }
 };
 
 function noticeFromQuery(url) {
@@ -1893,7 +1929,12 @@ const KIT = {
   loginLocation,
   storePhotos,
   photoResponse,
-  MAX_PHOTO_BATCH_BYTES
+  MAX_PHOTO_BATCH_BYTES,
+  // Sign-in protection per visitor address (guard.js), for the crew sign-in.
+  signInBlock,
+  signInSucceeded,
+  failedSignIn,
+  blockedResponse
 };
 
 // ---------- The Back button ----------
@@ -1910,7 +1951,7 @@ function pageFor(pathname) {
   if (client) return `/clients/admin?client=${client[1]}`;
   const worker = pathname.match(/^\/clients\/admin\/labor\/workers\/([^/]+)/u);
   if (worker) return `/clients/admin/labor/workers/${worker[1]}`;
-  for (const section of ["/clients/admin/labor", "/clients/admin/bank", "/clients/admin/books", "/clients/admin/templates", "/clients/admin/documents", "/clients/admin/schedule", "/clients/admin/notes"]) {
+  for (const section of ["/clients/admin/labor", "/clients/admin/bank", "/clients/admin/books", "/clients/admin/templates", "/clients/admin/documents", "/clients/admin/schedule", "/clients/admin/notes", "/clients/admin/blocked"]) {
     if (pathname === section || pathname.startsWith(`${section}/`)) return section;
   }
   if (/^\/clients\/admin\/(request|verify)$/u.test(pathname)) return "/clients/admin/code";
@@ -2012,10 +2053,16 @@ async function routePortalRequest(context) {
     }
 
     if (method === "POST" && pathname === "/clients/login") {
+      const block = await signInBlock(store, requestIp(context.request));
+      if (block) return blockedResponse(block);
       const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
       const destination = safeProjectDestination(form?.get("next"));
       const slug = await resolveLogin(env, store, form?.get("password"));
-      if (!slug) return htmlResponse(loginPage(true, destination), 401);
+      if (!slug) {
+        const started = await failedSignIn(store, context.request, "client");
+        return started ? blockedResponse(started) : htmlResponse(loginPage(true, destination), 401);
+      }
+      await signInSucceeded(store, requestIp(context.request));
       await record(store, { actor: "client", action: "client.signed-in", clientSlug: slug, ip: requestIp(context.request), summary: `${(await getClient(store, slug))?.name || slug} signed in to their portal` });
       return redirectResponse(destination || "/clients", await createClientSession(sessionSecret, slug));
     }
@@ -2079,6 +2126,8 @@ async function routePortalRequest(context) {
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
       if (admin) return redirectResponse("/clients/admin");
       if (!store) return htmlResponse(adminRequestPage({ codeTo, state: "storage-not-configured", authenticated }), 503);
+      const block = await signInBlock(store, requestIp(context.request));
+      if (block) return blockedResponse(block, { authenticated });
       if (!readiness.email) return htmlResponse(adminRequestPage({ codeTo, state: "email-not-configured", authenticated }), 503);
       if (!(await allowAdminRequest(store, requestIp(context.request) || "unknown"))) {
         return htmlResponse(adminRequestPage({ codeTo, state: "rate-limited", authenticated }), 429);
@@ -2111,32 +2160,31 @@ async function routePortalRequest(context) {
     if (pathname === "/clients/admin/verify") {
       if (method !== "POST") return methodNotAllowedResponse(["POST"]);
       if (!store) return htmlResponse(adminRequestPage({ codeTo, state: "storage-not-configured", authenticated }), 503);
+      // A blocked address is turned away before its attempt counts against the live codes.
+      const block = await signInBlock(store, requestIp(context.request));
+      if (block) return blockedResponse(block, { authenticated });
       const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
       const code = String(form?.get("code") || "").trim();
-      const retry = (error, status) => htmlResponse(adminRequestPage({ codeTo, state: "code", error, authenticated }), status);
 
       const { live, spent } = await claimAdminAttempt(store);
-      const rejected = (why) => record(store, { actor: "visitor", action: "admin.code-rejected", ip: requestIp(context.request), summary: `Admin code not accepted: ${why}` });
-      if (!live.length && spent) {
-        await rejected("too many attempts");
-        return retry("Too many attempts. Request a new code.", 429);
-      }
-      if (!live.length) {
-        await rejected("no code was live");
-        return retry("That code has expired. Request a new one from the Admin button.", 401);
-      }
+      // Each rejected code is a failed sign-in for the visitor's address (guard.js).
+      const refuse = async (why, error, status) => {
+        await record(store, { actor: "visitor", action: "admin.code-rejected", ip: requestIp(context.request), summary: `Admin code not accepted: ${why}` });
+        const started = await failedSignIn(store, context.request, "admin");
+        return started ? blockedResponse(started, { authenticated }) : htmlResponse(adminRequestPage({ codeTo, state: "code", error, authenticated }), status);
+      };
+      if (!live.length && spent) return refuse("too many attempts", "Too many attempts. Request a new code.", 429);
+      if (!live.length) return refuse("no code was live", "That code has expired. Request a new one from the Admin button.", 401);
       let matched = null;
       if (/^\d{6}$/u.test(code)) {
         for (const challenge of live) {
           if (await constantTimeMatches(await sha256Hex(`${code}:${challenge.id}`), challenge.hash)) matched = challenge;
         }
       }
-      if (!matched) {
-        await rejected("it did not match");
-        return retry("That code did not match. Check the email and try again.", 401);
-      }
+      if (!matched) return refuse("it did not match", "That code did not match. Check the email and try again.", 401);
 
       await deleteAdminChallenge(store, matched.id);
+      await signInSucceeded(store, requestIp(context.request));
       await record(store, { actor: "admin", action: "admin.signed-in", ip: requestIp(context.request), summary: "Signed in to the admin panel" });
       return redirectResponse("/clients/admin", await createAdminSession(sessionSecret));
     }
@@ -2167,7 +2215,7 @@ async function routePortalRequest(context) {
         const family = root ? [root, ...projectsOf(clients, root)] : [];
         const projects = root?.archivedAt ? family : family.filter((entry) => !entry.archivedAt || entry.slug === selected.slug);
         const counted = root?.archivedAt ? projects : projects.filter((entry) => !entry.archivedAt);
-        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin, photos, projectBilling, projectBooks] = await Promise.all([
+        const [billing, documents, templates, recipients, expenses, accounts, paidTo, selectedLogin, photos, projectBilling, projectBooks, blockedCount] = await Promise.all([
           selected ? listBilling(store, selected.slug) : [],
           selected ? listDocuments(store, selected.slug) : [],
           listTemplates(store),
@@ -2178,10 +2226,11 @@ async function routePortalRequest(context) {
           keptLogin(env, store, root),
           selected ? listPhotos(store, selected.slug) : [],
           listBillingFor(store, counted.map((entry) => entry.slug)),
-          jobTotals(store, projects.map((entry) => entry.slug))
+          jobTotals(store, projects.map((entry) => entry.slug)),
+          countSignInBlocks(store)
         ]);
         return scriptedHtmlResponse(adminDashboardPage({
-          clients, selected, root, projects, counted, projectBilling, projectBooks, billing, documents, templates, recipients, readiness, notice, authenticated,
+          clients, selected, root, projects, counted, projectBilling, projectBooks, blockedCount, billing, documents, templates, recipients, readiness, notice, authenticated,
           newClient, clientError, typedEmails, newProject, projectError, expenses, payers: paidWithOptions(accounts), paidTo, selectedLogin, photos, today: todayInMichigan()
         }), status);
       };
@@ -2200,6 +2249,25 @@ async function routePortalRequest(context) {
       if (pathname === "/clients/admin/archive") {
         if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
         return htmlResponse(adminArchivePage({ clients: await listClients(store), notice: noticeFromQuery(url) }));
+      }
+
+      // Blocked sign-ins (in the admin panel's footer): addresses with failed sign-ins in a row
+      // (guard.js), and Unblock.
+      if (pathname === "/clients/admin/blocked") {
+        if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+        return htmlResponse(adminBlockedPage({ rows: await listSignInGuard(store), yours: guardAddress(requestIp(context.request)), notice: noticeFromQuery(url) }));
+      }
+      if (pathname === "/clients/admin/blocked/unblock") {
+        if (method !== "POST") return methodNotAllowedResponse(["POST"]);
+        const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
+        const lifted = form ? await liftSignInBlock(store, String(form.get("address") || "")) : null;
+        if (lifted) {
+          await record(store, {
+            actor: "admin", action: "sign-in.unblocked", ip: requestIp(context.request), data: { address: lifted.address, failures: Number(lifted.failures) },
+            summary: `Unblocked sign-ins from ${lifted.address}${lifted.permanent ? ", blocked for good" : ""} after ${lifted.failures} failed sign-ins in a row`
+          });
+        }
+        return redirectResponse(`/clients/admin/blocked?notice=${lifted ? "unblocked" : "invalid"}`);
       }
 
       // Share a document into any client portal's section, and see what awaits a signature.
@@ -2263,7 +2331,7 @@ async function routePortalRequest(context) {
         return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${clientPassword ? "client-added" : "client-added-private"}`);
       }
 
-      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|access|payments|expenses|photos|gallery|projects|archive|restore|inside|own)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
+      const adminMatch = pathname.match(/^\/clients\/admin\/clients\/([^/]+)\/(billing|documents|profile|site|login|access|payments|expenses|photos|gallery|projects|archive|restore|inside|own|export)(?:\/([^/]+))?(?:\/([a-z-]+))?$/u);
       if (adminMatch) {
         const [, slugRaw, area, idRaw, action] = adminMatch;
         const slug = decodeSegment(slugRaw);
@@ -2273,6 +2341,26 @@ async function routePortalRequest(context) {
         const id = idRaw ? decodeSegment(idRaw) : "";
 
         if (area === "billing") return handleAdminBilling(context, store, target, id, action || "", readiness, origin);
+
+        // Export Client to PDF: a breakdown of every project in the client portal (from any of
+        // them), with costs, profit and payments for investors (`costs`), and photos (`photos`).
+        if (area === "export" && !id && !action) {
+          if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+          const clients = await listClients(store);
+          const root = rootOf(clients, target) || target;
+          const family = [root, ...projectsOf(clients, root)];
+          const options = { costs: url.searchParams.get("costs") === "yes", photos: url.searchParams.get("photos") === "yes" };
+          const today = todayInMichigan();
+          const pdf = await breakdownPdf(await clientBreakdown(store, { root, projects: root.archivedAt ? family : family.filter((entry) => !entry.archivedAt), ...options, today }));
+          await record(store, {
+            actor: "admin", action: "client.exported", clientSlug: root.slug, ip: requestIp(context.request), data: options,
+            summary: `Exported ${root.name} to PDF${options.costs ? ", with costs, profit and payments" : ", without costs, profit or payments"}${options.photos ? ", with photos" : ""}`
+          });
+          const headers = responseHeaders("application/pdf");
+          headers.set("Content-Disposition", `attachment; filename="${`${safeFileName(root.name)} - Project Breakdown ${today}.pdf`.replaceAll(/[^\x20-\x7e]/gu, "_")}"`);
+          headers.set("Content-Length", String(pdf.byteLength));
+          return new Response(method === "HEAD" ? null : pdf, { status: 200, headers });
+        }
 
         // A client portal and its projects: Add project, Send to archive (and Restore, from the
         // archive), Inside another portal, and Make it its own client portal. The client portal

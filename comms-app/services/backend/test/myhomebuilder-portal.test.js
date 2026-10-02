@@ -36,6 +36,7 @@ const { up: teamTables } = await import("../src/db/migrations/20261008_myhomebui
 const { up: jobBookChanges } = await import("../src/db/migrations/20261009_myhomebuilder_portal_job_books.js");
 const { up: photoTables } = await import("../src/db/migrations/20261010_myhomebuilder_portal_photos.js");
 const { up: renderTables } = await import("../src/db/migrations/20261011_myhomebuilder_portal_renders.js");
+const { up: loginGuard } = await import("../src/db/migrations/20261012_myhomebuilder_portal_login_guard.js");
 const { parseStatement } = await import("../src/modules/myhomebuilder-portal/bank.js");
 const { myhomebuilderPortalRouter, portalEnv } = await import("../src/modules/myhomebuilder-portal/index.js");
 const { handlePortalRequest } = await import("../src/modules/myhomebuilder-portal/handler.js");
@@ -46,6 +47,7 @@ const { addressesText, parseEmailList } = await import("../src/modules/myhomebui
 const { parseLineItems, parseMoney, addDays, todayInMichigan } = await import("../src/modules/myhomebuilder-portal/billing.js");
 const { STRIPE_API_VERSION } = await import("../src/modules/myhomebuilder-portal/stripe.js");
 const { createStore, putBilling } = await import("../src/modules/myhomebuilder-portal/store.js");
+const { guardAddress } = await import("../src/modules/myhomebuilder-portal/guard.js");
 const { PDFDocument } = await import("../src/modules/myhomebuilder-portal/vendor/pdf-lib.js");
 
 // ---------- Fakes for SendGrid and Stripe ----------
@@ -174,7 +176,7 @@ function deliveredTo(address) {
 
 // ---------- Database and server ----------
 
-const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses", "mhb_notes", "mhb_schedule", "mhb_photos", "mhb_renders"];
+const MHB_TABLES = ["mhb_clients", "mhb_billing", "mhb_counters", "mhb_templates", "mhb_documents", "mhb_files", "mhb_sent_emails", "mhb_admin_challenges", "mhb_rate_limits", "mhb_recipients", "mhb_journal_lines", "mhb_journal_entries", "mhb_activity", "mhb_stripe_events", "mhb_labor", "mhb_workers", "mhb_secure", "mhb_settings", "mhb_bank_transactions", "mhb_bank_accounts", "mhb_expenses", "mhb_notes", "mhb_schedule", "mhb_photos", "mhb_renders", "mhb_login_guard"];
 let server;
 let base;
 let renumbered = [];
@@ -246,6 +248,7 @@ before(async () => {
   await jobBookChanges(db);
   await photoTables(db);
   await renderTables(db);
+  await loginGuard(db);
   migratedClients = (await db("mhb_clients").orderBy("slug").select("data")).map((row) => json(row.data));
   migratedBilling = (await db("mhb_billing").whereIn("id", ["zelle-edited", "stripe-edited"]).orderBy("id").select("data")).map((row) => json(row.data));
   const app = express();
@@ -2094,11 +2097,23 @@ test("Stripe reaches the webhook directly, and forged signatures are refused", a
 });
 
 test("sign-in attempts are limited per visitor, and the admin write switch pauses admin changes", async () => {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  // Failed sign-ins in a row block the address: the 5th for 20 minutes. Another address is not blocked.
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
     assert.equal((await proxied("/clients/login", form({ password: "wrong" }), { ip: "192.0.2.44" })).status, 401);
   }
-  assert.equal((await proxied("/clients/login", form({ password: "wrong" }), { ip: "192.0.2.44" })).status, 429);
+  const blocked = await proxied("/clients/login", form({ password: "wrong" }), { ip: "192.0.2.44" });
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.headers.get("Retry-After"), "1200");
+  assert.match(await blocked.text(), /Sign-in is paused\./u);
   assert.equal((await proxied("/clients/login", form({ password: "wrong" }), { ip: "192.0.2.45" })).status, 401);
+
+  // In front of everything, each address gets 20 sign-in posts a minute.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    assert.equal((await proxied("/clients/crew/forgot", form({ email: "nobody@example.com" }), { ip: "192.0.2.46" })).status, 200);
+  }
+  const limited = await proxied("/clients/crew/forgot", form({ email: "nobody@example.com" }), { ip: "192.0.2.46" });
+  assert.equal(limited.status, 429);
+  assert.match(await limited.text(), /Too many requests\./u);
 
   process.env.ADMIN_WRITES_ENABLED = "false";
   const paused = await proxied("/clients/admin/clients", form({ name: "Paused", slug: "paused-client", password: "paused-login-2026" }));
@@ -3680,8 +3695,8 @@ test("Inside another portal makes a client portal a project there, under that po
   // Each client portal in the list opens its menu with a right-click: Send to archive and Inside
   // another portal, which asks which client portal.
   const before = await page(smith);
-  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=smith-deck" data-portal-menu="smith-deck" data-portal-name="Smith Deck">/u);
-  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=muskegon-addition" data-portal-menu="muskegon-addition" data-portal-name="Muskegon Addition" data-portal-secret>/u);
+  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=smith-deck" data-portal-menu="smith-deck" data-portal-name="Smith Deck" data-portal-client="Smith Deck">/u);
+  assert.match(before, /<a class="admin-client-link" href="\/clients\/admin\?client=muskegon-addition" data-portal-menu="muskegon-addition" data-portal-name="Muskegon Addition" data-portal-client="Muskegon Addition" data-portal-secret>/u);
   assert.match(before, /<div class="portal-menu" id="portal-menu" role="menu" aria-label="Client portal" hidden>\s*<form method="post" data-portal-menu-archive><button type="submit" role="menuitem">Send to archive<\/button><\/form>\s*<button type="button" role="menuitem" data-portal-menu-inside>Inside another portal<\/button>/u);
   assert.match(before, /<select id="inside-to" name="to" required><option value="" selected disabled>Choose a client portal<\/option><option value="jones-barn">Jones Barn<\/option><option value="muskegon-addition">Muskegon Addition<\/option><option value="smith-deck">Smith Deck<\/option><option value="smith-residence">Smith Residence<\/option><\/select>/u);
   // The same actions, without the menu, fold at the bottom of each project's panel.
@@ -3703,7 +3718,7 @@ test("Inside another portal makes a client portal a project there, under that po
   const panel = await page(smith);
   assert.match(panel, /<strong>Smith Residence<\/strong><small>2 projects · pat@example\.com<\/small>/u);
   assert.doesNotMatch(panel, /class="admin-client-link[^"]*" href="\/clients\/admin\?client=smith-deck"/u);
-  assert.match(panel, /<li><a class="client-project-tab is-current" href="\/clients\/admin\?client=smith-residence" aria-current="page" data-portal-menu="smith-residence" data-portal-name="Smith Residence">Smith Residence<\/a><\/li>\s*<li><a class="client-project-tab" href="\/clients\/admin\?client=smith-deck" data-portal-menu="smith-deck" data-portal-name="Smith Deck" data-portal-parent="smith-residence">Smith Deck<\/a><\/li>/u);
+  assert.match(panel, /<li><a class="client-project-tab is-current" href="\/clients\/admin\?client=smith-residence" aria-current="page" data-portal-menu="smith-residence" data-portal-name="Smith Residence" data-portal-client="Smith Residence">Smith Residence<\/a><\/li>\s*<li><a class="client-project-tab" href="\/clients\/admin\?client=smith-deck" data-portal-menu="smith-deck" data-portal-name="Smith Deck" data-portal-client="Smith Residence" data-portal-parent="smith-residence">Smith Deck<\/a><\/li>/u);
   const order = ["<summary>Add project</summary>", 'class="client-project-tabs"', "<summary>Show finances for all projects under this client</summary>", 'id="selected-heading"'].map((text) => panel.indexOf(text));
   assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), "Add project, then the projects, then the finances, at the top");
 
@@ -3856,7 +3871,7 @@ test("Send to archive takes a client portal or project off the client portal scr
   const page = async (path) => (await request(path, { headers: { Cookie: adminCookie } })).text();
   const invoiced = async () => (await page("/clients/admin/books")).match(/<div><dt>Invoiced<\/dt><dd>\$([\d,.]+)<\/dd>/u)[1];
   assert.equal(await invoiced(), "15,500.00");
-  assert.match(await page("/clients/admin"), /<a class="portal-footer-archive" href="\/clients\/admin\/archive">Archive<\/a>\s*<a href="\/legal\/">Legal and privacy<\/a>/u);
+  assert.match(await page("/clients/admin"), /<a class="portal-footer-archive" href="\/clients\/admin\/archive">Archive<\/a>\s*<a class="portal-footer-blocked" href="\/clients\/admin\/blocked">Blocked sign-ins<\/a>\s*<a href="\/legal\/">Legal and privacy<\/a>/u);
   const clientCookie = await loginAsClient("smith-residence-login-2026");
   assert.deepEqual((await clientHome(clientCookie)).projects, ["Smith Residence", "Deck", "Kitchen Remodel"]);
 
@@ -3946,6 +3961,224 @@ test("Send to archive takes a client portal or project off the client portal scr
   assert.equal((await request("/clients/login", form({ password: process.env.MHB_CLIENT_PORTAL_PASSWORD }))).status, 401);
   await request("/clients/admin/clients/muskegon-addition/restore", form({}, adminCookie));
   assert.equal((await clientHome(await loginAsClient())).heading, "Muskegon Addition");
+});
+
+// ---------- Sign-in protection ----------
+
+test("an address counts by itself, an IPv6 address by its /64 network", () => {
+  assert.equal(guardAddress("203.0.113.5"), "203.0.113.5");
+  assert.equal(guardAddress("2001:DB8:5:6::1"), "2001:db8:5:6::/64");
+  assert.equal(guardAddress("2001:db8:5:6:ffff:1:2:3"), "2001:db8:5:6::/64");
+  assert.equal(guardAddress("2001:db8::1"), "2001:db8:0:0::/64");
+  assert.equal(guardAddress("::ffff:203.0.113.200"), "203.0.113.200");
+  assert.equal(guardAddress("fe80::1%eth0"), "fe80:0:0:0::/64");
+  assert.equal(guardAddress("not-an-address"), "");
+  assert.equal(guardAddress(""), "");
+});
+
+async function guardRow(address) {
+  return db("mhb_login_guard").where({ address }).first();
+}
+
+// As if a block had run out.
+async function endBlock(address) {
+  await db("mhb_login_guard").where({ address }).update({ blocked_until: db.raw("now() - interval '1 minute'") });
+}
+
+test("failed sign-ins in a row block the address: 20 minutes after 5, 60 after 10, for good after 15; Unblock lifts it", async () => {
+  const adminCookie = await loginAsAdmin();
+  await addPortal(adminCookie, "Birch Cottage");
+  const ip = "198.51.100.77";
+  const signIn = (password, from = ip) => request("/clients/login", form({ password }, "", { "CF-Connecting-IP": from }));
+  const wrong = async (times) => {
+    for (let attempt = 0; attempt < times; attempt += 1) assert.equal((await signIn("not-the-login-2026")).status, 401);
+  };
+
+  await wrong(4);
+  const paused = await signIn("not-the-login-2026");
+  assert.equal(paused.status, 429);
+  assert.equal(paused.headers.get("Retry-After"), "1200");
+  const pausedPage = await paused.text();
+  assert.match(pausedPage, /Sign-in is paused\./u);
+  assert.match(pausedPage, /Try again in 20 minutes\./u);
+  assert.equal((await signIn("birch-cottage-login-2026")).status, 429, "while blocked, even the right login is not checked");
+  assert.equal((await signIn("birch-cottage-login-2026", "198.51.100.78")).status, 303, "another address is not blocked");
+  const first = await guardRow(ip);
+  assert.equal(first.failures, 5);
+  assert.equal(first.permanent, false);
+  assert.ok(new Date(first.blocked_until).getTime() > Date.now() + 19 * 60000);
+  assert.ok(await db("mhb_activity").where({ action: "sign-in.blocked", summary: "Blocked sign-ins from 198.51.100.77 for 20 minutes after 5 failed sign-ins in a row" }).first());
+
+  await endBlock(ip);
+  await wrong(4);
+  const longer = await signIn("not-the-login-2026");
+  assert.equal(longer.status, 429);
+  assert.match(await longer.text(), /Try again in 60 minutes\./u);
+  assert.equal((await guardRow(ip)).failures, 10);
+
+  await endBlock(ip);
+  await wrong(4);
+  const blocked = await signIn("not-the-login-2026");
+  assert.equal(blocked.status, 403);
+  assert.match(await blocked.text(), /Sign-in is blocked\.[\s\S]*contact My Home Builder/u);
+  const forGood = await guardRow(ip);
+  assert.equal(forGood.failures, 15);
+  assert.equal(forGood.permanent, true);
+  assert.ok(await db("mhb_activity").where({ action: "sign-in.blocked", summary: "Blocked sign-ins from 198.51.100.77 for good after 15 failed sign-ins in a row" }).first());
+
+  // Blocked for good: no sign-in anywhere in the portal, and no admin codes.
+  await endBlock(ip);
+  const headers = { "CF-Connecting-IP": ip };
+  assert.equal((await signIn("birch-cottage-login-2026")).status, 403);
+  assert.equal((await request("/clients/admin/request", { method: "POST", headers })).status, 403);
+  assert.equal((await request("/clients/admin/verify", form({ code: "123456" }, "", headers))).status, 403);
+  assert.equal((await request("/clients/crew/login", form({ email: "crew@example.com", password: "whatever-2026" }, "", headers))).status, 403);
+  assert.equal((await guardRow(ip)).failures, 15, "nothing more is counted while blocked");
+
+  // Blocked sign-ins, in the admin panel's footer, lists it with Unblock.
+  assert.match(await (await request("/clients/admin", { headers: { Cookie: adminCookie } })).text(), /<a class="portal-footer-blocked" href="\/clients\/admin\/blocked">Blocked sign-ins \(1\)<\/a>/u);
+  const page = await (await request("/clients/admin/blocked", { headers: { Cookie: adminCookie } })).text();
+  assert.match(page, /<h1 class="portal-heading">Blocked sign-ins\.<\/h1>/u);
+  assert.match(page, /<td><code>198\.51\.100\.77<\/code><\/td>\s*<td>15<\/td>\s*<td><span class="portal-status portal-status-blocked">Blocked for good<\/span><\/td>/u);
+  assert.match(page, /<small>Client login<\/small>/u);
+  assert.match(page, /<input type="hidden" name="address" value="198\.51\.100\.77"><button class="button button-solid button-small" type="submit">Unblock<\/button>/u);
+  const lifted = await request("/clients/admin/blocked/unblock", form({ address: ip }, adminCookie));
+  assert.equal(lifted.headers.get("Location"), "/clients/admin/blocked?notice=unblocked");
+  assert.equal(await guardRow(ip), undefined);
+  assert.ok(await db("mhb_activity").where({ action: "sign-in.unblocked" }).first());
+  assert.equal((await signIn("birch-cottage-login-2026")).status, 303, "unblocked, it signs in again");
+  assert.match(await (await request("/clients/admin/blocked", { headers: { Cookie: adminCookie } })).text(), /No failed sign-ins are on record\./u);
+  assert.equal((await request("/clients/admin/blocked/unblock", form({ address: "203.0.113.250" }, adminCookie))).headers.get("Location"), "/clients/admin/blocked?notice=invalid");
+});
+
+test("wrong admin codes and crew passwords count too, a successful sign-in starts the count again, and an IPv6 network counts as one", async () => {
+  const adminCookie = await loginAsAdmin();
+  await addPortal(adminCookie, "Alder House");
+  const signIn = (password, from) => request("/clients/login", form({ password }, "", { "CF-Connecting-IP": from }));
+
+  // A successful sign-in starts the count again.
+  for (let attempt = 0; attempt < 4; attempt += 1) assert.equal((await signIn("not-the-login-2026", "198.51.100.81")).status, 401);
+  assert.equal((await signIn("alder-house-login-2026", "198.51.100.81")).status, 303);
+  assert.equal(await guardRow("198.51.100.81"), undefined);
+  for (let attempt = 0; attempt < 4; attempt += 1) assert.equal((await signIn("not-the-login-2026", "198.51.100.81")).status, 401);
+  assert.equal((await guardRow("198.51.100.81")).failures, 4);
+
+  // Wrong admin codes: the 5th blocks the address, and while it is blocked its tries do not count
+  // against the live codes.
+  const headers = { "CF-Connecting-IP": "198.51.100.82" };
+  assert.equal((await request("/clients/admin/request", { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.83" } })).status, 200);
+  for (let attempt = 0; attempt < 4; attempt += 1) assert.equal((await request("/clients/admin/verify", form({ code: "000000" }, "", headers))).status, 401);
+  const codeBlocked = await request("/clients/admin/verify", form({ code: "000000" }, "", headers));
+  assert.equal(codeBlocked.status, 429);
+  assert.match(await codeBlocked.text(), /Sign-in is paused\./u);
+  const triedBefore = (await db("mhb_admin_challenges").select("attempts")).map((row) => Number(row.attempts));
+  assert.equal((await request("/clients/admin/verify", form({ code: "000000" }, "", headers))).status, 429);
+  assert.deepEqual((await db("mhb_admin_challenges").select("attempts")).map((row) => Number(row.attempts)), triedBefore);
+  assert.equal((await request("/clients/admin/request", { method: "POST", headers })).status, 429, "no new codes for it either");
+  assert.equal((await guardRow("198.51.100.82")).last_where, "admin");
+
+  // Wrong crew passwords.
+  const { worker } = await addCrew(adminCookie, { kind: "subcontractor", name: "Dana Reyes", email: "dana@example.com" });
+  const crewSignIn = (password, from) => request("/clients/crew/login", form({ email: worker.email, password }, "", { "CF-Connecting-IP": from }));
+  for (let attempt = 0; attempt < 4; attempt += 1) assert.equal((await crewSignIn("not-the-password", "198.51.100.84")).status, 401);
+  assert.equal((await crewSignIn("not-the-password", "198.51.100.84")).status, 429);
+  assert.equal((await crewSignIn("crew-password-2026", "198.51.100.84")).status, 429);
+  assert.equal((await crewSignIn("crew-password-2026", "198.51.100.85")).status, 303);
+
+  // An IPv6 network counts as one address.
+  for (const address of ["2001:db8:5:6::1", "2001:db8:5:6::2", "2001:db8:5:6:a::3", "2001:db8:5:6:b::4"]) {
+    assert.equal((await signIn("not-the-login-2026", address)).status, 401);
+  }
+  assert.equal((await signIn("not-the-login-2026", "2001:db8:5:6:ffff::9")).status, 429);
+  assert.equal((await guardRow("2001:db8:5:6::/64")).failures, 5);
+  assert.equal((await signIn("alder-house-login-2026", "2001:db8:5:7::1")).status, 303, "the next network over is not blocked");
+});
+
+// ---------- Export Client to PDF ----------
+
+// The text a pdfkit PDF shows: each content stream inflated, and the strings of its text
+// operators decoded (pdfkit writes them in hex, split for kerning).
+async function pdfText(bytes) {
+  const { inflateSync } = await import("node:zlib");
+  const raw = Buffer.from(bytes);
+  const pieces = [];
+  let at = 0;
+  while ((at = raw.indexOf("stream", at)) !== -1) {
+    const start = raw.indexOf("\n", at) + 1;
+    const end = raw.indexOf("endstream", start);
+    let content = "";
+    try {
+      content = inflateSync(raw.subarray(start, end)).toString("latin1");
+    } catch {
+      content = "";
+    }
+    for (const match of content.matchAll(/\[((?:<[0-9a-fA-F]*>|[^\]<])*)\]\s*TJ|<([0-9a-fA-F]*)>\s*Tj/gu)) {
+      const hex = match[1] !== undefined ? [...match[1].matchAll(/<([0-9a-fA-F]*)>/gu)].map((part) => part[1]).join("") : match[2];
+      pieces.push(Buffer.from(hex, "hex").toString("latin1"));
+    }
+    at = end + "endstream".length;
+  }
+  return pieces.join(" ");
+}
+
+test("Export Client to PDF downloads a breakdown of every project in the client portal, with or without costs, profit and payments", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  const smith = await addPortal(adminCookie, "Smith Residence", "pat@example.com");
+  await request(`/clients/admin/clients/${smith}/site`, form({ siteAddress: "12 Lake St, Muskegon, MI 49441" }, adminCookie));
+  await request(`/clients/admin/clients/${smith}/projects`, form({ name: "Kitchen Remodel" }, adminCookie));
+  await request(`/clients/admin/clients/${smith}/projects`, form({ name: "Garage" }, adminCookie));
+  await request(`/clients/admin/clients/${smith}/billing`, form({ kind: "invoice", title: "Design and permits", amount: "1,800" }, adminCookie));
+  await request("/clients/admin/clients/kitchen-remodel/billing", form({ kind: "invoice", title: "Cabinet package", ...lines(["Base cabinets", "12", "450"], ["Hardware", "1", "2,600"]) }, adminCookie));
+  await request("/clients/admin/clients/kitchen-remodel/billing", form({ kind: "quote", title: "Island upgrade", amount: "3,200" }, adminCookie));
+  const cabinets = (await billingRecords()).find((item) => item.title === "Cabinet package");
+  await request(`/clients/admin/clients/kitchen-remodel/billing/${cabinets.id}/record-payment`, form({ method: "zelle", amount: "3,000", paidOn: today }, adminCookie));
+  await request("/clients/admin/clients/kitchen-remodel/expenses", crewForm({ spentOn: today, paidWith: "account:1000", vendor: "Menards", description: "Cabinet boxes", category: "Materials", amount: "4,200" }, null, adminCookie));
+  await request("/clients/admin/clients/kitchen-remodel/photos", photoForm({ note: "Cabinets in" }, [{ bytes: await pngBytes(32, 24), name: "cabinets.png", type: "image/png" }], adminCookie));
+  await request("/clients/admin/clients/garage/archive", form({}, adminCookie));
+
+  // On the client portal's page, beside its projects, and in the right-click menu: a popup asks what
+  // goes in. Without scripts the link downloads the full breakdown.
+  const panel = await (await request("/clients/admin?client=kitchen-remodel", { headers: { Cookie: adminCookie } })).text();
+  assert.match(panel, /<a class="button button-outline client-export" href="\/clients\/admin\/clients\/smith-residence\/export\?costs=yes&amp;photos=yes" data-export-client data-export-name="Smith Residence">Export Client to PDF<\/a>/u);
+  assert.match(panel, /<button type="button" role="menuitem" data-portal-menu-export>Export Client to PDF<\/button>/u);
+  assert.match(panel, /<dialog class="admin-dialog" id="export-dialog"[\s\S]*?<input id="export-costs" name="costs" type="checkbox" value="yes" checked>\s*<span>Costs, profit and payments<\/span>[\s\S]*?<input id="export-photos" name="photos" type="checkbox" value="yes" checked>/u);
+
+  // For investors: everything.
+  const full = await request("/clients/admin/clients/kitchen-remodel/export?costs=yes&photos=yes", { headers: { Cookie: adminCookie } });
+  assert.equal(full.status, 200);
+  assert.equal(full.headers.get("Content-Type"), "application/pdf");
+  assert.equal(full.headers.get("Content-Disposition"), `attachment; filename="Smith Residence - Project Breakdown ${today}.pdf"`);
+  const fullBytes = new Uint8Array(await full.arrayBuffer());
+  assert.equal(Buffer.from(fullBytes.subarray(0, 5)).toString(), "%PDF-");
+  const fullPdf = await PDFDocument.load(fullBytes);
+  assert.equal(fullPdf.getPageCount() >= 3, true, "a summary page, then a page for each project");
+  assert.equal(fullPdf.getTitle(), "Smith Residence · Project breakdown");
+  const fullText = await pdfText(fullBytes);
+  for (const shown of ["MY HOME BUILDER LLC", "PROJECT BREAKDOWN", "Smith Residence", "12 Lake St, Muskegon, MI 49441", "Kitchen Remodel", "Design and permits", "Cabinet package", "Base cabinets", "Island upgrade",
+    "INVOICED", "OUTSTANDING", "GROSS PROFIT", "Payments received", "Zelle", "Cabinet boxes", "Menards", "Gross expenses by category", "Materials", "Photos", "Cabinets in", "License # 242601116", "Page 1 of"]) {
+    assert.ok(fullText.includes(shown), `the full PDF shows ${shown}`);
+  }
+  assert.ok(Buffer.from(fullBytes).includes("/Subtype /Image"), "with the photo");
+  for (const hidden of ["Garage", "pat@example.com", "smith-residence-login-2026"]) assert.ok(!fullText.includes(hidden), `never ${hidden}`);
+
+  // For a potential client: the work and its price, nothing about payments, balances, costs or profit.
+  const plain = await request(`/clients/admin/clients/${smith}/export`, { headers: { Cookie: adminCookie } });
+  const plainBytes = new Uint8Array(await plain.arrayBuffer());
+  const plainText = await pdfText(plainBytes);
+  for (const shown of ["PROJECT VALUE", "Scope of work", "Cabinet package", "Base cabinets", "Kitchen Remodel"]) assert.ok(plainText.includes(shown), `the client PDF shows ${shown}`);
+  for (const hidden of ["OUTSTANDING", "GROSS PROFIT", "Gross expenses", "Payments received", "Zelle", "Cabinet boxes", "Partly paid", "Photos"]) assert.ok(!plainText.includes(hidden), `the client PDF leaves out ${hidden}`);
+  assert.ok(!Buffer.from(plainBytes).includes("/Subtype /Image"), "and photos when not asked for");
+  assert.deepEqual((await db("mhb_activity").where({ action: "client.exported" }).orderBy("id").select("summary")).map((row) => row.summary), [
+    "Exported Smith Residence to PDF, with costs, profit and payments, with photos",
+    "Exported Smith Residence to PDF, without costs, profit or payments"
+  ]);
+
+  // Names outside the PDF fonts' characters come out plain, not garbled.
+  await request(`/clients/admin/clients/${smith}/projects`, form({ name: "Café Annex 中" }, adminCookie));
+  const accented = await pdfText(new Uint8Array(await (await request(`/clients/admin/clients/${smith}/export`, { headers: { Cookie: adminCookie } })).arrayBuffer()));
+  assert.ok(accented.includes("Café Annex ?"));
+  assert.equal((await request(`/clients/admin/clients/${smith}/export`, { method: "POST", headers: { Cookie: adminCookie } })).status, 405);
 });
 
 // ---------- The live material designer ----------

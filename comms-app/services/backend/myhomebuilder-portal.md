@@ -192,6 +192,53 @@ for lookups and uniqueness (invoice numbers, share-link tokens).
 - Rate limits are kept in `mhb_rate_limits`:
   - 20 sign-in or admin-code attempts and 120 form posts per visitor address per minute
   - 3 admin code requests per address and 12 overall per 10 minutes
+  - and failed sign-ins in a row block an address (see Sign-in protection)
+
+## Sign-in protection
+
+`guard.js`, migration `20261012_myhomebuilder_portal_login_guard.js` (`mhb_login_guard`).
+
+- **What counts:** a failed sign-in from a visitor's address: a wrong client login, a wrong crew
+  password, or a rejected admin code (wrong, expired, or after too many tries). The address is
+  the one Cloudflare passes through the site's Function (`X-MHB-Client-Ip`); an IPv6 address
+  counts by its /64 network, which one household or phone holds.
+- **Blocks:** the 5th failure in a row blocks the address for 20 minutes, the 10th for 60 minutes
+  and the 15th for good. A successful sign-in from it starts the count again.
+- **While blocked:** the client login, the crew login, the admin code and admin code requests from
+  it answer "Sign-in is paused" (429, with Retry-After) or, for good, "Sign-in is blocked" (403)
+  without checking anything, so its tries cannot use up the admin's live codes either. Sessions
+  already open keep working, and nothing else in the portal is closed to it.
+- **Blocked sign-ins** (`/clients/admin/blocked`, in the admin panel's footer, with how many are
+  blocked) lists each address with its count, its block and its last failure (time and which
+  sign-in), marks the admin's own address, and has **Unblock** (or **Clear count**).
+- Each block and unblock is in the activity log.
+- Cloudflare does not do this for the portal: its rate limiting counts requests, not failed
+  sign-ins, and does not block for good. The 20-a-minute limit above still applies first.
+
+## Export Client to PDF
+
+`export.js`. **Export Client to PDF** sits beside a client portal's projects, and in the
+right-click menu of a client portal or project. It opens a popup that asks what goes in, then
+downloads `<client portal> - Project Breakdown <date>.pdf` (`GET
+/clients/admin/clients/<slug>/export`). Without scripts the link downloads the full breakdown.
+From a project it exports the whole client portal; a portal in the archive exports with all its
+projects. Each export is in the activity log.
+
+- **The breakdown:** the business's letterhead (the MB mark, address and license), the client
+  portal's name and site, key figures, a table of its projects, and then a page for each project:
+  its work (each invoice's and quote's lines), its photos, and the figures below. Every page has
+  the business and page numbers at the foot. Quotes made into invoices are left out (their
+  invoice carries the work), as are void ones and projects in the archive.
+- **Costs, profit and payments** (on unless unticked): for investors. It adds invoiced, paid and
+  outstanding, gross expenses (job costs, from each job book), gross profit and margin, gross
+  expenses by category as bars, each project's payments and itemized expenses. Unticked, for a
+  potential client, the PDF shows each project's work and its price (its invoices' total), and
+  nothing about payments, balances, costs or profit.
+- **Photos** (on unless unticked): up to six per project, those its client portal shows, JPEG and
+  PNG, with their notes and dates. They go in as stored, at most 15 MB of them per PDF so it can
+  be emailed.
+- Client emails, logins, documents and the admin's notes are never in it. Text in pdfkit's own
+  fonts (no fetches); characters those fonts lack come out without accents or as "?".
 
 ## Projects on the admin panel
 

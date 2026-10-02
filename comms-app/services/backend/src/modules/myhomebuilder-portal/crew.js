@@ -503,13 +503,20 @@ export async function handleCrew(context, store, pathname, url) {
   const secret = env.CLIENT_PORTAL_SESSION_SECRET;
   const origin = url.origin;
 
+  // A failed sign-in counts against the visitor's address, like a client login (guard.js).
   if (pathname === "/clients/crew/login") {
     if (method !== "POST") return kit.redirectResponse("/clients/crew");
+    const block = await kit.signInBlock(store, kit.requestIp(context.request));
+    if (block) return kit.blockedResponse(block);
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
     const email = String(form?.get("email") || "").trim().toLowerCase();
     const worker = isValidEmail(email) ? await findWorkerByEmail(store, email) : null;
     const matched = worker && worker.active !== false && worker.passwordHash && (await verifyPassword(String(form?.get("password") || ""), worker.passwordHash));
-    if (!matched) return kit.htmlResponse(crewLoginPage({ error: "That email and password did not match.", email }), 401);
+    if (!matched) {
+      const started = await kit.failedSignIn(store, context.request, "crew");
+      return started ? kit.blockedResponse(started) : kit.htmlResponse(crewLoginPage({ error: "That email and password did not match.", email }), 401);
+    }
+    await kit.signInSucceeded(store, kit.requestIp(context.request));
     await putWorker(store, { ...worker, lastSignInAt: new Date().toISOString() });
     await record(store, { actor: "crew", action: "crew.signed-in", ip: kit.requestIp(context.request), summary: `${worker.name} signed in to the crew portal`, data: { workerId: worker.id } });
     return kit.redirectResponse("/clients/crew", await createCrewSession(secret, worker));

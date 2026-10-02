@@ -20,10 +20,11 @@ function sizeText(bytes) {
 
 const BILLING_SCRIPT = "/clients/portal/billing.js";
 
-// Printed on every quote and invoice, worded exactly as the owner gave them.
-const BUSINESS_ADDRESS = ["6749 Fulton St E, Ste A #2333", "Ada, MI 49301"];
-const BUILDER_LICENSE = "License # 242601116";
-const INSURANCE = "$1,000,000 liability insurance provided by Next First Insurance Agency Inc";
+// Printed on every quote and invoice (and the client PDF, export.js), worded exactly as the owner
+// gave them.
+export const BUSINESS_ADDRESS = ["6749 Fulton St E, Ste A #2333", "Ada, MI 49301"];
+export const BUILDER_LICENSE = "License # 242601116";
+export const INSURANCE = "$1,000,000 liability insurance provided by Next First Insurance Agency Inc";
 // The Ada address is a digital mailbox, so checks go to this address instead.
 const CHECK_ADDRESS = ["5899 1/2 White Rd", "Muskegon, MI 49442"];
 
@@ -1078,10 +1079,36 @@ export function adminDocumentsPage({ clients, documents, notice = null }) {
 // ---------- Client portals and their projects ----------
 
 // What the right-click menu (billing.js) needs to know about a client portal or project: its id
-// and name, the client portal it is in (a project can be made its own client portal again), and
-// whether its login is set in Render (the Muskegon project stays a client portal of its own).
-function portalMenuData(client) {
-  return ` data-portal-menu="${escapeAttribute(client.slug)}" data-portal-name="${escapeAttribute(client.name)}"${client.parentSlug ? ` data-portal-parent="${escapeAttribute(client.parentSlug)}"` : ""}${client.managedBySecret ? " data-portal-secret" : ""}`;
+// and name, the client portal it is in (a project can be made its own client portal again) and
+// that portal's name (Export Client to PDF exports the whole client), and whether its login is set
+// in Render (the Muskegon project stays a client portal of its own).
+function portalMenuData(client, clientName = client.name) {
+  return ` data-portal-menu="${escapeAttribute(client.slug)}" data-portal-name="${escapeAttribute(client.name)}" data-portal-client="${escapeAttribute(clientName)}"${client.parentSlug ? ` data-portal-parent="${escapeAttribute(client.parentSlug)}"` : ""}${client.managedBySecret ? " data-portal-secret" : ""}`;
+}
+
+// Export Client to PDF: the popup asks what goes in, then the PDF downloads. Without scripts the
+// link downloads the full breakdown.
+function exportDialog() {
+  return `<dialog class="admin-dialog" id="export-dialog" aria-labelledby="export-dialog-title">
+          <div class="admin-dialog-head">
+            <h2 id="export-dialog-title">Export Client to PDF</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          <form class="admin-stack-form" method="get" data-export-form>
+            <p class="admin-meta" data-export-for></p>
+            <label class="portal-check" for="export-costs">
+              <input id="export-costs" name="costs" type="checkbox" value="yes" checked>
+              <span>Costs, profit and payments</span>
+            </label>
+            <small class="admin-field-hint">For investors. Untick it for a potential client: the PDF then shows each project's work, its price and photos, and nothing about payments, balances, costs or profit.</small>
+            <label class="portal-check" for="export-photos">
+              <input id="export-photos" name="photos" type="checkbox" value="yes" checked>
+              <span>Photos</span>
+            </label>
+            <button class="button button-solid" type="submit">Download PDF</button>
+            <p class="portal-security-note">A breakdown of every project in the client portal. Client emails, logins and documents are never in it.</p>
+          </form>
+        </dialog>`;
 }
 
 function insideOptions(portals) {
@@ -1096,7 +1123,9 @@ function portalMenu(portals) {
           <form method="post" data-portal-menu-archive><button type="submit" role="menuitem">Send to archive</button></form>
           <button type="button" role="menuitem" data-portal-menu-inside>Inside another portal</button>
           <form method="post" data-portal-menu-own><button type="submit" role="menuitem">Make it its own client portal</button></form>
+          <button type="button" role="menuitem" data-portal-menu-export>Export Client to PDF</button>
         </div>
+        ${exportDialog()}
         <dialog class="admin-dialog" id="inside-dialog" aria-labelledby="inside-dialog-title">
           <div class="admin-dialog-head">
             <h2 id="inside-dialog-title" data-inside-title>Inside another portal</h2>
@@ -1161,13 +1190,15 @@ function clientFinances(projects, billing, books) {
 }
 
 // The top of a client portal's page: Add project, the list of its projects (the client portal
-// itself first; a click opens one, a right-click its menu), and Show finances for all projects
-// under this client. A new project's job site address starts as the client portal's.
+// itself first; a click opens one, a right-click its menu) with Export Client to PDF beside it,
+// and Show finances for all projects under this client. A new project's job site address starts
+// as the client portal's.
 function clientProjects({ root, projects, selected, counted, projectBilling, projectBooks, newProject, projectError }) {
   const tabs = projects.map((project) => {
     const current = project.slug === selected.slug;
-    return `<li><a class="client-project-tab${current ? " is-current" : ""}${project.archivedAt ? " is-archived" : ""}" href="/clients/admin?client=${encodeURIComponent(project.slug)}"${current ? ' aria-current="page"' : ""}${project.archivedAt ? "" : portalMenuData(project)}>${escapeHtml(project.name)}${project.archivedAt ? "<small>In archive</small>" : ""}</a></li>`;
+    return `<li><a class="client-project-tab${current ? " is-current" : ""}${project.archivedAt ? " is-archived" : ""}" href="/clients/admin?client=${encodeURIComponent(project.slug)}"${current ? ' aria-current="page"' : ""}${project.archivedAt ? "" : portalMenuData(project, root.name)}>${escapeHtml(project.name)}${project.archivedAt ? "<small>In archive</small>" : ""}</a></li>`;
   }).join("\n            ");
+  const exportLink = `<a class="button button-outline client-export" href="/clients/admin/clients/${encodeURIComponent(root.slug)}/export?costs=yes&amp;photos=yes" data-export-client data-export-name="${escapeAttribute(root.name)}">Export Client to PDF</a>`;
   const add = root.archivedAt ? "" : `<details class="admin-add-project" id="add-project" data-collapsible${projectError ? " open" : ""}>
           <summary>Add project</summary>
           <form class="admin-inline-form admin-add-project-form" action="/clients/admin/clients/${encodeURIComponent(root.slug)}/projects" method="post">
@@ -1183,11 +1214,14 @@ function clientProjects({ root, projects, selected, counted, projectBilling, pro
         </details>`;
   return `<div class="client-projects">
           ${add}
-          <nav class="client-project-tabs" aria-label="Projects of ${escapeAttribute(root.name)}">
-            <ul>
-            ${tabs}
-            </ul>
-          </nav>
+          <div class="client-project-row">
+            <nav class="client-project-tabs" aria-label="Projects of ${escapeAttribute(root.name)}">
+              <ul>
+              ${tabs}
+              </ul>
+            </nav>
+            ${exportLink}
+          </div>
           ${clientFinances(counted, projectBilling, projectBooks)}
         </div>`;
 }
@@ -1326,7 +1360,7 @@ export function adminPhotoDatePage({ client, photo, base }) {
 // selected project is in (or the portal itself), `projects` its projects as listed, `counted` the
 // ones its finances add up, from `projectBilling` (their quotes and invoices) and `projectBooks`
 // (books.js jobTotals). `selectedLogin` is the client portal's login in plain text, when on file.
-export function adminDashboardPage({ clients, selected, root = selected, projects = selected ? [selected] : [], counted = projects, projectBilling = [], projectBooks = new Map(), billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, newProject = null, projectError = "", expenses = [], payers = [], paidTo = [], selectedLogin = null, photos = [], today = todayInMichigan() }) {
+export function adminDashboardPage({ clients, selected, root = selected, projects = selected ? [selected] : [], counted = projects, projectBilling = [], projectBooks = new Map(), blockedCount = 0, billing, documents, templates = [], recipients = [], readiness, notice = null, authenticated = true, newClient = null, clientError = "", typedEmails = null, newProject = null, projectError = "", expenses = [], payers = [], paidTo = [], selectedLogin = null, photos = [], today = todayInMichigan() }) {
   // Client portals in use; projects are listed on their client portal's page, and anything in the
   // archive under Archive in the footer.
   const portals = clients.filter((client) => !client.parentSlug && !client.archivedAt);
@@ -1482,8 +1516,47 @@ export function adminDashboardPage({ clients, selected, root = selected, project
       ${recipientList(recipients)}
     </div>`, {
     authenticated, admin: true, bodyClass: "portal-page portal-admin", title: "Admin panel", scripts: [BILLING_SCRIPT],
-    footerLinks: [`<a class="portal-footer-archive" href="/clients/admin/archive">Archive${archive.count ? ` (${archive.count})` : ""}</a>`]
+    footerLinks: [
+      `<a class="portal-footer-archive" href="/clients/admin/archive">Archive${archive.count ? ` (${archive.count})` : ""}</a>`,
+      `<a class="portal-footer-blocked" href="/clients/admin/blocked">Blocked sign-ins${blockedCount ? ` (${blockedCount})` : ""}</a>`
+    ]
   });
+}
+
+// Blocked sign-ins (in the admin panel's footer): each address with failed sign-ins in a row
+// (guard.js), whether it is blocked and until when, and Unblock. `yours` is the address the admin
+// is on.
+const SIGN_IN_PLACES = { client: "Client login", crew: "Crew login", admin: "Admin code" };
+
+export function adminBlockedPage({ rows, yours = "", notice = null }) {
+  const body = rows.length
+    ? `<table class="portal-table admin-blocked-table">
+        <thead><tr><th scope="col">Address</th><th scope="col">Failed in a row</th><th scope="col">Status</th><th scope="col">Last failed</th><th scope="col"><span class="visually-hidden">Unblock</span></th></tr></thead>
+        <tbody>${rows.map((row) => {
+    const [tone, status] = row.block?.permanent
+      ? ["blocked", "Blocked for good"]
+      : row.block ? ["open", `Blocked until ${dateTimeText(row.block.until)}`] : ["neutral", "Not blocked"];
+    return `<tr>
+          <td><code>${escapeHtml(row.address)}</code>${row.address === yours ? "<small>Your address</small>" : ""}</td>
+          <td>${row.failures}</td>
+          <td><span class="portal-status portal-status-${tone}">${status}</span></td>
+          <td>${dateTimeText(row.lastFailedAt)}<small>${escapeHtml(SIGN_IN_PLACES[row.lastWhere] || "Sign-in")}</small></td>
+          <td class="portal-actions"><form action="/clients/admin/blocked/unblock" method="post"><input type="hidden" name="address" value="${escapeAttribute(row.address)}"><button class="${row.block ? "button button-solid button-small" : "portal-logout-button"}" type="submit">${row.block ? "Unblock" : "Clear count"}</button></form></td>
+        </tr>`;
+  }).join("")}</tbody>
+      </table>`
+    : '<p class="portal-empty">No failed sign-ins are on record.</p>';
+  return adminShell(`<div class="site-width portal-shell">
+      <section class="admin-intro">
+        <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin">Admin panel</a></p>
+        <h1 class="portal-heading">Blocked sign-ins.</h1>
+        <p class="portal-lead">Failed sign-ins in a row from one address (a wrong client login, crew password or admin code): the 5th blocks it for 20 minutes, the 10th for 60 minutes and the 15th for good. A successful sign-in starts the count again. IPv6 addresses count by their /64 network.</p>
+        ${noticeMarkup(notice)}
+      </section>
+      <section class="books-section admin-blocked" aria-label="Addresses">
+        ${body}
+      </section>
+    </div>`, { title: "Blocked sign-ins" });
 }
 
 // Archive (in the admin panel's footer): client portals sent to archive, with the projects that
