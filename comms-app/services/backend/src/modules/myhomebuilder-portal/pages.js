@@ -284,9 +284,12 @@ function billingRows(items, { basePath, viewer, readOnly = false }) {
     const detailText = admin && item.status === "paid" && payment.source === "manual"
       ? `<a class="payment-change" href="${href}" data-payment-menu data-label="${escapeAttribute(name)}" data-method="${escapeAttribute(payment.method || "")}" data-method-name="${escapeAttribute(payment.methodName || "")}" data-note="${escapeAttribute(payment.note || "")}" data-paid-on="${escapeAttribute(String(item.paidAt || "").slice(0, 10))}" title="Change how it was paid">${escapeHtml(detail)}</a>`
       : escapeHtml(detail);
-    return `<tr${admin ? ` class="billing-row-link" data-row-href="${href}"` : ""}>
-          <td><span class="portal-number">${escapeHtml(item.number)}</span></td>
-          <td>${admin ? `<a class="billing-row-title" href="${href}">${escapeHtml(item.title)}</a>` : escapeHtml(item.title)}${dueLine}${note}</td>
+    // A click on an admin row opens the quote or invoice to edit (its page, once it can no longer
+    // be edited); its number opens its page.
+    const open = admin && isEditable(item) ? `${href}/edit` : href;
+    return `<tr${admin ? ` class="billing-row-link" data-row-href="${open}"` : ""}>
+          <td>${admin ? `<a class="portal-number billing-row-number" href="${href}" title="Open ${escapeAttribute(billingLabel(item))}">${escapeHtml(item.number)}</a>` : `<span class="portal-number">${escapeHtml(item.number)}</span>`}</td>
+          <td>${admin ? `<a class="billing-row-title" href="${open}">${escapeHtml(item.title)}</a>` : escapeHtml(item.title)}${dueLine}${note}</td>
           <td>${money(item.amountCents, item.currency)}${partlyPaid(item) ? `<small>${money(balanceDue(item), item.currency)} due</small>` : ""}</td>
           <td>${status}${detail ? `<small class="status-detail">${detailText}</small>` : ""}</td>
           <td>${action}</td>
@@ -855,13 +858,22 @@ function statusDialogs(client, readiness) {
         </dialog>
         <dialog class="admin-dialog" id="payment-dialog" aria-labelledby="payment-dialog-title">
           <div class="admin-dialog-head">
-            <h2 id="payment-dialog-title" data-payment-title>How it was paid</h2>
+            <h2 id="payment-dialog-title" data-payment-title>Payment</h2>
             <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
           </div>
           <form class="admin-stack-form" method="post" data-payment-form>
             <input type="hidden" name="return" value="list">
+            <input type="hidden" name="installment" value="" data-payment-installment>
+            <label for="list-edit-payment-amount" data-payment-amount hidden>Amount ($)
+              <input id="list-edit-payment-amount" name="amount" type="text" inputmode="decimal" maxlength="12">
+            </label>
             ${paymentFields("list-edit-payment", { date: todayInMichigan() })}
             <button class="button button-solid" type="submit">Save payment</button>
+          </form>
+          <form class="admin-dialog-actions" method="post" data-payment-remove hidden>
+            <input type="hidden" name="return" value="list">
+            <input type="hidden" name="installment" value="">
+            <button class="portal-logout-button" type="submit" data-payment-remove-label>Remove</button>
           </form>
         </dialog>
         <dialog class="admin-dialog" id="delete-dialog" aria-labelledby="delete-dialog-title">
@@ -886,7 +898,13 @@ function expenseRows(expenses, { base, totalLabel = "Job expenses" }) {
     const path = `${base}/expenses/${encodeURIComponent(expense.id)}`;
     const what = expense.description || expense.vendor;
     const name = `${what} · ${money(expense.amountCents)}`;
-    return `<tr>
+    // A click on the row opens it to edit: a popup filled in from these (billing.js), or its page.
+    const edit = [
+      ["href", `${path}/edit`], ["label", what], ["description", expense.description || ""], ["vendor", expense.vendor || ""],
+      ["category", categoryName(expense)], ["amount", moneyInput(expense.amountCents)], ["date", expense.spentOn],
+      ["paid", expense.paidWith?.key || ""], ["paid-label", expense.paidWith?.label || ""]
+    ].map(([key, value]) => ` data-${key}="${escapeAttribute(value)}"`).join("");
+    return `<tr class="billing-row-link" data-row-href="${path}/edit" data-edit-expense${edit}>
           <td>${dateText(expense.spentOn)}</td>
           <td>${escapeHtml(what)}${expense.description && expense.vendor ? `<small>${escapeHtml(expense.vendor)}</small>` : ""}</td>
           <td>${escapeHtml(categoryName(expense))}</td>
@@ -910,27 +928,32 @@ function expenseRows(expenses, { base, totalLabel = "Job expenses" }) {
       </dl>`;
 }
 
-// Add expense, compact: each box says what goes in it. Paid to suggests everyone in Labor and
+// The expense form, compact: each box says what goes in it. Paid to suggests everyone in Labor and
 // whoever earlier expenses went to, and Category the usual categories, but both take anything
-// typed. With `jobs` (the Books page) it starts with the job, where no job is overhead.
-function addExpenseFields({ action, payers, today, prefix, paidTo = [], jobs = null }) {
-  const categories = jobs ? [...JOB_CATEGORIES, ...OVERHEAD_CATEGORIES] : JOB_CATEGORIES;
+// typed. With `jobs` (the Books page) it starts with the job, where no job is overhead. `values`
+// fills it in to edit an expense (a new receipt replaces its receipt; none keeps it).
+function addExpenseFields({ action, payers, today, prefix, paidTo = [], jobs = null, values = null, submit = "Add expense", overhead = Boolean(jobs) }) {
+  const categories = overhead ? [...JOB_CATEGORIES, ...OVERHEAD_CATEGORIES] : JOB_CATEGORIES;
   const hidden = (id, label, control) => `<label class="in-box" for="${prefix}-${id}"><span class="visually-hidden">${label}</span>${control}</label>`;
   const shown = (id, label, control) => `<label class="in-box in-box-tagged" for="${prefix}-${id}"><span class="in-box-tag">${label}</span>${control}</label>`;
+  const value = (text) => (text ? ` value="${escapeAttribute(text)}"` : "");
+  // What paid an edited expense stays offered even if that account is gone.
+  const chosen = values?.paidWith?.key || "";
+  const options = chosen && !payers.some((option) => option.key === chosen) ? [...payers, values.paidWith] : payers;
   return `<form class="admin-stack-form expense-form" method="post" action="${escapeAttribute(action)}" enctype="multipart/form-data">
             ${jobs ? shown("job", "Job", `<select id="${prefix}-job" name="job"><option value="">Overhead (no job)</option>${jobs.map((client) => `<option value="${escapeAttribute(client.slug)}">${escapeHtml(client.label || client.name)}</option>`).join("")}</select>`) : ""}
-            ${hidden("description", "Expense", `<input id="${prefix}-description" name="description" type="text" maxlength="200" required placeholder="Expense">`)}
-            ${hidden("vendor", "Paid to", `<input id="${prefix}-vendor" name="vendor" type="text" maxlength="120" list="${prefix}-paid-to" autocomplete="off" placeholder="Paid to">`)}
+            ${hidden("description", "Expense", `<input id="${prefix}-description" name="description" type="text" maxlength="200" required placeholder="Expense"${value(values?.description)}>`)}
+            ${hidden("vendor", "Paid to", `<input id="${prefix}-vendor" name="vendor" type="text" maxlength="120" list="${prefix}-paid-to" autocomplete="off" placeholder="Paid to"${value(values?.vendor)}>`)}
             <datalist id="${prefix}-paid-to">${paidTo.map((name) => `<option value="${escapeAttribute(name)}"></option>`).join("")}</datalist>
-            ${hidden("category", "Category", `<input id="${prefix}-category" name="category" type="text" maxlength="60" list="${prefix}-categories" autocomplete="off" placeholder="Category">`)}
+            ${hidden("category", "Category", `<input id="${prefix}-category" name="category" type="text" maxlength="60" list="${prefix}-categories" autocomplete="off" placeholder="Category"${value(values ? categoryName(values) : "")}>`)}
             <datalist id="${prefix}-categories">${categories.map(([, name]) => `<option value="${escapeAttribute(name)}"></option>`).join("")}</datalist>
             <div class="expense-pair">
-              ${hidden("amount", "Amount", `<input id="${prefix}-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required placeholder="Amount">`)}
-              ${shown("date", "Date", `<input id="${prefix}-date" name="spentOn" type="date" required value="${escapeAttribute(today)}" max="${escapeAttribute(today)}">`)}
+              ${hidden("amount", "Amount", `<input id="${prefix}-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required placeholder="Amount"${value(values ? moneyInput(values.amountCents) : "")}>`)}
+              ${shown("date", "Date", `<input id="${prefix}-date" name="spentOn" type="date" required value="${escapeAttribute(values?.spentOn || today)}" max="${escapeAttribute(today)}">`)}
             </div>
-            ${shown("paid", "Paid with", `<select id="${prefix}-paid" name="paidWith">${payers.map((option) => `<option value="${escapeAttribute(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</select>`)}
+            ${shown("paid", "Paid with", `<select id="${prefix}-paid" name="paidWith">${options.map((option) => `<option value="${escapeAttribute(option.key)}"${option.key === chosen ? " selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select>`)}
             ${shown("receipt", "Receipt", `<input id="${prefix}-receipt" name="receipt" type="file" accept="application/pdf,image/*">`)}
-            <button class="button button-solid" type="submit">Add expense</button>
+            <button class="button button-solid" type="submit">${submit}</button>
           </form>`;
 }
 
@@ -942,6 +965,59 @@ function addExpenseDialog(options) {
           </div>
           ${addExpenseFields({ ...options, prefix: "add-expense" })}
         </dialog>`;
+}
+
+// An expense opened from its list: the same form, filled in from the row by billing.js.
+function editExpenseDialog({ payers, today, paidTo = [], overhead = false }) {
+  return `<dialog class="admin-dialog expense-dialog" id="edit-expense-dialog" aria-labelledby="edit-expense-title">
+          <div class="admin-dialog-head">
+            <h2 id="edit-expense-title" data-expense-title>Expense</h2>
+            <button class="admin-dialog-close" type="button" data-dialog-close aria-label="Close">×</button>
+          </div>
+          ${addExpenseFields({ action: "", payers, today, paidTo, prefix: "edit-expense", submit: "Save", overhead })}
+        </dialog>`;
+}
+
+// The same, as a page without scripts. `client` is the job's panel it came from (none: the Books
+// page).
+export function adminEditExpensePage({ client = null, expense, payers, today, paidTo = [], action, notice = null }) {
+  const back = client ? `/clients/admin?client=${encodeURIComponent(client.slug)}` : "/clients/admin/books";
+  return adminShell(`<div class="site-width portal-shell portal-detail">
+      <p class="portal-kicker"><a class="portal-inline-link" href="${back}">${escapeHtml(client ? client.name : "Books")}</a></p>
+      <h1 class="portal-heading portal-heading-sm">${escapeHtml(expense.description || expense.vendor)}</h1>
+      ${noticeMarkup(notice)}
+      <section class="admin-card admin-card-narrow">
+        ${addExpenseFields({ action, payers, today, paidTo, prefix: "edit-expense", values: expense, submit: "Save", overhead: !expense.clientSlug })}
+      </section>
+    </div>`, { title: "Expense", scripts: [BILLING_SCRIPT] });
+}
+
+// A payment opened from the project's Payments (the popup's form, as a page without scripts): a
+// payment toward the balance (`entry`), with its amount, or the one that settled the invoice.
+export function adminEditPaymentPage({ client, item, entry = null, notice = null }) {
+  const path = `/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.id)}`;
+  const installment = entry ? `<input type="hidden" name="installment" value="${escapeAttribute(entry.id)}">` : "";
+  const remove = entry ? (item.status === "open" ? ["remove-payment", "Remove"] : null) : ["reopen", "Mark as unpaid"];
+  return adminShell(`<div class="site-width portal-shell portal-detail">
+      <p class="portal-kicker"><a class="portal-inline-link" href="/clients/admin?client=${encodeURIComponent(client.slug)}">${escapeHtml(client.name)}</a></p>
+      <h1 class="portal-heading portal-heading-sm">Payment.</h1>
+      <p class="admin-meta"><a class="portal-inline-link" href="${path}">${escapeHtml(billingLabel(item))}</a> · ${escapeHtml(item.title)}</p>
+      ${noticeMarkup(notice)}
+      <section class="admin-card admin-card-narrow">
+        <form class="admin-stack-form" action="${path}/payment" method="post">
+          ${installment}
+          ${entry ? `<label for="edit-payment-amount">Amount ($)
+            <input id="edit-payment-amount" name="amount" type="text" inputmode="decimal" maxlength="12" required value="${escapeAttribute(moneyInput(entry.amountCents))}">
+          </label>` : ""}
+          ${paymentFields("edit-payment", { payment: entry || item.payment, date: String((entry ? entry.paidOn : item.paidAt) || todayInMichigan()).slice(0, 10) })}
+          <button class="button button-solid" type="submit">Save payment</button>
+        </form>
+        ${remove ? `<form class="admin-danger" action="${path}/${remove[0]}" method="post">
+          ${installment}
+          <button class="portal-logout-button" type="submit">${remove[1]}</button>
+        </form>` : ""}
+      </section>
+    </div>`, { title: "Payment", scripts: [BILLING_SCRIPT] });
 }
 
 // The page without scripts: a job's (client) or, from the Books page, any job's or overhead (jobs).
@@ -1413,25 +1489,39 @@ function projectLedger(book, slug) {
 }
 
 // Payments received on the project's invoices, newest first: each payment toward a balance and
-// the one that settled it, by hand or through Stripe, less Stripe refunds, with their notes.
+// the one that settled it, by hand or through Stripe, less Stripe refunds, with their notes. A
+// click on a payment recorded by hand opens it to edit (the payment popup, filled in from the row
+// by billing.js, or its page); a Stripe payment or refund opens its invoice.
 function paymentRows(items, basePath) {
   const rows = [];
   for (const item of items) {
     if (item.kind !== "invoice" || item.status === "void") continue;
     for (const entry of item.installments || []) {
-      rows.push({ item, date: entry.paidOn, how: entry.label, note: entry.note, amount: entry.amountCents });
+      rows.push({ item, entry, date: entry.paidOn, how: entry.label, note: entry.note, amount: entry.amountCents, edit: "installment" });
     }
     if (item.status !== "paid") continue;
     const payment = item.payment || {};
-    rows.push({ item, date: item.paidAt, how: payment.label || (payment.source === "stripe" ? "Stripe" : "Payment"), note: payment.note, amount: payment.amountCents ?? item.amountCents - installmentsTotal(item) });
-    for (const refund of liveRefunds(item)) rows.push({ item, date: refund.refundedAt, how: "Refund", note: "", amount: -refund.amountCents });
+    rows.push({ item, entry: payment, date: item.paidAt, how: payment.label || (payment.source === "stripe" ? "Stripe" : "Payment"), note: payment.note, amount: payment.amountCents ?? item.amountCents - installmentsTotal(item), edit: payment.source === "manual" ? "settled" : "" });
+    for (const refund of liveRefunds(item)) rows.push({ item, date: refund.refundedAt, how: "Refund", note: "", amount: -refund.amountCents, edit: "" });
   }
   if (!rows.length) return '<p class="portal-empty">No payments yet.</p>';
   rows.sort((left, right) => String(right.date || "").localeCompare(String(left.date || "")));
   const total = rows.reduce((sum, row) => sum + row.amount, 0);
+  const opens = (row) => {
+    const path = `${basePath}/${encodeURIComponent(row.item.id)}`;
+    if (!row.edit) return ` data-row-href="${path}"`;
+    const installment = row.edit === "installment" ? row.entry.id : "";
+    const remove = installment ? (row.item.status === "open" ? "remove-payment" : "") : "reopen";
+    const data = [
+      ["href", path], ["installment", installment], ["amount", installment ? moneyInput(row.amount) : ""], ["method", row.entry.method || ""],
+      ["method-name", row.entry.methodName || ""], ["note", row.entry.note || ""], ["paid-on", String(row.date || "").slice(0, 10)],
+      ["label", `${billingLabel(row.item)} · ${money(row.amount, row.item.currency)}`], ["remove", remove]
+    ].map(([key, value]) => ` data-${key}="${escapeAttribute(value)}"`).join("");
+    return ` data-row-href="${path}/payment${installment ? `?installment=${encodeURIComponent(installment)}` : ""}" data-edit-payment${data}`;
+  };
   return `<table class="portal-table payments-table">
           <thead><tr><th scope="col">Date</th><th scope="col">Invoice</th><th scope="col">Paid by</th><th scope="col">Notes</th><th scope="col">Amount</th></tr></thead>
-          <tbody>${rows.map((row) => `<tr>
+          <tbody>${rows.map((row) => `<tr class="billing-row-link"${opens(row)}>
             <td>${row.date ? dateText(row.date) : ""}</td>
             <td><a class="portal-inline-link" href="${basePath}/${encodeURIComponent(row.item.id)}">${escapeHtml(billingLabel(row.item))}</a><small>${escapeHtml(row.item.title)}</small></td>
             <td>${escapeHtml(row.how || "")}</td>
@@ -1557,6 +1647,7 @@ export function adminDashboardPage({ clients, selected, root = selected, project
         ${statusDialogs(selected, readiness)}
         ${addPaymentDialog({ client: selected, billing, readiness })}
         ${addExpenseDialog({ action: `${base}/expenses`, payers, today, paidTo })}
+        ${expenses.length ? editExpenseDialog({ payers, today, paidTo }) : ""}
       </section>`;
     })()
     : `<section class="admin-panel"><p class="portal-empty">Choose a client portal to manage its quotes, invoices and documents.</p></section>`;
@@ -1746,7 +1837,11 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
     }
   }
 
-  const loadTemplate = creating ? templatePicker(templates, `${actionPath}/new`) : "";
+  // Beside the heading: Templates on a new one; editing, its own page (a click on its row in the
+  // list opens this editor).
+  const loadTemplate = creating
+    ? templatePicker(templates, `${actionPath}/new`)
+    : mode === "edit" ? `<a class="button button-outline billing-editor-open" href="${escapeAttribute(backPath)}">${kind === "invoice" ? "Invoice" : "Quote"} ${escapeHtml(number)}</a>` : "";
 
   const submitLabel = mode === "edit" ? "Save changes" : template ? "Save template" : kind === "invoice" ? "Post invoice" : "Post quote";
 
@@ -1936,11 +2031,11 @@ function otherProjectFold({ base, client, item, projects }) {
           </form>`);
 }
 
-// Payments toward the balance, each with Remove while the invoice is open.
+// Payments toward the balance, each opening to edit, with Remove while the invoice is open.
 function installmentList(item, base, { removable }) {
   const installments = item.installments || [];
   if (!installments.length) return "";
-  return `<ul class="admin-activity">${installments.map((entry) => `<li><span>${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}</span>${removable
+  return `<ul class="admin-activity">${installments.map((entry) => `<li><a class="payment-change" href="${base}/payment?installment=${encodeURIComponent(entry.id)}" title="Edit this payment">${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}</a>${removable
     ? `
             <form class="admin-manage" action="${base}/remove-payment" method="post"><input type="hidden" name="installment" value="${escapeAttribute(entry.id)}"><button class="portal-logout-button" type="submit">Remove</button></form>`
     : ""}</li>`).join("")}</ul>`;
@@ -2290,6 +2385,7 @@ export function adminBooksPage({ report, check, log = null, clients, today, noti
         ${activity}
       </section>
       ${addExpenseDialog({ action: "/clients/admin/books/expenses", payers, today, paidTo, jobs: jobOptions })}
+      ${overheadExpenses.length ? editExpenseDialog({ payers, today, paidTo, overhead: true }) : ""}
     </div>`, { title: "Books", scripts: [BILLING_SCRIPT] });
 }
 

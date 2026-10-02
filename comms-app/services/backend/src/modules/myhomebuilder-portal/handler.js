@@ -139,6 +139,8 @@ import {
   adminDashboardPage,
   adminAddExpensePage,
   adminAddPaymentPage,
+  adminEditExpensePage,
+  adminEditPaymentPage,
   adminDocumentsPage,
   adminJobBookPage,
   adminPhotoDatePage,
@@ -347,6 +349,8 @@ const NOTICES = {
   "payment-date-invalid": { text: "Enter the date the payment was received.", tone: "error" },
   "payment-partial": { text: "Payment added. The rest of the invoice is still due." },
   "expense-added": { text: "Expense added." },
+  "expense-updated": { text: "Expense saved." },
+  "expense-updated-unfiled": { text: "Expense saved. Its bank transaction no longer matches, so it is back under To file in Banking." },
   "access-saved": { text: "Saved." },
   "read-only": { text: "This project is read only." },
   "expense-deleted": { text: "Expense deleted and taken out of the books." },
@@ -1348,45 +1352,84 @@ function withListedPayments(item, payments) {
   return { ...item, installments: sorted.map(toEntry), status: "paid", paidAt: paidOn, payment: { source: "manual", ...details, amountCents, recordedAt } };
 }
 
-// Adds a job expense from the Add expense form (multipart, with an optional receipt) and returns
-// the notice to show. `payers` are what it can be paid with (expenses.js paidWithOptions).
-// Records an expense and returns the notice to show: a cost of `target`'s job, or overhead with no
-// target (the Books page). The category is chosen or typed (expenses.js resolveCategory).
-async function addExpense({ store, target, form, payers, ip }) {
+// Reads the expense form (Add expense, or an expense opened from its list): what it was, who it
+// was paid to, its category (chosen or typed, expenses.js resolveCategory), amount, date and what
+// paid it (`payers`, expenses.js paidWithOptions; `kept` is the one an edited expense already had,
+// accepted even if that account is gone). Returns { fields } or { error } with the notice.
+function readExpenseForm(form, { target, payers, kept = null }) {
   const spentOn = String(form.get("spentOn") || "").trim();
   const vendor = String(form.get("vendor") || "").trim().replaceAll(/\s+/gu, " ");
   const description = String(form.get("description") || "").trim().replaceAll(/\s+/gu, " ");
   const resolved = resolveCategory(form.get("category"), { overhead: !target });
   const amountCents = parseMoney(String(form.get("amount") || ""));
-  const paidWith = payers.find((option) => option.key === String(form.get("paidWith") || ""));
-  if (!isValidDate(spentOn) || spentOn > todayInMichigan()) return "expense-date-invalid";
-  if ((!vendor && !description) || vendor.length > 120 || description.length > 200) return "expense-vendor-required";
-  if (!resolved) return "expense-category-invalid";
-  const category = resolved.code;
-  if (!amountCents || amountCents > MAX_TOTAL_CENTS) return "expense-amount-invalid";
-  if (!paidWith) return "expense-paid-invalid";
-  const id = randomId(12);
-  let receipt = null;
-  const file = form.get("receipt");
-  if (file && typeof file.arrayBuffer === "function" && file.size > 0) {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const type = isPdf(bytes) ? "application/pdf" : String(file.type || "").split(";")[0].trim().toLowerCase();
-    if (bytes.byteLength > MAX_UPLOAD_BYTES || !["application/pdf", "image/jpeg", "image/png", "image/webp", "image/heic"].includes(type)) return "expense-receipt-invalid";
-    const name = safeFileName(file.name);
-    receipt = { key: `expenses/${target ? target.slug : "overhead"}/${id}/${name}`, name, type };
-    await putFile(store, receipt.key, bytes, type);
-  }
-  const expense = {
-    id, clientSlug: target ? target.slug : null, spentOn, vendor, description, category, categoryName: resolved.name, amountCents,
-    paidWith: { key: paidWith.key, account: paidWith.account, label: paidWith.label },
-    receipt, bankTransactionId: null, createdAt: new Date().toISOString()
+  const paidKey = String(form.get("paidWith") || "");
+  const paidWith = payers.find((option) => option.key === paidKey) || (kept?.key === paidKey ? kept : null);
+  if (!isValidDate(spentOn) || spentOn > todayInMichigan()) return { error: "expense-date-invalid" };
+  if ((!vendor && !description) || vendor.length > 120 || description.length > 200) return { error: "expense-vendor-required" };
+  if (!resolved) return { error: "expense-category-invalid" };
+  if (!amountCents || amountCents > MAX_TOTAL_CENTS) return { error: "expense-amount-invalid" };
+  if (!paidWith) return { error: "expense-paid-invalid" };
+  return {
+    fields: {
+      spentOn, vendor, description, category: resolved.code, categoryName: resolved.name, amountCents,
+      paidWith: { key: paidWith.key, account: paidWith.account, label: paidWith.label }
+    }
   };
+}
+
+// The receipt sent with the expense form (a PDF or photo), stored under the expense. Returns
+// { receipt } (null when none was sent) or { error }.
+async function storeReceipt(store, form, { target, id }) {
+  const file = form.get("receipt");
+  if (!file || typeof file.arrayBuffer !== "function" || !file.size) return { receipt: null };
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const type = isPdf(bytes) ? "application/pdf" : String(file.type || "").split(";")[0].trim().toLowerCase();
+  if (bytes.byteLength > MAX_UPLOAD_BYTES || !["application/pdf", "image/jpeg", "image/png", "image/webp", "image/heic"].includes(type)) return { error: "expense-receipt-invalid" };
+  const name = safeFileName(file.name);
+  const receipt = { key: `expenses/${target ? target.slug : "overhead"}/${id}/${name}`, name, type };
+  await putFile(store, receipt.key, bytes, type);
+  return { receipt };
+}
+
+// Records an expense from the Add expense form (multipart, with an optional receipt) and returns
+// the notice to show: a cost of `target`'s job, or overhead with no target (the Books page).
+async function addExpense({ store, target, form, payers, ip }) {
+  const read = readExpenseForm(form, { target, payers });
+  if (read.error) return read.error;
+  const id = randomId(12);
+  const upload = await storeReceipt(store, form, { target, id });
+  if (upload.error) return upload.error;
+  const { fields } = read;
+  const expense = { id, clientSlug: target ? target.slug : null, ...fields, receipt: upload.receipt, bankTransactionId: null, createdAt: new Date().toISOString() };
   await putExpense(store, expense);
   await record(store, {
-    actor: "admin", ip, action: "expense.added", clientSlug: target ? target.slug : null, amountCents, expense, data: { expenseId: id },
-    summary: `Added ${target ? `an expense for ${target.name}` : "an overhead expense"}: ${[description, vendor].filter(Boolean).join(" · ")} · ${resolved.name} · ${money(amountCents)}, paid with ${paidWith.label}`
+    actor: "admin", ip, action: "expense.added", clientSlug: expense.clientSlug, amountCents: fields.amountCents, expense, data: { expenseId: id },
+    summary: `Added ${target ? `an expense for ${target.name}` : "an overhead expense"}: ${[fields.description, fields.vendor].filter(Boolean).join(" · ")} · ${fields.categoryName} · ${money(fields.amountCents)}, paid with ${fields.paidWith.label}`
   });
   return "expense-added";
+}
+
+// Changes an expense from its form (a click on its row opens it), keeping its receipt unless a new
+// one is sent. Its books follow. A bank transaction filed as this expense goes back under To file
+// in Banking when the amount or what paid it changes, since it no longer matches.
+async function editExpense({ store, expense, target, form, payers, ip }) {
+  const read = readExpenseForm(form, { target, payers, kept: expense.paidWith });
+  if (read.error) return read.error;
+  const upload = await storeReceipt(store, form, { target, id: expense.id });
+  if (upload.error) return upload.error;
+  const changed = { ...expense, ...read.fields, receipt: upload.receipt || expense.receipt || null, updatedAt: new Date().toISOString() };
+  let unfiled = false;
+  if (expense.bankTransactionId && (changed.amountCents !== expense.amountCents || changed.paidWith.account !== expense.paidWith?.account)) {
+    unfiled = await unfileExpenseMatch(store, expense, { ip });
+    changed.bankTransactionId = null;
+  }
+  await putExpense(store, changed);
+  const describe = (entry) => `${[entry.description, entry.vendor].filter(Boolean).join(" · ")} · ${categoryName(entry)} · ${money(entry.amountCents)}, ${formatDate(entry.spentOn)}, paid with ${entry.paidWith?.label || "unknown"}`;
+  await record(store, {
+    actor: "admin", ip, action: "expense.edited", clientSlug: changed.clientSlug, amountCents: changed.amountCents, reason: "changed", expense: changed, data: { expenseId: expense.id },
+    summary: `Changed ${target ? `the expense for ${target.name}` : "the overhead expense"}: ${describe(expense)} → ${describe(changed)}${unfiled ? "; its bank transaction is back under To file" : ""}`
+  });
+  return unfiled ? "expense-updated-unfiled" : "expense-updated";
 }
 
 // Records a payment received outside Stripe for an open invoice and returns the notice to show.
@@ -1434,6 +1477,51 @@ async function addPayment({ env, store, target, item, form, readiness, origin, n
   if (!receipt.ok) return "payment-recorded";
   await note({ action: "receipt.emailed", item: updated, summary: `Emailed the receipt for ${billingLabel(updated)} to ${receiptTo.join(", ")}` });
   return "payment-recorded-receipt";
+}
+
+// Changes a payment toward an invoice's balance (a click on it in the project's Payments opens
+// it): its amount, how it was paid, when, and its notes. The books follow. On an open invoice, an
+// amount that brings the payments to the total settles it (this payment becomes the settling
+// one) and more is refused. On a paid one, the payment recorded by hand that settled it takes up
+// the difference; one paid through Stripe keeps what Stripe charged, so the earlier payments keep
+// their amounts. Returns the notice to show.
+async function editInstallment({ env, store, item, form, note }) {
+  if (item.kind !== "invoice" || !["open", "paid"].includes(item.status)) return "not-payable";
+  const entry = (item.installments || []).find((candidate) => candidate.id === String(form?.get("installment") || ""));
+  if (!entry) return "invalid";
+  const entered = parseManualPayment(form, { reference: entry.reference });
+  if (entered.error) return entered.error;
+  const typed = String(form.get("amount") || "").trim();
+  const amountCents = typed ? parseMoney(typed) : entry.amountCents;
+  if (!amountCents || amountCents < 0) return "payment-amount-invalid";
+  const { paidOn, ...details } = entered;
+  const { note: _note, ...previous } = entry;
+  const now = new Date().toISOString();
+  const changed = { ...previous, ...details, amountCents, paidOn, updatedAt: now };
+  const others = item.installments.filter((candidate) => candidate.id !== entry.id);
+  const paidBefore = others.reduce((sum, candidate) => sum + candidate.amountCents, 0) + amountCents;
+  let updated;
+  if (item.status === "open") {
+    if (paidBefore > item.amountCents) return "payment-over-balance";
+    if (item.checkoutSessionId && amountCents !== entry.amountCents) await expireCheckoutSession(env, item.checkoutSessionId);
+    if (paidBefore === item.amountCents) {
+      const { id: _id, paidOn: _paidOn, ...settling } = changed;
+      updated = { ...item, installments: others, status: "paid", paidAt: paidOn, payment: { ...settling, source: "manual", amountCents } };
+    } else {
+      updated = { ...item, installments: item.installments.map((candidate) => (candidate.id === entry.id ? changed : candidate)) };
+    }
+  } else {
+    if (amountCents !== entry.amountCents && item.payment?.source !== "manual") return "payment-from-stripe";
+    if (paidBefore >= item.amountCents) return "payment-over-balance";
+    const settling = item.payment?.source === "manual" ? { payment: { ...item.payment, amountCents: item.amountCents - paidBefore } } : {};
+    updated = { ...item, installments: item.installments.map((candidate) => (candidate.id === entry.id ? changed : candidate)), ...settling };
+  }
+  await putBilling(store, updated);
+  await note({
+    action: "payment.corrected", item: updated, amountCents,
+    summary: `Changed the ${entry.label} payment of ${money(entry.amountCents, item.currency)} (${formatDate(entry.paidOn)}) on ${billingLabel(item)} to ${changed.label} ${money(amountCents, item.currency)}, received ${formatDate(paidOn)}${updated.status === "paid" && item.status === "open" ? "; it is paid in full" : ""}`
+  });
+  return updated.status === "paid" && item.status === "open" ? "payment-recorded" : "payment-updated";
 }
 
 async function handleAdminBilling(context, store, target, id, action, readiness, origin) {
@@ -1615,6 +1703,16 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${item.kind}-deleted${renumbered ? "&also=renumbered" : ""}`);
   }
 
+  // A payment's page, the payment popup's form without scripts: ?installment=<id> for a payment
+  // toward the balance, none for the payment recorded by hand that settled the invoice.
+  if (action === "payment" && isRead) {
+    const installment = url.searchParams.get("installment");
+    const entry = installment ? (item.installments || []).find((candidate) => candidate.id === installment) : null;
+    const editable = item.kind === "invoice" && (installment ? Boolean(entry) && ["open", "paid"].includes(item.status) : item.status === "paid" && item.payment?.source === "manual");
+    if (!editable) return redirectResponse(itemPath);
+    return scriptedHtmlResponse(adminEditPaymentPage({ client: target, item, entry, notice: noticeFromQuery(url) }));
+  }
+
   if (method !== "POST") return methodNotAllowedResponse(["POST"]);
 
   // Send to another project, for one entered in the wrong project: it moves there with its
@@ -1675,7 +1773,7 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   // Removes a payment toward the balance added by mistake, while the invoice is still open.
   if (action === "remove-payment") {
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
-    const back = (notice) => redirectResponse(`${itemPath}?notice=${notice}`);
+    const back = (notice) => redirectResponse(form?.get("return") === "list" ? `/clients/admin?client=${encodeURIComponent(slug)}&notice=${notice}` : `${itemPath}?notice=${notice}`);
     if (item.kind !== "invoice" || item.status !== "open") return back("not-payable");
     const removed = (item.installments || []).find((entry) => entry.id === String(form?.get("installment") || ""));
     if (!removed) return back("invalid");
@@ -1691,9 +1789,11 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
   // Stripe payments keep what Stripe recorded. The receipt is not re-sent; "Resend receipt" sends
   // the corrected one. A reference saved before notes stays.
   // Saved from the invoice page, or from the admin list's How it was paid popup (return=list).
+  // With `installment`, it changes that payment toward the balance instead (editInstallment).
   if (action === "payment") {
     const form = await readBoundedForm(context.request, MAX_FORM_BYTES);
     const back = (notice) => redirectResponse(form?.get("return") === "list" ? `/clients/admin?client=${encodeURIComponent(slug)}&notice=${notice}` : `${itemPath}?notice=${notice}`);
+    if (form?.get("installment")) return back(await editInstallment({ env, store, item, form, note }));
     if (item.kind !== "invoice" || item.status !== "paid") return back("not-payable");
     if (item.payment?.source !== "manual") return back("payment-from-stripe");
     const entered = parseManualPayment(form, { reference: item.payment?.reference });
@@ -1777,7 +1877,7 @@ async function handleBooks(context, store, pathname, url) {
   }
 
   // Add expense from the Books page: a job's, or overhead with no job. Its receipt and delete.
-  const expenseMatch = pathname.match(/^\/clients\/admin\/books\/expenses(?:\/([A-Za-z0-9_-]+))?(?:\/(receipt|delete))?$/u);
+  const expenseMatch = pathname.match(/^\/clients\/admin\/books\/expenses(?:\/([A-Za-z0-9_-]+))?(?:\/(receipt|delete|edit))?$/u);
   if (expenseMatch) {
     const [, id, action] = expenseMatch;
     if (!id || (id === "new" && !action)) {
@@ -1799,6 +1899,17 @@ async function handleBooks(context, store, pathname, url) {
       if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
       const object = expense.receipt ? await getFile(store, expense.receipt.key) : null;
       return object ? fileResponse(object, expense.receipt.name, expense.receipt.type) : notFoundResponse(null, true);
+    }
+    // Edit, from the Books page's list: its job stays as it is.
+    if (action === "edit") {
+      const payers = paidWithOptions(await listBankAccounts(store));
+      const job = expense.clientSlug ? clients.find((client) => client.slug === expense.clientSlug) || null : null;
+      const editPath = `/clients/admin/books/expenses/${encodeURIComponent(expense.id)}/edit`;
+      if (isRead) return scriptedHtmlResponse(adminEditExpensePage({ client: null, expense, payers, today: todayInMichigan(), paidTo: await expensePaidTo(store), action: editPath, notice: noticeFromQuery(url) }));
+      if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
+      const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 8192);
+      const result = form ? await editExpense({ store, expense, target: job, form, payers, ip: requestIp(context.request) }) : "invalid";
+      return redirectResponse(result.startsWith("expense-updated") ? `/clients/admin/books?notice=${result}` : `${editPath}?notice=${result}`);
     }
     if (method !== "POST") return methodNotAllowedResponse(["POST"]);
     await removeExpense(store, expense, { ip: requestIp(context.request), jobName: names.get(expense.clientSlug) || "" });
@@ -2534,6 +2645,16 @@ async function routePortalRequest(context) {
             if (method !== "POST") return methodNotAllowedResponse(["POST"]);
             await removeExpense(store, expense, { ip: requestIp(context.request), jobName: target.name });
             return redirectResponse(`${back}&notice=expense-deleted`);
+          }
+          // Edit: the list opens it in a popup; this is the same form as a page without scripts.
+          if (action === "edit") {
+            const payers = paidWithOptions(await listBankAccounts(store));
+            const action = `/clients/admin/clients/${encodeURIComponent(slug)}/expenses/${encodeURIComponent(expense.id)}/edit`;
+            if (isRead) return scriptedHtmlResponse(adminEditExpensePage({ client: target, expense, payers, today: todayInMichigan(), paidTo: await expensePaidTo(store), action, notice: noticeFromQuery(url) }));
+            if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
+            const form = await readBoundedMultipart(context.request, MAX_UPLOAD_BYTES + 8192);
+            const result = form ? await editExpense({ store, expense, target, form, payers, ip: requestIp(context.request) }) : "invalid";
+            return redirectResponse(result.startsWith("expense-updated") ? `${back}&notice=${result}` : `${action}?notice=${result}`);
           }
           return notFoundResponse(session, admin);
         }

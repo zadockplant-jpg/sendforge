@@ -2522,7 +2522,7 @@ test("invoice numbers follow their dates, the same date in the order entered, an
   const numbers = async () => Object.fromEntries(await Promise.all([late, early, sameFirst, sameSecond].map(async (item) => [(await stored(item)).title, (await stored(item)).number])));
   assert.deepEqual(await numbers(), { Early: "1", "Same day, entered first": "2", "Same day, entered second": "3", Late: "4" });
   const list = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
-  const order = (page) => [...page.matchAll(/<td><span class="portal-number">(\d+)<\/span><\/td>/gu)].map((match) => match[1]);
+  const order = (page) => [...page.matchAll(/<td><a class="portal-number billing-row-number" href="[^"]+" title="Open Invoice \d+">(\d+)<\/a><\/td>/gu)].map((match) => match[1]);
   assert.deepEqual(order(await list()), ["4", "3", "2", "1"], "newest first; on the same date, the later entry first");
 
   // Numbers changed outside the portal are put back when the admin panel opens.
@@ -2981,6 +2981,83 @@ test("a bank withdrawal for a recorded expense is matched to it and posts nothin
   await request(`/clients/admin/clients/muskegon-addition/expenses/${expense.id}/delete`, form({}, adminCookie));
   assert.equal((await bankRecords())[0].target, null);
   assert.deepEqual(await ledgerBalances(), {});
+});
+
+// ---------- Editing from the lists ----------
+
+test("a click on a row of Invoices, Payments or Purchases opens it to edit, and the books follow each change", async () => {
+  const adminCookie = await loginAsAdmin();
+  const base = "/clients/admin/clients/muskegon-addition";
+  const panel = async () => (await request(`/clients/admin?client=muskegon-addition`, { headers: { Cookie: adminCookie } })).text();
+
+  // Invoices: the row opens the editor, the number the invoice's page; the editor links back to it.
+  const { item } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
+  const path = `${base}/billing/${item.id}`;
+  let list = await panel();
+  assert.match(list, new RegExp(`<tr class="billing-row-link" data-row-href="${path}/edit">\\s*<td><a class="portal-number billing-row-number" href="${path}" title="Open Invoice 1">1</a></td>\\s*<td><a class="billing-row-title" href="${path}/edit">Framing</a>`, "u"));
+  assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), new RegExp(`<a class="button button-outline billing-editor-open" href="${path}">Invoice 1</a>`, "u"));
+
+  // Payments: a payment toward the balance opens the payment popup filled in (or its page), and
+  // its amount, method, date and notes change.
+  await request(`${path}/record-payment`, form({ amount: "300", method: "check", paidOn: "2026-09-20", note: "Deposit" }, adminCookie));
+  const [deposit] = (await stored(item)).installments;
+  list = await panel();
+  assert.match(list, new RegExp(`data-row-href="${path}/payment\\?installment=${deposit.id}" data-edit-payment data-href="${path}" data-installment="${deposit.id}" data-amount="300\\.00" data-method="check" data-method-name="" data-note="Deposit" data-paid-on="2026-09-20" data-label="Invoice 1 · \\$300\\.00" data-remove="remove-payment">`, "u"));
+  assert.match(list, /<input type="hidden" name="installment" value="" data-payment-installment>\s*<label for="list-edit-payment-amount" data-payment-amount hidden>Amount/u);
+  const paymentPage = await (await request(`${path}/payment?installment=${deposit.id}`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(paymentPage, /name="amount" type="text" inputmode="decimal" maxlength="12" required value="300\.00"/u);
+  assert.match(paymentPage, />Remove<\/button>/u);
+  const changed = await request(`${path}/payment`, form({ return: "list", installment: deposit.id, amount: "350", method: "zelle", paidOn: "2026-09-21", note: "Deposit, by Zelle" }, adminCookie));
+  assert.equal(changed.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=payment-updated");
+  let saved = await stored(item);
+  assert.deepEqual([saved.installments[0].amountCents, saved.installments[0].label, saved.installments[0].paidOn, saved.installments[0].note], [35000, "Zelle", "2026-09-21", "Deposit, by Zelle"]);
+  assert.deepEqual(await ledgerBalances(), { 1100: 65000, 1300: 35000, 4000: -100000 });
+  assert.match((await request(`${path}/payment`, form({ installment: deposit.id, amount: "1,200", method: "zelle", paidOn: "2026-09-21" }, adminCookie))).headers.get("Location"), /notice=payment-over-balance$/u);
+
+  // Brought to the total, it settles the invoice.
+  assert.match((await request(`${path}/payment`, form({ installment: deposit.id, amount: "1,000", method: "zelle", paidOn: "2026-09-21" }, adminCookie))).headers.get("Location"), /notice=payment-recorded$/u);
+  saved = await stored(item);
+  assert.deepEqual([saved.status, saved.installments.length, saved.payment.amountCents, saved.paidAt], ["paid", 0, 100000, "2026-09-21"]);
+  assert.deepEqual(await ledgerBalances(), { 1300: 100000, 4000: -100000 });
+  // The payment that settled it opens with Mark as unpaid, and returns to the list.
+  list = await panel();
+  assert.match(list, new RegExp(`data-row-href="${path}/payment" data-edit-payment data-href="${path}" data-installment="" data-amount="" data-method="zelle"[^>]*data-remove="reopen">`, "u"));
+  assert.match((await request(`${path}/reopen`, form({ return: "list" }, adminCookie))).headers.get("Location"), /^\/clients\/admin\?client=muskegon-addition&notice=payment-removed$/u);
+
+  // Purchases: the row opens the expense popup filled in (or its page); a change re-posts its books.
+  const today = todayInMichigan();
+  await request(`${base}/expenses`, crewForm({ spentOn: today, vendor: "Menards", description: "Joist hangers", category: "Materials", amount: "88.10", paidWith: "account:1000" }, null, adminCookie));
+  const [expense] = await expenseRecords();
+  list = await panel();
+  assert.match(list, new RegExp(`<tr class="billing-row-link" data-row-href="${base}/expenses/${expense.id}/edit" data-edit-expense data-href="${base}/expenses/${expense.id}/edit" data-label="Joist hangers" data-description="Joist hangers" data-vendor="Menards" data-category="Materials" data-amount="88\\.10" data-date="${today}" data-paid="account:1000" data-paid-label="Business checking">`, "u"));
+  assert.match(list, /<dialog class="admin-dialog expense-dialog" id="edit-expense-dialog"/u);
+  assert.match(await (await request(`${base}/expenses/${expense.id}/edit`, { headers: { Cookie: adminCookie } })).text(), /name="description" type="text" maxlength="200" required placeholder="Expense" value="Joist hangers"/u);
+  const edited = await request(`${base}/expenses/${expense.id}/edit`, crewForm({ spentOn: today, vendor: "Menards", description: "Joist hangers and screws", category: "Materials", amount: "96.40", paidWith: "personal" }, null, adminCookie));
+  assert.equal(edited.headers.get("Location"), "/clients/admin?client=muskegon-addition&notice=expense-updated");
+  const [after] = await expenseRecords();
+  assert.deepEqual([after.description, after.amountCents, after.paidWith.key], ["Joist hangers and screws", 9640, "personal"]);
+  assert.deepEqual(await ledgerBalances(), { 1100: 100000, 3000: -9640, 4000: -100000, 5200: 9640 });
+  assert.ok(await db("mhb_activity").where({ action: "expense.edited" }).first());
+  assert.match((await request(`${base}/expenses/${expense.id}/edit`, crewForm({ spentOn: today, vendor: "", description: "", category: "Materials", amount: "1", paidWith: "personal" }, null, adminCookie))).headers.get("Location"), /\/edit\?notice=expense-vendor-required$/u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
+});
+
+test("an expense matched to a bank withdrawal keeps the match for small changes, and lets it go when the amount changes", async () => {
+  const adminCookie = await loginAsAdmin();
+  const today = todayInMichigan();
+  await request("/clients/admin/clients/muskegon-addition/expenses", crewForm({ spentOn: today, vendor: "Menards", category: "5200", amount: "88.10", paidWith: "account:1000" }, null, adminCookie));
+  const [expense] = await expenseRecords();
+  await request("/clients/admin/bank/upload", statement(`Posting Date,Description,Amount\n${today.slice(5, 7)}/${today.slice(8)}/${today.slice(0, 4)},MENARDS MUSKEGON MI,-88.10\n`, { account: "new", name: "Checking", sign: "out-negative" }, adminCookie));
+  const txn = await bankId("MENARDS");
+  await fileTo(txn, `expense:${expense.id}`, adminCookie);
+  const edit = (fields) => request(`/clients/admin/clients/muskegon-addition/expenses/${expense.id}/edit`, crewForm({ spentOn: today, vendor: "Menards", category: "Materials", amount: "88.10", paidWith: "account:1000", ...fields }, null, adminCookie));
+
+  assert.match((await edit({ description: "Lumber" })).headers.get("Location"), /notice=expense-updated$/u);
+  assert.equal((await expenseRecords())[0].bankTransactionId, txn, "still matched");
+  assert.match((await edit({ amount: "90" })).headers.get("Location"), /notice=expense-updated-unfiled$/u);
+  assert.equal((await expenseRecords())[0].bankTransactionId, null);
+  assert.equal((await bankRecords())[0].target, null, "the withdrawal waits to be filed again");
+  assert.deepEqual(await ledgerBalances(), { 1000: -9000, 5200: 9000 });
 });
 
 // ---------- Upload document ----------

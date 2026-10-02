@@ -281,6 +281,23 @@ projects. Each export is in the activity log.
   - **Purchases:** its expenses (see Job expenses).
   - **Documents**, with **Upload Document** folded at their foot.
   - Each one stays open or folded as it was left, in that browser (`localStorage`).
+- **A click on a row opens it to edit** (each row's own links, buttons and checkboxes keep their
+  jobs; without scripts each opens the same form as a page):
+  - **Invoices:** a quote's or invoice's editor (`/billing/<id>/edit`; its page once it can no
+    longer be edited). Its number opens its page, and the editor's heading links back to it.
+  - **Payments:** the payment popup, filled in. A payment toward the balance changes its amount,
+    paid by, date and notes (`POST /billing/<id>/payment` with `installment`; its page is
+    `/billing/<id>/payment?installment=<id>`), with Remove while the invoice is open. On an open
+    invoice an amount that brings the payments to the total settles it, and more is refused. On
+    a paid one the payment recorded by hand that settled it takes up the difference; one paid
+    through Stripe keeps its amount, so the earlier payments keep theirs. The payment that settled
+    an invoice opens with Mark as unpaid. A Stripe payment or refund opens its invoice. The books
+    follow each change (activity `payment.corrected`).
+  - **Purchases:** the expense popup, filled in (`/expenses/<id>/edit`; on the Books page
+    `/clients/admin/books/expenses/<id>/edit`). A new receipt replaces its receipt; none keeps it.
+    Its books are reversed and posted again (activity `expense.edited`). An expense matched to a
+    bank withdrawal keeps the match unless its amount or what paid it changes; then the
+    withdrawal goes back under To file in Banking.
 - **No dropdown arrows** anywhere in the portal: a box that opens a list when clicked is the menu.
 - **The quote and invoice editor** has no Cancel (the project's name above the heading goes back).
   - **Templates**, beside a new quote or invoice's heading, opens the chosen template as soon as it
@@ -373,7 +390,7 @@ records a cost of that client portal's job. The form is compact: each box says w
   paid yet), and an optional receipt (PDF or photo).
 
 The panel's **Purchases** lists the job's expenses with their total, each with its receipt and a trash button that
-asks first. **Add expense on the Books page** does the same with a job choice. With no job it is
+asks first; a click on one opens it to edit. **Add expense on the Books page** does the same with a job choice. With no job it is
 overhead (`client_slug` empty), a typed category going to Other overhead. Clients see expenses only
 on a project shown read only.
 
