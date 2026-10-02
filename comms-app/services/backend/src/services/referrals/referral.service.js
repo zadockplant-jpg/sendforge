@@ -155,6 +155,13 @@ export const PER_SALE_RATE_PRODUCTS = Object.freeze(["rose-colored-glasses", "fo
 // TabForge's affiliate rate is the one their comp code or the owner set.
 export const AFFILIATE_PER_SALE_CENTS = Object.freeze({ forgedrop: 1000 });
 
+// Everyone's per-sale rate, in place of the milestones: every account that
+// refers a customer is paid this on each sale of the product, unless the
+// owner set another rate on its code. DropForge from 2026-10-02 (the owner:
+// "Earn $10 per Referral", chosen as $10 for every owner, paid per sale).
+// Rewards already queued on the milestones stand.
+export const PER_SALE_CENTS = Object.freeze({ forgedrop: 1000 });
+
 // Rose Colored Glasses rewards queued before it moved onto milestones: one
 // flat dollar per customer. They still stand, and a refund still cancels them.
 const LEGACY_FLAT_REFERRAL_PRODUCTS = Object.freeze(["rose-colored-glasses"]);
@@ -267,8 +274,9 @@ export function customPerSaleCentsForCode(referralCode, productSlug) {
 /**
  * What this referrer is paid on every sale of a product, or null when they
  * are paid on the product's milestones. The owner's own rate wins; otherwise
- * an affiliate gets the affiliate level for the product. Zero means the
- * person earns nothing on that product.
+ * an affiliate gets the affiliate level for the product, and everyone else
+ * the product's own per-sale rate where it has one (DropForge). Zero means
+ * the person earns nothing on that product.
  */
 export function perSaleCentsForCode(referralCode, productSlug) {
   const slug = normalizeProductSlug(productSlug);
@@ -280,6 +288,7 @@ export function perSaleCentsForCode(referralCode, productSlug) {
   if (AFFILIATE_PER_SALE_CENTS[slug] && isAffiliateReferralCode(referralCode)) {
     return AFFILIATE_PER_SALE_CENTS[slug];
   }
+  if (PER_SALE_CENTS[slug]) return PER_SALE_CENTS[slug];
   return null;
 }
 
@@ -1025,6 +1034,9 @@ export function programDescription(productSlug) {
   const slug = normalizeProductSlug(productSlug);
   const program = PRODUCT_REFERRAL_PROGRAMS[slug];
   if (!program) return "Default manual Cash App purchase referral tiers.";
+  if (PER_SALE_CENTS[slug]) {
+    return `${program.label}: ${dollars(PER_SALE_CENTS[slug])} for every referred customer who buys it.`;
+  }
   const steps = program.tiers.map((tier) => `${dollars(tier.rewardAmountCents)} at ${tier.requiredPurchases}`).join(", ");
   const every = `then ${dollars(program.recurringTier.rewardAmountCents)} for each additional ${program.recurringTier.everyPurchases}`;
   if (slug === "tabforge") {

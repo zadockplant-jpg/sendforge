@@ -45,6 +45,8 @@ test("the code's own defaults match the migration, and pay $1 per Rose Colored G
   const paidAt100 = tiers.filter((tier) => tier.requiredPurchases <= 100).reduce((sum, tier) => sum + tier.rewardAmountCents, 0);
   assert.equal(paidAt100, 100 * rcg.perReferralCents);
   assert.deepEqual(amounts({ product_slug: "tabforge", metadata: {} }), [[5, 1700], [15, 3500], [25, 4000], [50, 15000]], "TabForge is unchanged");
-  assert.match(programDescription("forgedrop"), /\$25 at 5, \$50 at 15, \$60 at 25, \$175 at 50, then \$175 for each additional 25/);
+  // DropForge left its milestones for $10 on every sale (2026-10-02, PER_SALE_CENTS); the
+  // migration's text is history, and no page shows it.
+  assert.equal(programDescription("forgedrop"), "DropForge: $10 for every referred customer who buys it.");
   assert.match(programDescription("rose-colored-glasses"), /\$1 per referred customer/);
 });

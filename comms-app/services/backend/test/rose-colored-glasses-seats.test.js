@@ -385,21 +385,27 @@ test("a customer already paid the old flat $1 is never paid twice", async () => 
   assert.equal(total, 800);
 });
 
-test("DropForge pays $25, $50, $60 and $175 at 5, 15, 25 and 50, and a refund takes a milestone back", async () => {
+test("DropForge pays every owner $10 on every sale, and a refund takes one back", async () => {
+  // The owner, 2026-10-02: "Earn $10 per Referral", for every owner, paid per
+  // sale, in place of the milestones ($25 at 5, $50 at 15, ...).
   const fay = await user("faye@example.com", { cash_app_tag: "$faye" });
   await handleCheckoutSessionCompleted(forgeDropCheckout(fay), {});
 
   const buyers = await referredBuyers(fay, 5, "fd-a", (buyer) => forgeDropCheckout(buyer));
-  assert.deepEqual(await rewardsFor(fay, "forgedrop"), [{ at: 5, cents: 2500, status: "pending" }]);
+  assert.deepEqual((await rewardsFor(fay, "forgedrop")).map((row) => [row.cents, row.status]),
+    Array.from({ length: 5 }, () => [1000, "pending"]), "$10 for each of the five, none waiting on a milestone");
 
-  // Before it is paid, one of the five refunds: the milestone is no longer reached.
+  // Before it is paid, one of the five refunds: one $10 goes.
   await refund(buyers[2].session.payment_intent);
-  assert.deepEqual(await rewardsFor(fay, "forgedrop"), [{ at: 5, cents: 2500, status: "canceled" }]);
+  const after = await rewardsFor(fay, "forgedrop");
+  assert.equal(after.filter((row) => row.status === "pending").length, 4);
+  assert.equal(after.filter((row) => row.status === "canceled").length, 1);
 
   const [, summary] = await productReferralSummary(fay);
-  assert.equal(summary.productSlug, "forgedrop");
-  assert.equal(summary.referredCustomers, 4);
-  assert.deepEqual(summary.tiers.map((tier) => [tier.requiredPurchases, tier.rewardAmountCents]), [[5, 2500], [15, 5000], [25, 6000], [50, 17500]]);
+  assert.deepEqual(
+    { productSlug: summary.productSlug, mode: summary.mode, perSaleCents: summary.perSaleCents,
+      referredCustomers: summary.referredCustomers, earnedCents: summary.earnedCents, tiers: summary.tiers },
+    { productSlug: "forgedrop", mode: "per_sale", perSaleCents: 1000, referredCustomers: 4, earnedCents: 4000, tiers: [] });
   assert.equal(await rewardPayoutEligibility(fay, "forgedrop"), true);
 });
 
@@ -426,12 +432,13 @@ test("a purchase made before the email is verified counts once it is", async () 
     await handleCheckoutSessionCompleted(forgeDropCheckout(buyer), {});
     buyers.push(buyer);
   }
-  assert.deepEqual(await rewardsFor(una, "forgedrop"), [], "the fifth buyer has not verified yet");
+  assert.deepEqual((await rewardsFor(una, "forgedrop")).map((row) => row.cents), [1000, 1000, 1000, 1000],
+    "the fifth buyer has not verified yet");
 
   await db("users").where({ id: buyers[4] }).update({ email_verified: true });
   const result = await recordVerifiedReferralPurchases({ referredUserId: buyers[4] });
   assert.equal(result.promoted, 1);
-  assert.deepEqual(await rewardsFor(una, "forgedrop"), [{ at: 5, cents: 2500, status: "pending" }]);
+  assert.deepEqual((await rewardsFor(una, "forgedrop")).map((row) => row.cents), [1000, 1000, 1000, 1000, 1000]);
 });
 
 // Five installs fired together. With one connection they queue rather than
