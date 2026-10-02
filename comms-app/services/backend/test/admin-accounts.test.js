@@ -155,7 +155,9 @@ test("referral terms: an affiliate who owns nothing, a vanity code, and a custom
   // An affiliate is on DropForge's affiliate level without anything being set.
   assert.equal(view.referral.flatRates.forgedrop.custom, false);
   assert.equal(view.referral.flatRates.forgedrop.affiliateCents, 1000);
+  assert.equal(view.referral.flatRates.forgedrop.everyoneCents, 1000, "and everyone else is paid $10 a DropForge sale too");
   assert.equal(view.referral.flatRates.forgedrop.effectiveCents, 1000);
+  assert.equal(view.referral.flatRates[RCG].everyoneCents, null, "Rose Colored Glasses has no rate for everyone");
 
   // Someone they refer buys: the $3 rate is what queues, on that first sale.
   const code = await db("referral_codes").where({ code: "SUNNY" }).first();

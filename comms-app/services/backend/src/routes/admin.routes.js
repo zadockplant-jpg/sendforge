@@ -17,6 +17,7 @@ import {
   isCloudPickupShareReward,
   isSyncShareReward,
   normalizeCashAppTag,
+  PER_SALE_CENTS,
   rewardPayoutEligibility,
 } from "../services/referrals/referral.service.js";
 import {
@@ -441,7 +442,10 @@ adminRouter.post("/referrals/codes", writeLimiter, async (req, res) => {
 
 adminRouter.get("/referrals/programs", async (_req, res) => {
   const rows = await db("referral_programs").orderBy("product_slug", "asc");
-  res.json({ items: rows.map((row) => ({ ...row, commission: commissionSummary(row) })) });
+  // everyoneCents: what every referrer is paid per sale whatever the row says
+  // (DropForge's $10, set in referral.service.js), so the dashboard does not
+  // offer milestones that would never pay.
+  res.json({ items: rows.map((row) => ({ ...row, commission: commissionSummary(row), everyoneCents: PER_SALE_CENTS[row.product_slug] ?? null })) });
 });
 
 adminRouter.post("/referrals/programs", writeLimiter, async (req, res) => {
