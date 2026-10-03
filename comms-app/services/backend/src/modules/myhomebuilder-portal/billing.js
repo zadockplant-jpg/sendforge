@@ -253,9 +253,10 @@ export function isEditable(item) {
   return item.status === "open" || (item.kind === "invoice" && item.status === "paid");
 }
 
-// Payments already received, listed on a new invoice's form (a deposit, earlier checks): rows of
-// paymentAmount, paymentMethod, paymentMethodName (for Other), paymentPaidOn and paymentNote
-// (paymentReference too, from forms before notes). Rows without an amount are skipped. Returns
+// Payments listed on an invoice's editor (a deposit, earlier checks; on an edit, every payment it
+// has): rows of paymentAmount, paymentMethod, paymentMethodName (for Other), paymentPaidOn and
+// paymentNote, with paymentId (the payment a row came from, when editing) and paymentReference
+// (kept from payments recorded before notes). Rows without an amount are skipped. Returns
 // { payments, typed } or { error, typed } (typed: the rows as entered).
 const LISTED_PAYMENT_PROBLEMS = {
   invalid: "Check each payment's method (up to 60 characters).",
@@ -269,7 +270,9 @@ export function parseListedPayments(form) {
   const references = column("paymentReference");
   const dates = column("paymentPaidOn");
   const notes = column("paymentNote");
+  const ids = column("paymentId");
   const typed = column("paymentAmount").map((amount, index) => ({
+    id: /^[A-Za-z0-9_-]{1,32}$/u.test(ids[index] || "") ? ids[index] : "",
     amount: amount.trim(), method: methods[index] || "check", methodName: (names[index] || "").trim(), reference: (references[index] || "").trim(), paidOn: (dates[index] || "").trim(),
     note: (notes[index] || "").trim().replaceAll(/\s+/gu, " ")
   }));
@@ -282,7 +285,7 @@ export function parseListedPayments(form) {
     const fields = new Map([["method", row.method], ["methodName", row.methodName], ["reference", row.reference], ["paidOn", row.paidOn]]);
     const entered = parseManualPayment({ get: (name) => fields.get(name) ?? "" });
     if (entered.error) return { error: LISTED_PAYMENT_PROBLEMS[entered.error] || LISTED_PAYMENT_PROBLEMS.invalid, typed };
-    payments.push({ ...entered, amountCents, ...(row.note ? { note: row.note } : {}) });
+    payments.push({ ...entered, amountCents, ...(row.note ? { note: row.note } : {}), ...(row.id ? { id: row.id } : {}) });
   }
   return { payments, typed };
 }

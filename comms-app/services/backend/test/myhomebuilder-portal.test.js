@@ -874,7 +874,7 @@ test("editing a paid invoice's lines keeps a payment recorded by hand equal to t
   const { item } = await postInvoice(adminCookie, { title: "Pre Construction Services", amount: "15,000" });
   const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
   await request(`${path}/record-payment`, form({ method: "zelle", paidOn: "2026-07-30" }, adminCookie));
-  assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), /the recorded payment changes to match/u);
+  assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), /<input type="hidden" name="paymentId" value="settled">/u, "the editor lists its payment");
 
   const edited = await request(`${path}/edit`, form({ title: "Pre Construction Services", ...lines(["Pre Construction Services", "1", "5,000"]) }, adminCookie));
   assert.match(edited.headers.get("Location"), /notice=billing-updated/u);
@@ -1824,7 +1824,7 @@ test("a paid invoice's payment can be corrected, including Other with a typed me
 
   const editor = await request(`${path}/edit`, { headers: { Cookie: adminCookie } });
   assert.equal(editor.status, 200, "paid invoices can still be edited");
-  assert.match(await editor.text(), /This invoice is marked paid/u);
+  assert.match(await editor.text(), /<input type="hidden" name="paymentId" value="settled">/u);
 
   const reopened = await request(`${path}/reopen`, form({}, adminCookie));
   assert.match(reopened.headers.get("Location"), /notice=payment-removed/u);
@@ -1856,7 +1856,7 @@ test("a reopened invoice paid later through Stripe gets a fresh receipt, and Str
   assert.match((await request(`${path}/reopen`, form({}, adminCookie))).headers.get("Location"), /notice=payment-from-stripe/u);
   assert.equal((await stored(item)).status, "paid");
   assert.match(await (await request(path, { headers: { Cookie: adminCookie } })).text(), /Paid online through Stripe/u);
-  assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), /the Stripe payment stays as Stripe recorded it/u);
+  assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), /Paid through Stripe: its payment stays as Stripe recorded it\./u);
 });
 
 test("templates are saved, listed, used for a new quote, edited and deleted", async () => {
@@ -1889,7 +1889,7 @@ test("templates are saved, listed, used for a new quote, edited and deleted", as
 test("the editor: Templates beside its heading, Save as template by name, and notes and terms saved with Create new", async () => {
   const adminCookie = await loginAsAdmin();
   const newInvoice = async () => (await request("/clients/admin/clients/muskegon-addition/billing/new?kind=invoice", { headers: { Cookie: adminCookie } })).text();
-  assert.doesNotMatch(await newInvoice(), /admin-template-picker/u, "no templates yet, so no Templates box");
+  assert.match(await newInvoice(), /<option value="" selected disabled hidden>Templates<\/option><option value="save" data-save-template-option>Save<\/option><\/select>/u, "Save comes first, even before there is any template");
 
   // Save as template: a name in its box saves the template with the invoice.
   const saved = await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "invoice", title: "Rough plumbing", templateName: "Rough plumbing", ...lines(["Rough-in", "1", "6,500"]) }, adminCookie));
@@ -1900,7 +1900,7 @@ test("the editor: Templates beside its heading, Save as template by name, and no
   // Templates sits beside the heading: a box with no arrow, no wording around it, and choosing one
   // opens it. The line items carry no hint under them.
   const editor = await newInvoice();
-  assert.match(editor, new RegExp(`<div class="billing-editor-head">\\s*<h1 class="portal-heading portal-heading-sm" data-kind-heading>New invoice</h1>\\s*<form class="admin-template-picker" action="/clients/admin/clients/muskegon-addition/billing/new" method="get">\\s*<select class="select-plain" id="template-pick" name="template" required aria-label="Templates" data-autosubmit><option value="" selected disabled hidden>Templates</option><option value="${template.id}">Rough plumbing \\(invoice\\)</option></select>\\s*<noscript>`, "u"));
+  assert.match(editor, new RegExp(`<div class="billing-editor-head">\\s*<h1 class="portal-heading portal-heading-sm" data-kind-heading>New invoice</h1>\\s*<form class="admin-template-picker" action="/clients/admin/clients/muskegon-addition/billing/new" method="get">\\s*<select class="select-plain" id="template-pick" name="template" required aria-label="Templates" data-autosubmit><option value="" selected disabled hidden>Templates</option><option value="save" data-save-template-option>Save</option><option value="${template.id}">Rough plumbing \\(invoice\\)</option></select>\\s*<noscript>`, "u"));
   assert.doesNotMatch(editor, /Start from a template|Choose a template|Blank rows are ignored/u);
 
   // Notes and terms: Use template, whose first choice is Create new. Posting with a name saves the
@@ -2522,7 +2522,7 @@ test("invoice numbers follow their dates, the same date in the order entered, an
   const numbers = async () => Object.fromEntries(await Promise.all([late, early, sameFirst, sameSecond].map(async (item) => [(await stored(item)).title, (await stored(item)).number])));
   assert.deepEqual(await numbers(), { Early: "1", "Same day, entered first": "2", "Same day, entered second": "3", Late: "4" });
   const list = async () => (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
-  const order = (page) => [...page.matchAll(/<td><a class="portal-number billing-row-number" href="[^"]+" title="Open Invoice \d+">(\d+)<\/a><\/td>/gu)].map((match) => match[1]);
+  const order = (page) => [...page.matchAll(/<td class="cl-num"><a class="portal-number billing-row-number" href="[^"]+" title="Open Invoice \d+">(\d+)<\/a><\/td>/gu)].map((match) => match[1]);
   assert.deepEqual(order(await list()), ["4", "3", "2", "1"], "newest first; on the same date, the later entry first");
 
   // Numbers changed outside the portal are put back when the admin panel opens.
@@ -2994,7 +2994,7 @@ test("a click on a row of Invoices, Payments or Purchases opens it to edit, and 
   const { item } = await postInvoice(adminCookie, { title: "Framing", amount: "1,000" });
   const path = `${base}/billing/${item.id}`;
   let list = await panel();
-  assert.match(list, new RegExp(`<tr class="billing-row-link" data-row-href="${path}/edit">\\s*<td><a class="portal-number billing-row-number" href="${path}" title="Open Invoice 1">1</a></td>\\s*<td><a class="billing-row-title" href="${path}/edit">Framing</a>`, "u"));
+  assert.match(list, new RegExp(`<tr class="billing-row-link" data-row-href="${path}/edit">\\s*<td class="cl-num"><a class="portal-number billing-row-number" href="${path}" title="Open Invoice 1">1</a></td>\\s*<td class="cl-main"><a class="billing-row-title" href="${path}/edit">Framing</a>`, "u"));
   assert.match(await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text(), new RegExp(`<a class="button button-outline billing-editor-open" href="${path}">Invoice 1</a>`, "u"));
 
   // Payments: a payment toward the balance opens the payment popup filled in (or its page), and
@@ -3002,7 +3002,7 @@ test("a click on a row of Invoices, Payments or Purchases opens it to edit, and 
   await request(`${path}/record-payment`, form({ amount: "300", method: "check", paidOn: "2026-09-20", note: "Deposit" }, adminCookie));
   const [deposit] = (await stored(item)).installments;
   list = await panel();
-  assert.match(list, new RegExp(`data-row-href="${path}/payment\\?installment=${deposit.id}" data-edit-payment data-href="${path}" data-installment="${deposit.id}" data-amount="300\\.00" data-method="check" data-method-name="" data-note="Deposit" data-paid-on="2026-09-20" data-label="Invoice 1 · \\$300\\.00" data-remove="remove-payment">`, "u"));
+  assert.match(list, new RegExp(`data-row-href="${path}/payment\\?installment=${deposit.id}" data-edit-payment data-href="${path}" data-installment="${deposit.id}" data-amount="300\\.00" data-method="check" data-method-name="" data-note="Deposit" data-paid-on="2026-09-20" data-label="Invoice 1 · \\$300\\.00" data-remove="remove-payment" data-row-delete data-delete-action="${path}/remove-payment" data-delete-installment="${deposit.id}" data-delete-return="list">`, "u"));
   assert.match(list, /<input type="hidden" name="installment" value="" data-payment-installment>\s*<label for="list-edit-payment-amount" data-payment-amount hidden>Amount/u);
   const paymentPage = await (await request(`${path}/payment?installment=${deposit.id}`, { headers: { Cookie: adminCookie } })).text();
   assert.match(paymentPage, /name="amount" type="text" inputmode="decimal" maxlength="12" required value="300\.00"/u);
@@ -3021,7 +3021,7 @@ test("a click on a row of Invoices, Payments or Purchases opens it to edit, and 
   assert.deepEqual(await ledgerBalances(), { 1300: 100000, 4000: -100000 });
   // The payment that settled it opens with Mark as unpaid, and returns to the list.
   list = await panel();
-  assert.match(list, new RegExp(`data-row-href="${path}/payment" data-edit-payment data-href="${path}" data-installment="" data-amount="" data-method="zelle"[^>]*data-remove="reopen">`, "u"));
+  assert.match(list, new RegExp(`data-row-href="${path}/payment" data-edit-payment data-href="${path}" data-installment="" data-amount="" data-method="zelle"[^>]*data-remove="reopen" data-row-delete data-delete-action="${path}/reopen" data-delete-installment="" data-delete-return="list">`, "u"));
   assert.match((await request(`${path}/reopen`, form({ return: "list" }, adminCookie))).headers.get("Location"), /^\/clients\/admin\?client=muskegon-addition&notice=payment-removed$/u);
 
   // Purchases: the row opens the expense popup filled in (or its page); a change re-posts its books.
@@ -3040,6 +3040,81 @@ test("a click on a row of Invoices, Payments or Purchases opens it to edit, and 
   assert.ok(await db("mhb_activity").where({ action: "expense.edited" }).first());
   assert.match((await request(`${base}/expenses/${expense.id}/edit`, crewForm({ spentOn: today, vendor: "", description: "", category: "Materials", amount: "1", paidWith: "personal" }, null, adminCookie))).headers.get("Location"), /\/edit\?notice=expense-vendor-required$/u);
   assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
+});
+
+test("editing an invoice lists its payments like a new one: change, add or take out a payment, and it is paid or open by their total", async () => {
+  const adminCookie = await loginAsAdmin();
+  const { item } = await postInvoice(adminCookie, { title: "Investment", amount: "1,000", paymentAmount: ["200", "300"], paymentMethod: ["zelle", "zelle"], paymentPaidOn: ["2026-08-11", "2026-08-24"], paymentMethodName: ["", ""], paymentNote: ["", ""] });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  const [first, second] = (await stored(item)).installments;
+
+  // The editor lists them as rows, the column names once.
+  const editor = await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(editor, /<input type="hidden" name="payments" value="listed">/u);
+  assert.equal(editor.match(/data-listed-payment data-row-delete>/gu).length, 2);
+  assert.match(editor, new RegExp(`<input type="hidden" name="paymentId" value="${first.id}">[\\s\\S]*?value="200\\.00"[\\s\\S]*?<option value="zelle" selected>Zelle</option>[\\s\\S]*?value="2026-08-11"`, "u"));
+  assert.equal(editor.match(/<span class="listed-payment-label">Amount \(\$\)<\/span>/gu).length, 2, "each row has its name (shown once, by CSS)");
+  assert.doesNotMatch(editor, /Payments on this invoice are added and removed on its page/u);
+
+  const save = (rows) => request(`${path}/edit`, form({
+    title: "Investment", ...lines(["Shares", "1", "1,000"]), payments: "listed",
+    paymentId: rows.map((row) => row.id || ""), paymentAmount: rows.map((row) => row.amount), paymentMethod: rows.map((row) => row.method || "zelle"),
+    paymentMethodName: rows.map(() => ""), paymentReference: rows.map(() => ""), paymentPaidOn: rows.map((row) => row.paidOn), paymentNote: rows.map((row) => row.note || "")
+  }, adminCookie));
+
+  // Change one, take one out, add one: still less than the total, so it stays open.
+  assert.match((await save([{ id: first.id, amount: "250", paidOn: "2026-08-11", note: "First" }, { amount: "100", paidOn: "2026-09-01" }])).headers.get("Location"), /notice=billing-updated/u);
+  let saved = await stored(item);
+  assert.equal(saved.status, "open");
+  assert.deepEqual(saved.installments.map((entry) => [entry.amountCents, entry.paidOn, entry.note]), [[25000, "2026-08-11", "First"], [10000, "2026-09-01", undefined]]);
+  assert.equal(saved.installments[0].id, first.id, "a payment that was on it keeps its id");
+  assert.ok(!saved.installments.some((entry) => entry.id === second.id), "the one taken out is gone");
+  assert.deepEqual(await ledgerBalances(), { 1100: 65000, 1300: 35000, 4000: -100000 });
+
+  // More than the total is refused, keeping what was typed.
+  const over = await save([{ id: first.id, amount: "900", paidOn: "2026-08-11" }, { amount: "200", paidOn: "2026-09-01" }]);
+  assert.equal(over.status, 400);
+  const overPage = await over.text();
+  assert.match(overPage, /The payments listed \(\$1,100\.00\) are more than the invoice total \(\$1,000\.00\)\./u);
+  assert.match(overPage, /name="paymentAmount"[^>]*value="900"/u);
+
+  // Reaching the total marks it paid, the latest payment settling it; less again opens it.
+  await save([{ id: first.id, amount: "250", paidOn: "2026-08-11" }, { amount: "750", paidOn: "2026-09-20" }]);
+  saved = await stored(item);
+  assert.deepEqual([saved.status, saved.paidAt, saved.payment.amountCents, saved.installments.length], ["paid", "2026-09-20", 75000, 1]);
+  assert.deepEqual(await ledgerBalances(), { 1300: 100000, 4000: -100000 });
+  const paidEditor = await (await request(`${path}/edit`, { headers: { Cookie: adminCookie } })).text();
+  assert.match(paidEditor, /<input type="hidden" name="paymentId" value="settled">[\s\S]*?value="750\.00"/u);
+  await save([{ id: first.id, amount: "250", paidOn: "2026-08-11" }, { id: "settled", amount: "700", paidOn: "2026-09-20" }]);
+  saved = await stored(item);
+  assert.deepEqual([saved.status, saved.payment, saved.installments.map((entry) => entry.amountCents)], ["open", undefined, [25000, 70000]]);
+  assert.match((await db("mhb_activity").where({ action: "invoice.edited" }).orderBy("id", "desc").first()).summary, /payments .* → .*; open again/u);
+  assert.doesNotMatch(await (await request("/clients/admin/books", { headers: { Cookie: adminCookie } })).text(), /The books do not balance/u);
+
+  // The invoice itself: its payments single spaced under the total.
+  const document = await (await request(`/clients/invoice/${saved.shareToken}`)).text();
+  assert.equal((document.match(/<tr class="billing-paid">/gu) || []).length, 2);
+});
+
+test("Templates' Save saves what is filled in as a template, and the new invoice stays as it was", async () => {
+  const adminCookie = await loginAsAdmin();
+  const before = (await billingRecords()).length;
+  const saved = await request("/clients/admin/clients/muskegon-addition/billing", form({
+    kind: "invoice", title: "Framing draw", intent: "template", templateName: "Framing draw", description: "Net 15.",
+    ...lines(["Framing", "1", "4,500"]), paymentAmount: "500", paymentMethod: "zelle", paymentPaidOn: "2026-09-01", paymentMethodName: "", paymentNote: "Deposit"
+  }, adminCookie));
+  assert.equal(saved.status, 200);
+  const page = await saved.text();
+  assert.match(page, /Template saved: Framing draw\./u);
+  assert.match(page, /value="Framing"/u);
+  assert.match(page, /name="paymentAmount"[^>]*value="500"/u, "its payments are still there");
+  assert.match(page, /<option value="save" data-save-template-option>Save<\/option><option value="[^"]+">Framing draw \(invoice\)<\/option>/u);
+  assert.equal((await billingRecords()).length, before, "nothing posted");
+  const [template] = (await db("mhb_templates").select("data")).map((row) => json(row.data));
+  assert.deepEqual([template.name, template.title, template.amountCents, template.description], ["Framing draw", "Framing draw", 450000, "Net 15."]);
+  const nameless = await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "invoice", title: "Framing draw", intent: "template", ...lines(["Framing", "1", "4,500"]) }, adminCookie));
+  assert.equal(nameless.status, 400);
+  assert.match(await nameless.text(), /Give the template a name/u);
 });
 
 test("an expense matched to a bank withdrawal keeps the match for small changes, and lets it go when the amount changes", async () => {
@@ -3089,9 +3164,10 @@ test("a new invoice can list payments already received: less than the total leav
   // Other), then Add another payment and Save as template, then Post invoice.
   assert.match(editor, /<legend>Payments<\/legend>/u);
   assert.doesNotMatch(editor, /already received|Blank rows are ignored|Reference \(optional\)/u);
-  assert.equal(editor.match(/data-listed-payment>/gu).length, 1);
-  assert.match(editor, /<label for="listed-0-other" data-listed-other hidden>Other method/u);
-  assert.match(editor, /<label for="listed-0-date">Received on[\s\S]*?<label class="listed-payment-note" for="listed-0-note">Notes\s*<input id="listed-0-note" name="paymentNote"/u);
+  assert.equal(editor.match(/data-listed-payment data-row-delete>/gu).length, 1);
+  assert.match(editor, /<label for="listed-0-other" data-listed-other hidden><span class="listed-payment-label">Other method<\/span>/u);
+  assert.match(editor, /<label for="listed-0-date"><span class="listed-payment-label">Received on<\/span>[\s\S]*?<label class="listed-payment-note" for="listed-0-note"><span class="listed-payment-label">Notes<\/span>\s*<input id="listed-0-note" name="paymentNote"/u);
+  assert.doesNotMatch(editor, /data-listed-payment-remove/u, "no Remove buttons: a right-click deletes a row");
   const order = ["data-listed-payment-add hidden>Add another payment</button>", "data-save-template-open hidden>Save as template</button>", 'name="templateName"', ">Post invoice</button>"].map((text) => editor.indexOf(text));
   assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), "Add another payment, Save as template and its name, then Post invoice");
   assert.doesNotMatch(editor, /Also save this as a template|>Cancel</u);
@@ -3104,7 +3180,7 @@ test("a new invoice can list payments already received: less than the total leav
   // The project's Payments list each one, newest first, with its notes.
   const panel = await (await request("/clients/admin?client=muskegon-addition", { headers: { Cookie: adminCookie } })).text();
   const payments = panel.match(/<details class="admin-fold" id="project-payments" data-remember>([\s\S]*?)<\/details>/u)[1];
-  assert.match(payments, /<td>Zelle<\/td>\s*<td>Deposit for windows<\/td>\s*<td>\$500\.00<\/td>[\s\S]*<td>Check #2001<\/td>\s*<td><\/td>\s*<td>\$1,000\.00<\/td>/u);
+  assert.match(payments, /<td>Zelle<\/td>\s*<td class="cl-main cl-note">Deposit for windows<\/td>\s*<td class="cl-money">\$500\.00<\/td>[\s\S]*<td>Check #2001<\/td>\s*<td class="cl-main cl-note"><\/td>\s*<td class="cl-money">\$1,000\.00<\/td>/u);
   assert.match(payments, /<dt>Received<\/dt><dd>\$1,500\.00<\/dd>/u);
 
   const { item: whole } = await postInvoice(adminCookie, { title: "Deposit", amount: "800", paymentAmount: ["300", "500"], paymentMethod: ["cash", "check"], paymentReference: ["", "#88"], paymentPaidOn: ["2026-09-01", "2026-09-03"], paymentMethodName: ["", ""] });
@@ -3424,7 +3500,7 @@ test("Add expense takes a typed category and suggests who it was paid to from La
   for (const name of ["Ottawa Land Co", "Waste Pro"]) assert.match(paidTo, new RegExp(`value="${name}"`, "u"));
   const categories = page.match(/<datalist id="add-expense-categories">([\s\S]*?)<\/datalist>/u)[1];
   for (const name of ["Land", "House", "Commercial property", "Labor", "Materials"]) assert.match(categories, new RegExp(`value="${name}"`, "u"));
-  assert.match(page, /<td>Dumpster swap<small>Waste Pro<\/small><\/td>\s*<td>Dumpster rental<\/td>/u);
+  assert.match(page, /<td class="cl-main">Dumpster swap<small>Waste Pro<\/small><\/td>\s*<td class="cl-hide">Dumpster rental<\/td>/u);
   assert.match(page, /<a class="portal-secondary-link" href="\/clients\/admin\/books\/jobs\/muskegon-addition">Job book<\/a>/u);
 });
 
@@ -4022,8 +4098,8 @@ test("Add project puts a new project in the client portal, and each project's fi
   const kitchenPanel = await page("kitchen-remodel");
   const ledger = kitchenPanel.match(/<details class="admin-fold" id="project-ledger" data-remember>([\s\S]*?)<\/details>/u)[1];
   assert.match(ledger, /<summary><h3>Ledger<\/h3><\/summary>/u);
-  assert.match(ledger, /Cabinets<\/a><\/td>\s*<td data-label="Category">Income<\/td>\s*<td class="books-money" data-label="Income">\$8,000\.00<\/td>\s*<td class="books-money" data-label="Expense"><\/td>\s*<td class="books-money" data-label="Profit">\$8,000\.00<\/td>/u);
-  assert.match(ledger, /Cabinet boxes<\/td>\s*<td data-label="Category">Materials<\/td>\s*<td class="books-money" data-label="Income"><\/td>\s*<td class="books-money" data-label="Expense">\$4,200\.00<\/td>\s*<td class="books-money" data-label="Profit">\$3,800\.00<\/td>/u);
+  assert.match(ledger, /Cabinets<\/a><\/td>\s*<td class="cl-hide" data-label="Category">Income<\/td>\s*<td class="books-money cl-money" data-label="Income">\$8,000\.00<\/td>\s*<td class="books-money cl-money cl-expense" data-label="Expense"><\/td>\s*<td class="books-money cl-hide" data-label="Profit">\$8,000\.00<\/td>/u);
+  assert.match(ledger, /Cabinet boxes<\/td>\s*<td class="cl-hide" data-label="Category">Materials<\/td>\s*<td class="books-money cl-money" data-label="Income"><\/td>\s*<td class="books-money cl-money cl-expense" data-label="Expense">\$4,200\.00<\/td>\s*<td class="books-money cl-hide" data-label="Profit">\$3,800\.00<\/td>/u);
   assert.match(ledger, /<th class="fit-table-name" scope="row" colspan="3">Gross<\/th><td class="books-money" data-label="Income">\$8,000\.00<\/td><td class="books-money" data-label="Expense">\$4,200\.00<\/td><td class="books-money" data-label="Profit">\$3,800\.00<\/td>/u);
   assert.match(ledger, /<a class="portal-secondary-link" href="\/clients\/admin\/books\/jobs\/kitchen-remodel">Job book<\/a>/u);
 

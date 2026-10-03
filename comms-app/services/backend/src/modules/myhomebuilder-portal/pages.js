@@ -288,14 +288,14 @@ function billingRows(items, { basePath, viewer, readOnly = false }) {
     // be edited); its number opens its page.
     const open = admin && isEditable(item) ? `${href}/edit` : href;
     return `<tr${admin ? ` class="billing-row-link" data-row-href="${open}"` : ""}>
-          <td>${admin ? `<a class="portal-number billing-row-number" href="${href}" title="Open ${escapeAttribute(billingLabel(item))}">${escapeHtml(item.number)}</a>` : `<span class="portal-number">${escapeHtml(item.number)}</span>`}</td>
-          <td>${admin ? `<a class="billing-row-title" href="${open}">${escapeHtml(item.title)}</a>` : escapeHtml(item.title)}${dueLine}${note}</td>
-          <td>${money(item.amountCents, item.currency)}${partlyPaid(item) ? `<small>${money(balanceDue(item), item.currency)} due</small>` : ""}</td>
-          <td>${status}${detail ? `<small class="status-detail">${detailText}</small>` : ""}</td>
-          <td>${action}</td>
+          <td class="cl-num">${admin ? `<a class="portal-number billing-row-number" href="${href}" title="Open ${escapeAttribute(billingLabel(item))}">${escapeHtml(item.number)}</a>` : `<span class="portal-number">${escapeHtml(item.number)}</span>`}</td>
+          <td class="cl-main">${admin ? `<a class="billing-row-title" href="${open}">${escapeHtml(item.title)}</a>` : escapeHtml(item.title)}${dueLine}${note}</td>
+          <td class="cl-money">${money(item.amountCents, item.currency)}${partlyPaid(item) ? `<small>${money(balanceDue(item), item.currency)} due</small>` : ""}</td>
+          <td class="cl-status">${status}${detail ? `<small class="status-detail">${detailText}</small>` : ""}</td>
+          <td class="cl-action">${action}</td>
         </tr>`;
   });
-  return `<table class="portal-table">
+  return `<table class="portal-table compact-list">
         <thead><tr><th scope="col">Number</th><th scope="col">Item</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Action</span></th></tr></thead>
         <tbody>${rows.join("")}</tbody>
       </table>${viewer === "admin" || readOnly ? billingTotals(items) : ""}`;
@@ -329,15 +329,15 @@ function documentRows(documents, { basePath, viewer }) {
       : document.requiresAdminSignature && !document.signatures?.some((entry) => entry.party === "admin");
     const href = `${basePath}/${encodeURIComponent(document.id)}`;
     return `<tr>
-          <td>${escapeHtml(document.name)}<small>${document.uploadedBy === "admin" ? "From My Home Builder" : "Uploaded by client"} · ${dateText(document.createdAt)}${document.size ? ` · ${sizeText(document.size)}` : ""}</small></td>
-          <td><span class="portal-status portal-status-${tone}">${label}</span></td>
-          <td class="portal-actions">
+          <td class="cl-main">${escapeHtml(document.name)}<small>${document.uploadedBy === "admin" ? "From My Home Builder" : "Uploaded by client"} · ${dateText(document.createdAt)}${document.size ? ` · ${sizeText(document.size)}` : ""}</small></td>
+          <td class="cl-status"><span class="portal-status portal-status-${tone}">${label}</span></td>
+          <td class="portal-actions cl-action">
             <a class="portal-secondary-link" href="${href}">Download</a>
             ${needsMySignature && document.contentType === "application/pdf" ? `<a class="portal-secondary-link" href="${href}/sign">Sign</a>` : ""}
           </td>
         </tr>`;
   });
-  return `<table class="portal-table portal-table-documents">
+  return `<table class="portal-table portal-table-documents compact-list">
         <thead><tr><th scope="col">Document</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
         <tbody>${rows.join("")}</tbody>
       </table>`;
@@ -565,15 +565,16 @@ export function billingDocument({ item, client }) {
               <td data-label="Amount">${money(line.amountCents, item.currency)}</td>
             </tr>`).join("");
 
+  // The payments under the total are single spaced (billing-paid).
   const totals = [];
-  const earlier = (item.installments || []).map((entry) => `<tr><th scope="row" colspan="3">Paid ${escapeHtml([formatDate(entry.paidOn), entry.label].filter(Boolean).join(" · "))}</th><td>${money(-entry.amountCents, item.currency)}</td></tr>`);
+  const earlier = (item.installments || []).map((entry) => `<tr class="billing-paid"><th scope="row" colspan="3">Paid ${escapeHtml([formatDate(entry.paidOn), entry.label].filter(Boolean).join(" · "))}</th><td>${money(-entry.amountCents, item.currency)}</td></tr>`);
   if (invoice && item.status === "paid") {
     const paidCents = item.payment?.amountCents ?? item.amountCents - installmentsTotal(item);
     totals.push(`<tr><th scope="row" colspan="3">Total</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
     totals.push(...earlier);
-    totals.push(`<tr><th scope="row" colspan="3">Paid ${escapeHtml(paymentSummary(item))}</th><td>${money(-paidCents, item.currency)}</td></tr>`);
+    totals.push(`<tr class="billing-paid"><th scope="row" colspan="3">Paid ${escapeHtml(paymentSummary(item))}</th><td>${money(-paidCents, item.currency)}</td></tr>`);
     for (const refund of liveRefunds(item)) {
-      totals.push(`<tr><th scope="row" colspan="3">Refunded ${escapeHtml(formatDate(refund.refundedAt))}</th><td>${money(refund.amountCents, item.currency)}</td></tr>`);
+      totals.push(`<tr class="billing-paid"><th scope="row" colspan="3">Refunded ${escapeHtml(formatDate(refund.refundedAt))}</th><td>${money(refund.amountCents, item.currency)}</td></tr>`);
     }
     totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Balance due</th><td>${money(balanceDue(item), item.currency)}</td></tr>`);
   } else if (invoice && earlier.length && item.status !== "void") {
@@ -809,13 +810,13 @@ function adminShell(content, { title, scripts = [] }) {
   return pageShell(content, { authenticated: false, admin: true, bodyClass: "portal-page portal-admin", title, scripts });
 }
 
-// Templates, beside a new quote or invoice's heading: choosing one opens the editor filled in from
-// it (billing.js). Without scripts its button does.
+// Templates, beside a new quote or invoice's heading. Its first choice, Save, saves what is filled
+// in as a new template (billing.js opens Save as template); any other opens the editor filled in
+// from that template. Without scripts its button does.
 function templatePicker(templates, action) {
-  if (!templates.length) return "";
   const options = templates.map((template) => `<option value="${escapeAttribute(template.id)}">${escapeHtml(template.name)} (${template.kind === "invoice" ? "invoice" : "quote"})</option>`).join("");
   return `<form class="admin-template-picker" action="${escapeAttribute(action)}" method="get">
-          <select class="select-plain" id="template-pick" name="template" required aria-label="Templates" data-autosubmit><option value="" selected disabled hidden>Templates</option>${options}</select>
+          <select class="select-plain" id="template-pick" name="template" required aria-label="Templates" data-autosubmit><option value="" selected disabled hidden>Templates</option><option value="save" data-save-template-option>Save</option>${options}</select>
           <noscript><button class="portal-logout-button" type="submit">Use template</button></noscript>
         </form>`;
 }
@@ -905,12 +906,12 @@ function expenseRows(expenses, { base, totalLabel = "Job expenses" }) {
       ["paid", expense.paidWith?.key || ""], ["paid-label", expense.paidWith?.label || ""]
     ].map(([key, value]) => ` data-${key}="${escapeAttribute(value)}"`).join("");
     return `<tr class="billing-row-link" data-row-href="${path}/edit" data-edit-expense${edit}>
-          <td>${dateText(expense.spentOn)}</td>
-          <td>${escapeHtml(what)}${expense.description && expense.vendor ? `<small>${escapeHtml(expense.vendor)}</small>` : ""}</td>
-          <td>${escapeHtml(categoryName(expense))}</td>
-          <td>${escapeHtml(expense.paidWith?.label || "")}${expense.bankTransactionId ? "<small>Matched to the bank</small>" : ""}</td>
-          <td>${money(expense.amountCents)}</td>
-          <td><div class="billing-row-actions">
+          <td class="cl-meta">${dateText(expense.spentOn)}</td>
+          <td class="cl-main">${escapeHtml(what)}${expense.description && expense.vendor ? `<small>${escapeHtml(expense.vendor)}</small>` : ""}</td>
+          <td class="cl-hide">${escapeHtml(categoryName(expense))}</td>
+          <td class="cl-hide">${escapeHtml(expense.paidWith?.label || "")}${expense.bankTransactionId ? "<small>Matched to the bank</small>" : ""}</td>
+          <td class="cl-money">${money(expense.amountCents)}</td>
+          <td class="cl-action"><div class="billing-row-actions">
             ${expense.receipt ? `<a class="portal-secondary-link" href="${path}/receipt">Receipt</a>` : ""}
             <form method="post" action="${path}/delete" data-confirm="${escapeAttribute(`Delete the expense ${name}? It comes out of the books. This can't be undone.`)}">
               <button class="billing-trash" type="submit" aria-label="Delete the expense ${escapeAttribute(name)}" title="Delete">${TRASH_ICON}</button>
@@ -919,7 +920,7 @@ function expenseRows(expenses, { base, totalLabel = "Job expenses" }) {
         </tr>`;
   }).join("");
   const total = expenses.reduce((sum, expense) => sum + expense.amountCents, 0);
-  return `<table class="portal-table">
+  return `<table class="portal-table compact-list">
         <thead><tr><th scope="col">Date</th><th scope="col">Expense</th><th scope="col">Category</th><th scope="col">Paid with</th><th scope="col">Amount</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -1469,17 +1470,17 @@ function projectLedger(book, slug) {
       ? `<a class="portal-inline-link" href="/clients/admin/clients/${encodeURIComponent(slug)}/billing/${encodeURIComponent(row.itemId)}">${escapeHtml(row.what)}</a>`
       : escapeHtml(row.what);
     return `<tr>
-              <td class="fit-table-date" data-label="Date">${dateText(row.date)}</td>
-              <td class="fit-table-name">${what}${row.paidTo ? `<small>${escapeHtml(row.paidTo)}</small>` : ""}</td>
-              <td data-label="Category">${row.income === undefined ? escapeHtml(row.category) : "Income"}</td>
-              <td class="books-money" data-label="Income">${row.income === undefined ? "" : money(row.income)}</td>
-              <td class="books-money" data-label="Expense">${row.cost === undefined ? "" : money(row.cost)}</td>
-              <td class="books-money${profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(profit)}</td>
+              <td class="fit-table-date cl-meta" data-label="Date">${dateText(row.date)}</td>
+              <td class="fit-table-name cl-main">${what}${row.paidTo ? `<small>${escapeHtml(row.paidTo)}</small>` : ""}</td>
+              <td class="cl-hide" data-label="Category">${row.income === undefined ? escapeHtml(row.category) : "Income"}</td>
+              <td class="books-money cl-money" data-label="Income">${row.income === undefined ? "" : money(row.income)}</td>
+              <td class="books-money cl-money cl-expense" data-label="Expense">${row.cost === undefined ? "" : money(row.cost)}</td>
+              <td class="books-money cl-hide${profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(profit)}</td>
             </tr>`;
   }).join("");
   const totals = book.totals;
   return `<div class="fit-table-box">
-          <table class="portal-table books-table fit-table ledger-table">
+          <table class="portal-table books-table fit-table ledger-table compact-list">
             <thead><tr><th scope="col">Date</th><th scope="col">Entry</th><th scope="col">Category</th><th scope="col" class="books-money">Income</th><th scope="col" class="books-money">Expense</th><th scope="col" class="books-money">Profit</th></tr></thead>
             <tbody>${rows}</tbody>
             <tfoot><tr><th class="fit-table-name" scope="row" colspan="3">Gross</th><td class="books-money" data-label="Income">${money(totals.income)}</td><td class="books-money" data-label="Expense">${money(totals.expenses)}</td><td class="books-money${totals.profit < 0 ? " books-loss" : ""}" data-label="Profit">${money(totals.profit)}</td></tr></tfoot>
@@ -1517,16 +1518,17 @@ function paymentRows(items, basePath) {
       ["method-name", row.entry.methodName || ""], ["note", row.entry.note || ""], ["paid-on", String(row.date || "").slice(0, 10)],
       ["label", `${billingLabel(row.item)} · ${money(row.amount, row.item.currency)}`], ["remove", remove]
     ].map(([key, value]) => ` data-${key}="${escapeAttribute(value)}"`).join("");
-    return ` data-row-href="${path}/payment${installment ? `?installment=${encodeURIComponent(installment)}` : ""}" data-edit-payment${data}`;
+    const deletes = remove ? ` data-row-delete data-delete-action="${path}/${remove}" data-delete-installment="${escapeAttribute(installment)}" data-delete-return="list"` : "";
+    return ` data-row-href="${path}/payment${installment ? `?installment=${encodeURIComponent(installment)}` : ""}" data-edit-payment${data}${deletes}`;
   };
-  return `<table class="portal-table payments-table">
+  return `<table class="portal-table payments-table compact-list">
           <thead><tr><th scope="col">Date</th><th scope="col">Invoice</th><th scope="col">Paid by</th><th scope="col">Notes</th><th scope="col">Amount</th></tr></thead>
           <tbody>${rows.map((row) => `<tr class="billing-row-link"${opens(row)}>
-            <td>${row.date ? dateText(row.date) : ""}</td>
+            <td class="cl-meta">${row.date ? dateText(row.date) : ""}</td>
             <td><a class="portal-inline-link" href="${basePath}/${encodeURIComponent(row.item.id)}">${escapeHtml(billingLabel(row.item))}</a><small>${escapeHtml(row.item.title)}</small></td>
             <td>${escapeHtml(row.how || "")}</td>
-            <td>${escapeHtml(row.note || "")}</td>
-            <td>${money(row.amount, row.item.currency)}</td>
+            <td class="cl-main cl-note">${escapeHtml(row.note || "")}</td>
+            <td class="cl-money">${money(row.amount, row.item.currency)}</td>
           </tr>`).join("")}</tbody>
         </table>
         <dl class="billing-totals">
@@ -1845,36 +1847,46 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
 
   const submitLabel = mode === "edit" ? "Save changes" : template ? "Save template" : kind === "invoice" ? "Post invoice" : "Post quote";
 
-  // A new invoice lists payments already received (a deposit, earlier checks); an existing one's
-  // are added and removed on its page. A row left without an amount is skipped. Other method shows
-  // only when Other is chosen (billing.js).
+  // Payments: on a new invoice, payments already received (a deposit, earlier checks); editing an
+  // invoice, every payment it has, the same way. The column names show once, over the first row.
+  // A row left without an amount (or removed) is skipped; less than the total leaves the rest due,
+  // the total marks it paid. Other method shows only when Other is chosen (billing.js). An invoice
+  // paid through Stripe or the bank lists its payments as they are (`values.fixedPayments`).
   let paymentsSection = "";
-  if (creating) {
+  const fixedPayments = values.fixedPayments || [];
+  if (mode === "edit" && kind === "invoice" && fixedPayments.length) {
+    paymentsSection = `<fieldset class="listed-payments">
+          <legend>Payments</legend>
+          <ul class="admin-activity">${fixedPayments.map((line) => `<li><span>${escapeHtml(line)}</span></li>`).join("")}</ul>
+        </fieldset>`;
+  } else if (creating || (mode === "edit" && kind === "invoice")) {
     const typed = values.payments?.length ? values.payments : [{}];
     const methods = (chosen) => Object.entries(PAYMENT_METHODS).map(([key, label]) => `<option value="${key}"${key === (chosen || "check") ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+    const label = (text) => `<span class="listed-payment-label">${text}</span>`;
     paymentsSection = `<fieldset class="listed-payments" data-listed-payments${kind === "quote" ? " hidden" : ""}>
           <legend>Payments</legend>
-          ${typed.map((row, index) => `<div class="listed-payment" data-listed-payment>
-            <label for="listed-${index}-amount">Amount ($)
+          ${mode === "edit" ? '<input type="hidden" name="payments" value="listed">' : ""}
+          ${typed.map((row, index) => `<div class="listed-payment" data-listed-payment data-row-delete>
+            <input type="hidden" name="paymentId" value="${escapeAttribute(row.id || "")}">
+            <input type="hidden" name="paymentReference" value="${escapeAttribute(row.reference || "")}">
+            <label for="listed-${index}-amount">${label("Amount ($)")}
               <input id="listed-${index}-amount" name="paymentAmount" type="text" inputmode="decimal" maxlength="12" value="${escapeAttribute(row.amount || "")}" placeholder="0.00">
             </label>
-            <label for="listed-${index}-method">Paid by
+            <label for="listed-${index}-method">${label("Paid by")}
               <select id="listed-${index}-method" name="paymentMethod" data-listed-method>${methods(row.method)}</select>
             </label>
-            <label for="listed-${index}-other" data-listed-other${row.method === "other" ? "" : " hidden"}>Other method
-              <input id="listed-${index}-other" name="paymentMethodName" type="text" maxlength="60" value="${escapeAttribute(row.methodName || "")}">
+            <label for="listed-${index}-other" data-listed-other${row.method === "other" ? "" : " hidden"}>${label("Other method")}
+              <input id="listed-${index}-other" name="paymentMethodName" type="text" maxlength="60" value="${escapeAttribute(row.methodName || "")}" placeholder="Other method">
             </label>
-            <label for="listed-${index}-date">Received on
+            <label for="listed-${index}-date">${label("Received on")}
               <input id="listed-${index}-date" name="paymentPaidOn" type="date" value="${escapeAttribute(row.paidOn || "")}">
             </label>
-            <label class="listed-payment-note" for="listed-${index}-note">Notes
+            <label class="listed-payment-note" for="listed-${index}-note">${label("Notes")}
               <input id="listed-${index}-note" name="paymentNote" type="text" maxlength="${MAX_PAYMENT_NOTE}" value="${escapeAttribute(row.note || "")}">
             </label>
           </div>`).join("")}
           <button class="portal-logout-button" type="button" data-listed-payment-add hidden>Add another payment</button>
         </fieldset>`;
-  } else if (mode === "edit" && kind === "invoice") {
-    paymentsSection = '<p class="admin-field-hint">Payments on this invoice are added and removed on its page (Add a payment).</p>';
   }
 
   // Notes and terms: Use template fills the box from a saved one; its Create new names this text,
@@ -1885,13 +1897,19 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
               <option value="${escapeAttribute(entry.id)}" data-text="${escapeAttribute(entry.text)}">${escapeHtml(entry.name)}</option>`).join("")}
             </select>`;
 
-  // Save as template, on a new quote or invoice: a link that opens the template's name.
+  // Save as template, on a new quote or invoice: a link (or Save in Templates) that opens the
+  // template's name. Save template saves it now and keeps the editor as it is (intent=template);
+  // posting with a name saves the template too.
   const saveAsTemplate = creating
     ? `<div class="save-template" data-save-template>
           <button class="portal-logout-button" type="button" data-save-template-open hidden>Save as template</button>
-          <label for="new-template-name" data-save-template-name>Template name
-            <input id="new-template-name" name="templateName" type="text" maxlength="80" value="${escapeAttribute(values.templateName || "")}" placeholder="Framing draw">
-          </label>
+          <div class="save-template-name" data-save-template-name>
+            <label for="new-template-name">Template name
+              <input id="new-template-name" name="templateName" type="text" maxlength="80" value="${escapeAttribute(values.templateName || "")}" placeholder="Framing draw">
+            </label>
+            <button class="button button-outline" type="button" data-save-template-now hidden>Save template</button>
+          </div>
+          <input type="hidden" name="intent" value="" data-save-template-intent>
         </div>`
     : "";
 
@@ -1904,9 +1922,7 @@ export function billingEditorPage({ mode, client = null, values, error = "", not
       ${noticeMarkup(notice)}
       <form class="portal-form admin-form billing-editor" action="${escapeAttribute(actionPath)}" method="post">
         ${error ? `<p class="portal-error" role="alert">${escapeHtml(error)}</p>` : ""}
-        ${paid === "stripe"
-          ? '<p class="portal-notice">This invoice was paid through Stripe. Changing its lines changes its total; the Stripe payment stays as Stripe recorded it.</p>'
-          : paid ? '<p class="portal-notice">This invoice is marked paid. Changing its lines changes its total, and the recorded payment changes to match.</p>' : ""}
+        ${paid === "stripe" ? '<p class="portal-notice">Paid through Stripe: its payment stays as Stripe recorded it.</p>' : ""}
         ${template ? `<label for="template-name">Template name
           <input id="template-name" name="templateName" type="text" maxlength="80" required value="${escapeAttribute(values.templateName || "")}" placeholder="Framing draw">
         </label>` : ""}
@@ -2031,14 +2047,13 @@ function otherProjectFold({ base, client, item, projects }) {
           </form>`);
 }
 
-// Payments toward the balance, each opening to edit, with Remove while the invoice is open.
+// Payments toward the balance, single spaced: a click opens one to edit, and while the invoice is
+// open a right-click offers Delete (billing.js; without scripts its page has Remove).
 function installmentList(item, base, { removable }) {
   const installments = item.installments || [];
   if (!installments.length) return "";
-  return `<ul class="admin-activity">${installments.map((entry) => `<li><a class="payment-change" href="${base}/payment?installment=${encodeURIComponent(entry.id)}" title="Edit this payment">${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}</a>${removable
-    ? `
-            <form class="admin-manage" action="${base}/remove-payment" method="post"><input type="hidden" name="installment" value="${escapeAttribute(entry.id)}"><button class="portal-logout-button" type="submit">Remove</button></form>`
-    : ""}</li>`).join("")}</ul>`;
+  const remove = (entry) => (removable ? ` data-row-delete data-delete-action="${base}/remove-payment" data-delete-installment="${escapeAttribute(entry.id)}"` : "");
+  return `<ul class="admin-activity payment-lines">${installments.map((entry) => `<li${remove(entry)}><a class="payment-change" href="${base}/payment?installment=${encodeURIComponent(entry.id)}" title="Edit this payment">${money(entry.amountCents, item.currency)} · ${escapeHtml(entry.label)} · ${dateText(entry.paidOn)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ""}</a></li>`).join("")}</ul>`;
 }
 
 // A quote's or invoice's admin page: its actions beside the heading, then the document with

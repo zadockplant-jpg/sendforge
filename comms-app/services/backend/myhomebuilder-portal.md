@@ -298,10 +298,29 @@ projects. Each export is in the activity log.
     Its books are reversed and posted again (activity `expense.edited`). An expense matched to a
     bank withdrawal keeps the match unless its amount or what paid it changes; then the
     withdrawal goes back under To file in Banking.
+  - A row highlights as a whole under the pointer.
+- **Lists are one line per row** in a narrow window (900px or less) or a narrow panel (a fold
+  720px or less, a container query): quotes and invoices, payments, expenses, documents and the
+  Ledger (`.compact-list`; cells marked `cl-main`, `cl-money`, `cl-meta`, `cl-hide`). The name or
+  notes take the room left and end in "…", the amount sits at the right, and second lines and the
+  less needed columns are left out; each row's form or page has them all.
+- **Right-click a payment for Delete** (a long press on Android): on the invoice page, in the
+  project's Payments, and in the invoice editor. A payment toward the balance is removed; the one
+  that settled an invoice is taken off it (Mark as unpaid); an editor row is taken out. Payments
+  have no Remove buttons (their pages without scripts still do).
 - **No dropdown arrows** anywhere in the portal: a box that opens a list when clicked is the menu.
 - **The quote and invoice editor** has no Cancel (the project's name above the heading goes back).
-  - **Templates**, beside a new quote or invoice's heading, opens the chosen template as soon as it
-    is picked.
+  - **Templates**, beside a new quote or invoice's heading: its first choice, **Save**, opens Save
+    as template, whose **Save template** saves what is filled in as a new template now
+    (`intent=template` on the new quote or invoice's POST: nothing is posted, and the editor comes
+    back as it was). Any other choice opens the editor filled in from that template.
+  - **Editing an invoice** brings up the same editor, its payments listed in Payments (each
+    payment toward the balance, then the one that settled it; `payments=listed`, each row's
+    `paymentId`). Changing, adding or taking out a payment there is saved with the invoice: less
+    than the total leaves it open, the total marks it paid (the latest payment settles it), and
+    more is refused. A payment that was on it keeps its id and receipt. Paid back down to less,
+    it is open again and its receipt and payment notice are forgotten. An invoice paid through
+    Stripe or the bank lists its payments to read only. The activity log names the payment changes.
   - **Notes and terms** has **Use template** to its right: a saved one fills the box, and **Create
     new** names what is typed, saved as a notes and terms template when the form is posted (a name
     already in use takes the new text). They share `mhb_templates`, marked `type: "notes"`, and
@@ -369,11 +388,13 @@ Stripe:
 
 - **Payments on a new invoice:** the invoice editor's **Payments** lists a deposit or earlier
   payments: amount, paid by (Other method shows when Other is chosen), received on and notes (kept
-  with the payment as `note`, shown to the admin only). Add another payment adds a row; a row
-  without an amount is skipped. Less than the total leaves the rest due; the total marks the
-  invoice paid (the last payment settles it). More than the total is refused, keeping what was
-  typed. Choosing Quote hides Payments. An existing invoice's payments are added and removed on
-  its page.
+  with the payment as `note`, shown to the admin only). The column names show once, over the first
+  row. Add another payment adds a row with the last row's paid by and date already chosen; a
+  right-click's Delete takes a row out; a row without an amount is skipped. Less than the total
+  leaves the rest due; the total marks the invoice paid (the last payment settles it). More than
+  the total is refused, keeping what was typed. Choosing Quote hides Payments. Editing the invoice
+  lists them again the same way. On the invoice itself, the payments under the total are single
+  spaced.
 
 ## Job expenses
 

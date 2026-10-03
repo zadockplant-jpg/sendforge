@@ -113,6 +113,7 @@ import {
   issuedDate,
   isEditable,
   isPayable,
+  moneyInput,
   parseBillingForm,
   parseListedPayments,
   parseManualPayment,
@@ -566,7 +567,8 @@ async function buildBillingItem(store, client, values, extra = {}) {
 // other invoices' numbers; the saved item comes back with its number, with `renumbered` set when
 // other invoices moved.
 // What an edit changed, in words, for the activity log.
-function editSummary(before, after) {
+// `payments`: the editor listed them, so changes to them are named too.
+function editSummary(before, after, { payments = false } = {}) {
   const changes = [];
   if (before.amountCents !== after.amountCents) changes.push(`total ${money(before.amountCents, before.currency)} → ${money(after.amountCents, after.currency)}`);
   if (issuedDate(before) !== issuedDate(after)) changes.push(`date ${formatDate(issuedDate(before))} → ${formatDate(issuedDate(after))}`);
@@ -574,6 +576,12 @@ function editSummary(before, after) {
   if ((before.dueDate || "") !== (after.dueDate || "")) changes.push(`due date ${formatDate(before.dueDate) || "none"} → ${formatDate(after.dueDate) || "none"}`);
   if (before.amountCents === after.amountCents && JSON.stringify(before.lineItems || []) !== JSON.stringify(after.lineItems || [])) changes.push("line items");
   if ((before.description || "") !== (after.description || "")) changes.push("notes and terms");
+  const paymentsOf = (item) => [...(item.installments || []), ...(item.status === "paid" ? [{ ...item.payment, paidOn: item.paidAt }] : [])]
+    .map((entry) => `${money(entry.amountCents ?? 0, item.currency)} ${entry.label || ""} ${formatDate(entry.paidOn)}${entry.note ? ` (${entry.note})` : ""}`.replaceAll(/\s+/gu, " ").trim());
+  const paymentsBefore = paymentsOf(before).join("; ");
+  const paymentsAfter = paymentsOf(after).join("; ");
+  if (payments && paymentsBefore !== paymentsAfter) changes.push(`payments ${paymentsBefore || "none"} → ${paymentsAfter || "none"}`);
+  if (before.status !== after.status) changes.push(after.status === "paid" ? "paid in full" : "open again");
   return `Edited ${billingLabel(after)}${changes.length ? `: ${changes.join("; ")}` : " (no changes)"}`;
 }
 
@@ -1338,6 +1346,49 @@ async function saveNotesTemplate(store, values, log) {
   return template;
 }
 
+// An invoice's payments recorded by hand, as rows of its editor: each payment toward the balance,
+// then the one that settled it (id "settled"). Null when it was paid through Stripe or the bank:
+// those stay as recorded, and the editor shows them without fields (fixedPayments).
+function paymentRowsOf(item) {
+  if (item.kind !== "invoice") return [];
+  if (item.status === "paid" && item.payment?.source !== "manual") return null;
+  const row = (entry, id, paidOn, amountCents) => ({
+    id, amount: moneyInput(amountCents), method: entry.method || "check", methodName: entry.methodName || "",
+    reference: entry.reference || "", paidOn: String(paidOn || "").slice(0, 10), note: entry.note || ""
+  });
+  const rows = (item.installments || []).map((entry) => row(entry, entry.id, entry.paidOn, entry.amountCents));
+  if (item.status === "paid") rows.push(row(item.payment, "settled", item.paidAt, item.payment.amountCents ?? item.amountCents - installmentsTotal(item)));
+  return rows;
+}
+
+// The same payments for an invoice paid through Stripe or the bank, as lines to read.
+function fixedPaymentsOf(item) {
+  const payment = item.payment || {};
+  return [
+    ...(item.installments || []).map((entry) => `${formatDate(entry.paidOn)} · ${entry.label} · ${money(entry.amountCents, item.currency)}`),
+    `${formatDate(item.paidAt)} · ${payment.label || (payment.source === "stripe" ? "Stripe" : "Bank")} · ${money(payment.amountCents ?? item.amountCents - installmentsTotal(item), item.currency)}`
+  ];
+}
+
+// The payments listed on an edited invoice, as it is saved: payments toward the balance and, when
+// they reach the total, the latest (by date) settles it; with less, it is open. A payment that was
+// on it keeps its id (and so its receipt) and when it was recorded. `before` maps those ids, with
+// the payment that settled it as "settled".
+function withEditedPayments(item, payments, before) {
+  const now = new Date().toISOString();
+  const sorted = [...payments].sort((left, right) => left.paidOn.localeCompare(right.paidOn));
+  const toEntry = ({ id, paidOn, amountCents, ...details }) => {
+    const old = id ? before.get(id) : null;
+    return { id: old && id !== "settled" ? id : randomId(8), source: "manual", ...details, amountCents, paidOn, recordedAt: old?.recordedAt || now };
+  };
+  const { installments: _installments, payment: _payment, paidAt: _paidAt, ...rest } = item;
+  const total = sorted.reduce((sum, entry) => sum + entry.amountCents, 0);
+  if (total < item.amountCents) return { ...rest, status: "open", installments: sorted.map(toEntry) };
+  const last = sorted.pop();
+  const { id: _id, paidOn, ...settled } = toEntry(last);
+  return { ...rest, status: "paid", installments: sorted.map(toEntry), paidAt: paidOn, payment: settled };
+}
+
 // A new invoice with payments already received: the earliest are payments toward the balance, and
 // when they reach the total the last one settles it.
 function withListedPayments(item, payments) {
@@ -1563,6 +1614,19 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     // Payments already received, listed on a new invoice (quotes take none).
     const listed = parsed.values.kind === "invoice" ? parseListedPayments(form) : { payments: [], typed: [] };
     const echo = { ...parsed.values, saveTemplate, sendNow, payments: listed.typed };
+    // Save template (Save in Templates, or the button beside the template's name): the template is
+    // saved now, and the editor comes back as it was, nothing posted.
+    if (form.get("intent") === "template") {
+      const asTemplate = parseBillingForm(form, { template: true });
+      if (asTemplate.error) return renderError(echo, asTemplate.error);
+      const template = templateRecord({ ...asTemplate.values, dueInDays: null });
+      await putTemplate(store, template);
+      await note({ action: "template.saved", summary: `Saved the template ${template.name}` });
+      return editorResponse(store, {
+        mode: "create", client: target, values: { ...echo, templateName: "", saveTemplate: false }, notice: { text: `Template saved: ${template.name}.` },
+        actionPath: billingBase, backPath: `/clients/admin?client=${encodeURIComponent(slug)}`, templates: await listTemplates(store), readiness
+      });
+    }
     if (parsed.error) return renderError(echo, parsed.error);
     if (listed.error) return renderError(echo, listed.error);
     const listedCents = (listed.payments || []).reduce((sum, entry) => sum + entry.amountCents, 0);
@@ -1640,30 +1704,46 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     const editorPath = `${itemPath}/edit`;
     // How a paid invoice was paid ("manual" or "stripe"), for the editor's note; "" when unpaid.
     const paid = item.status === "paid" ? (item.payment?.source === "stripe" ? "stripe" : "manual") : "";
-    if (isRead) {
-      return editorResponse(store, { mode: "edit", client: target, values: { ...editorValuesFromItem(item), issuedOn: issuedDate(item) }, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid });
-    }
+    // The editor is the one a new invoice is made with, its payments listed: those recorded by
+    // hand to change, or, paid through Stripe or the bank, as they are.
+    const rows = paymentRowsOf(item);
+    const fixedPayments = rows === null ? fixedPaymentsOf(item) : [];
+    const editor = (values, error = "", status) => editorResponse(store, { mode: "edit", client: target, values: { ...values, fixedPayments }, error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }, status);
+    if (isRead) return editor({ ...editorValuesFromItem(item), issuedOn: issuedDate(item), payments: rows || [] });
     if (method !== "POST") return methodNotAllowedResponse(["GET", "HEAD", "POST"]);
     const form = await readBoundedForm(context.request, MAX_BILLING_FORM_BYTES);
     if (!form) return redirectResponse(`${itemPath}?notice=invalid`);
     form.set("kind", item.kind);
     const parsed = parseBillingForm(form);
-    if (parsed.error) {
-      return editorResponse(store, { mode: "edit", client: target, values: parsed.values, error: parsed.error, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }, 400);
-    }
-    if (parsed.values.amountCents < installmentsTotal(item)) {
-      return editorResponse(store, { mode: "edit", client: target, values: parsed.values, error: `The total cannot be less than the ${money(installmentsTotal(item), item.currency)} already paid toward this invoice.`, actionPath: editorPath, backPath: itemPath, readiness, number: item.number, paid }, 400);
-    }
-    if (item.checkoutSessionId && parsed.values.amountCents !== item.amountCents) await expireCheckoutSession(env, item.checkoutSessionId);
+    // Its payments, when the editor listed them (an older form without them leaves them as they are).
+    const listing = rows !== null && form.get("payments") === "listed";
+    const listed = listing ? parseListedPayments(form) : null;
+    const echo = { ...parsed.values, ...(listed ? { payments: listed.typed } : {}) };
+    if (parsed.error) return editor(echo, parsed.error, 400);
+    if (listed?.error) return editor(echo, listed.error, 400);
+    const listedCents = listed ? listed.payments.reduce((sum, entry) => sum + entry.amountCents, 0) : 0;
+    if (listed && listedCents > parsed.values.amountCents) return editor(echo, `The payments listed (${money(listedCents)}) are more than the invoice total (${money(parsed.values.amountCents)}).`, 400);
+    if (!listed && parsed.values.amountCents < installmentsTotal(item)) return editor(echo, `The total cannot be less than the ${money(installmentsTotal(item), item.currency)} already paid toward this invoice.`, 400);
     const { title, description, lineItems, amountCents, dueDate } = parsed.values;
     const issuedOn = parsed.values.issuedOn || issuedDate(item);
-    // A payment recorded by hand settles the invoice, so its amount follows the new total, less
-    // any payments toward the balance before it. A Stripe payment keeps the amount Stripe charged.
-    const payment = item.payment?.source === "manual" ? { payment: { ...item.payment, amountCents: amountCents - installmentsTotal(item) } } : {};
-    const edited = { ...item, title, description, lineItems, amountCents, dueDate, issuedOn, ...payment, updatedAt: new Date().toISOString() };
+    const changed = { ...item, title, description, lineItems, amountCents, dueDate, issuedOn, updatedAt: new Date().toISOString() };
+    let edited;
+    if (listed) {
+      const before = new Map([...(item.installments || []).map((entry) => [entry.id, entry]), ...(item.status === "paid" ? [["settled", item.payment]] : [])]);
+      edited = withEditedPayments(changed, listed.payments, before);
+    } else {
+      // A payment recorded by hand settles the invoice, so its amount follows the new total, less
+      // any payments toward the balance before it. A Stripe payment keeps the amount Stripe charged.
+      edited = item.payment?.source === "manual" ? { ...changed, payment: { ...item.payment, amountCents: amountCents - installmentsTotal(item) } } : changed;
+    }
+    // The balance Checkout would charge changed.
+    if (item.checkoutSessionId && (amountCents !== item.amountCents || balanceDue(edited) !== balanceDue(item))) await expireCheckoutSession(env, item.checkoutSessionId);
+    // Paid before and open now: its receipt and payment notice are forgotten, so a later payment
+    // sends fresh ones.
+    if (item.status === "paid" && edited.status === "open") await deleteSentEmails(store, [sentKey(item, "receipt"), sentKey(item, "paid-notice")]);
     await putBilling(store, edited);
     const renumbered = issuedOn !== issuedDate(item) && (await keepInvoicesInDateOrder(store, item.kind));
-    await note({ action: `${item.kind}.edited`, item: (await getBilling(store, slug, item.id)) || edited, amountCents, summary: editSummary(item, edited) });
+    await note({ action: `${item.kind}.edited`, item: (await getBilling(store, slug, item.id)) || edited, amountCents, summary: editSummary(item, edited, { payments: Boolean(listed) }) });
     await saveNotesTemplate(store, parsed.values, note);
     return redirectResponse(`${itemPath}?notice=billing-updated${renumbered ? "&also=renumbered" : ""}`);
   }
