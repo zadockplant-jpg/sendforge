@@ -1,5 +1,6 @@
 // Export Client to PDF (the client portal page, and its right-click menu): a breakdown of every
-// project in a client portal, clean enough to show investors or potential clients.
+// project in a client portal, clean enough to show investors or potential clients. Also a single
+// quote or invoice as a PDF (billingPdf, its page's Download).
 //
 // - With `costs` (for investors): what each project invoiced and was paid, what is outstanding, its
 //   payments, its costs by category and its gross profit and margin (books.js jobBook).
@@ -13,7 +14,7 @@ import PDFDocument from "pdfkit";
 import { balanceDue, billingLabel, billingLineItems, issuedDate, quantityText } from "./billing.js";
 import { jobBook } from "./books.js";
 import { formatDate, money } from "./format.js";
-import { BUILDER_LICENSE, BUSINESS_ADDRESS, INSURANCE, photoDate } from "./pages.js";
+import { BUILDER_LICENSE, BUSINESS_ADDRESS, INSURANCE, billingStatus, photoDate, totalRows } from "./pages.js";
 import { getFile, listBilling, listPhotos } from "./store.js";
 
 const PHOTOS_PER_PROJECT = 6;
@@ -115,22 +116,20 @@ function marginText(profit, income) {
   return income > 0 ? `${Math.round((profit / income) * 1000) / 10}%` : "—";
 }
 
-// ---------- The PDF ----------
+// ---------- Drawing ----------
 
-export function breakdownPdf({ root, entries, costs, today }) {
-  const doc = new PDFDocument({
-    size: "LETTER", margins: { top: TOP, bottom: BOTTOM, left: SIDE, right: SIDE }, bufferPages: true,
-    info: { Title: printable(`${root.name} · Project breakdown`), Author: "My Home Builder LLC", Subject: "Project breakdown", Creator: "My Home Builder client portal" }
-  });
+// A pdfkit document's bytes, once it ends.
+function bytesOf(doc) {
   const chunks = [];
   doc.on("data", (chunk) => chunks.push(chunk));
-  const finished = new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
   });
+}
 
-  let y = TOP;
-  const bottom = PAGE_HEIGHT - BOTTOM;
+// What both PDFs draw with: text styles, measuring, placed text, rules and the MB mark.
+function pen(doc) {
   const style = ({ font = "Helvetica", size = 9, color = INK } = {}) => doc.font(font).fontSize(size).fillColor(color);
   const measure = (text, width, options = {}) => {
     style(options);
@@ -147,6 +146,28 @@ export function breakdownPdf({ root, entries, costs, today }) {
   const line = (top, { color = RULE, width = 0.75, from = SIDE, to = SIDE + WIDTH } = {}) => {
     doc.moveTo(from, top).lineTo(to, top).lineWidth(width).strokeColor(color).stroke();
   };
+  const drawMark = (x, top, width, color) => {
+    const scale = width / MARK_BOX.width;
+    doc.save();
+    doc.translate(x, top).scale(scale).translate(-MARK_BOX.x, -MARK_BOX.y);
+    doc.lineWidth(MARK_BOX.stroke).lineCap("round").lineJoin("round").strokeColor(color);
+    for (const path of MARK_PATHS) doc.path(path).stroke();
+    doc.restore();
+  };
+  return { style, measure, put, line, drawMark };
+}
+
+// ---------- The breakdown ----------
+
+export function breakdownPdf({ root, entries, costs, today }) {
+  const doc = new PDFDocument({
+    size: "LETTER", margins: { top: TOP, bottom: BOTTOM, left: SIDE, right: SIDE }, bufferPages: true,
+    info: { Title: printable(`${root.name} · Project breakdown`), Author: "My Home Builder LLC", Subject: "Project breakdown", Creator: "My Home Builder client portal" }
+  });
+  const finished = bytesOf(doc);
+  const { style, measure, put, line, drawMark } = pen(doc);
+  let y = TOP;
+  const bottom = PAGE_HEIGHT - BOTTOM;
 
   // Pages after the first carry a running header.
   const newPage = () => {
@@ -158,15 +179,6 @@ export function breakdownPdf({ root, entries, costs, today }) {
   };
   const ensure = (height) => {
     if (y + height > bottom) newPage();
-  };
-
-  const drawMark = (x, top, width, color) => {
-    const scale = width / MARK_BOX.width;
-    doc.save();
-    doc.translate(x, top).scale(scale).translate(-MARK_BOX.x, -MARK_BOX.y);
-    doc.lineWidth(MARK_BOX.stroke).lineCap("round").lineJoin("round").strokeColor(color);
-    for (const path of MARK_PATHS) doc.path(path).stroke();
-    doc.restore();
   };
 
   // A row of figure cards, three to a row: [label, value, tone].
@@ -481,6 +493,153 @@ export function breakdownPdf({ root, entries, costs, today }) {
     line(PAGE_HEIGHT - 48, { color: RULE, width: 0.75 });
     put(`My Home Builder LLC · myhomebuilderllc.com · ${BUILDER_LICENSE}`, SIDE, PAGE_HEIGHT - 40, { size: 7.5, color: SOFT, width: 360 });
     put(`Page ${page - range.start + 1} of ${range.count}`, SIDE + WIDTH - 120, PAGE_HEIGHT - 40, { size: 7.5, color: SOFT, width: 120, align: "right" });
+  }
+  doc.end();
+  return finished;
+}
+
+// ---------- A quote or invoice ----------
+
+// A quote or invoice as its page shows it (Download, on its admin page): the business, who it is
+// for, its lines, the payments toward it and what is due, then its notes and terms.
+export function billingPdf({ item, client }) {
+  const invoice = item.kind === "invoice";
+  const kind = invoice ? "Invoice" : "Quote";
+  const doc = new PDFDocument({
+    size: "LETTER", margins: { top: TOP, bottom: BOTTOM, left: SIDE, right: SIDE }, bufferPages: true,
+    info: { Title: printable(`${kind} ${item.number} · ${item.title}`), Author: "My Home Builder LLC", Subject: kind, Creator: "My Home Builder client portal" }
+  });
+  const finished = bytesOf(doc);
+  const { style, measure, put, line, drawMark } = pen(doc);
+  const currency = item.currency;
+  const bottom = PAGE_HEIGHT - BOTTOM;
+  let y = TOP;
+
+  const newPage = () => {
+    doc.addPage();
+    put("MY HOME BUILDER LLC", SIDE, 34, { font: "Helvetica-Bold", size: 7.5, color: DARK, spacing: 1.2, width: 200 });
+    put(`${kind} ${item.number} · ${client.name}`, SIDE + WIDTH - 320, 34, { size: 7.5, color: SOFT, width: 320, align: "right" });
+    line(48);
+    y = CONTINUED_TOP;
+  };
+  const ensure = (height) => {
+    if (y + height > bottom) newPage();
+  };
+
+  // The business, and which quote or invoice this is.
+  drawMark(SIDE, TOP + 2, 64, DARK);
+  put("MY HOME BUILDER LLC", SIDE + 80, TOP + 1, { font: "Helvetica-Bold", size: 11, color: DARK, spacing: 1.4, width: 260 });
+  put(BUSINESS_ADDRESS.join(", "), SIDE + 80, TOP + 17, { size: 8.5, color: SOFT, width: 260 });
+  put(`myhomebuilderllc.com · ${BUILDER_LICENSE}`, SIDE + 80, TOP + 29, { size: 8.5, color: SOFT, width: 260 });
+  put(kind.toUpperCase(), SIDE + WIDTH - 160, TOP + 1, { font: "Helvetica-Bold", size: 8, color: ACCENT, spacing: 2, width: 160, align: "right" });
+  put(item.number, SIDE + WIDTH - 160, TOP + 14, { font: "Helvetica-Bold", size: 20, color: INK, width: 160, align: "right" });
+  line(TOP + 52, { color: DARK, width: 1.5 });
+  y = TOP + 70;
+
+  // Who it is for, when, and where it stands.
+  const meta = [
+    [invoice ? "Bill to" : "Prepared for", client.name],
+    ["Issued", formatDate(issuedDate(item))],
+    ...(item.dueDate ? [[invoice ? "Due" : "Valid until", formatDate(item.dueDate)]] : []),
+    ["Status", billingStatus(item)[1]]
+  ];
+  const firstWidth = WIDTH * 0.4;
+  const restWidth = (WIDTH - firstWidth) / (meta.length - 1);
+  let metaHeight = 0;
+  meta.forEach(([label, value], index) => {
+    const x = index ? SIDE + firstWidth + (index - 1) * restWidth : SIDE;
+    const width = (index ? restWidth : firstWidth) - 12;
+    const status = index === meta.length - 1;
+    const tone = status && ["paid", "accepted"].includes(item.status) ? ACCENT : status && item.status === "void" ? FAINT : INK;
+    put(label.toUpperCase(), x, y, { font: "Helvetica-Bold", size: 7, color: SOFT, spacing: 1, width });
+    put(value, x, y + 13, { font: status ? "Helvetica-Bold" : "Helvetica", size: 10, color: tone, width, wrap: true });
+    metaHeight = Math.max(metaHeight, 13 + measure(value, width, { size: 10 }));
+  });
+  y += metaHeight + 22;
+
+  const titleHeight = measure(item.title, WIDTH, { font: "Times-Roman", size: 22, lineGap: 0 });
+  style({ font: "Times-Roman", size: 22, color: INK });
+  doc.text(printable(item.title), SIDE, y, { width: WIDTH, lineGap: 0 });
+  y += titleHeight + 16;
+
+  // Its lines; the column names repeat on a new page.
+  const columns = [{ label: "Description", width: WIDTH - 232 }, { label: "Qty", width: 52, align: "right" }, { label: "Unit price", width: 90, align: "right" }, { label: "Amount", width: 90, align: "right" }];
+  const lefts = columns.map((_, index) => SIDE + sum(columns.slice(0, index), (column) => column.width));
+  const cell = (text, index, options = {}) => {
+    style({ size: 9, ...options });
+    doc.text(printable(text), lefts[index] + (index ? 4 : 0), y, {
+      width: columns[index].width - (index ? 4 : 12), align: columns[index].align || "left", lineGap: 1.5, characterSpacing: options.spacing ?? 0
+    });
+  };
+  const header = () => {
+    columns.forEach((column, index) => cell(column.label.toUpperCase(), index, { font: "Helvetica-Bold", size: 6.6, color: FAINT, spacing: 0.6 }));
+    y += 13;
+    line(y);
+    y += 7;
+  };
+  ensure(60);
+  header();
+  for (const entry of billingLineItems(item)) {
+    const height = measure(entry.description, columns[0].width - 12, { size: 9 });
+    if (y + height + 8 > bottom) {
+      newPage();
+      header();
+    }
+    cell(entry.description, 0);
+    cell(quantityText(entry.quantity), 1);
+    cell(money(entry.unitCents, currency), 2);
+    cell(money(entry.amountCents, currency), 3);
+    y += height + 7;
+    line(y - 3.5, { color: "#EEEEEE", width: 0.5 });
+  }
+
+  // The total, each payment toward it (single spaced), and what is due, under the Amount column.
+  const amountWidth = 100;
+  const labelWidth = 250;
+  const blockLeft = SIDE + WIDTH - amountWidth - labelWidth;
+  y += 6;
+  for (const row of totalRows(item)) {
+    const size = row.total ? 11 : row.paid ? 8.5 : 9.5;
+    const height = row.total ? 18 : row.paid ? 12.5 : 16;
+    ensure(height + (row.total ? 8 : 0));
+    if (row.total) {
+      line(y, { color: DARK, width: 1, from: blockLeft, to: SIDE + WIDTH });
+      y += 7;
+    }
+    const look = { font: row.total ? "Helvetica-Bold" : "Helvetica", size, color: row.paid ? SOFT : INK };
+    put(row.label, blockLeft, y, { ...look, width: labelWidth - 12, align: "right" });
+    put(money(row.cents, currency), blockLeft + labelWidth, y, { ...look, width: amountWidth, align: "right" });
+    y += height;
+  }
+
+  // Notes and terms, a paragraph at a time so a long one carries onto the next page.
+  if (item.description) {
+    ensure(50);
+    y += 18;
+    put("Notes and terms", SIDE, y, { font: "Helvetica-Bold", size: 10, color: DARK, width: WIDTH });
+    y += 16;
+    for (const paragraph of String(item.description).split("\n")) {
+      const height = paragraph.trim() ? measure(paragraph, WIDTH, { size: 9, lineGap: 2 }) : 6;
+      ensure(height);
+      if (paragraph.trim()) put(paragraph, SIDE, y, { size: 9, color: INK, width: WIDTH, wrap: true, lineGap: 2 });
+      y += height + 2;
+    }
+  }
+
+  ensure(44);
+  y += 22;
+  put(INSURANCE, SIDE, y, { size: 8, color: SOFT, width: WIDTH, wrap: true });
+  y += measure(INSURANCE, WIDTH, { size: 8 }) + 4;
+  put("Thank you for building with My Home Builder LLC.", SIDE, y, { size: 9, color: INK, width: WIDTH });
+
+  // A page number on each page, when it runs past one.
+  const range = doc.bufferedPageRange();
+  if (range.count > 1) {
+    for (let page = range.start; page < range.start + range.count; page += 1) {
+      doc.switchToPage(page);
+      doc.page.margins.bottom = 0;
+      put(`${kind} ${item.number} · Page ${page - range.start + 1} of ${range.count}`, SIDE + WIDTH - 200, PAGE_HEIGHT - 40, { size: 7.5, color: SOFT, width: 200, align: "right" });
+    }
   }
   doc.end();
   return finished;

@@ -63,7 +63,9 @@ the same way jayje.com forwards its account pages. Everything else lives here:
   in the same SendGrid account, and mail goes from `billing@myhomebuilderllc.com` with replies
   to `mb@myhomebuilderllc.com`. Messages carry the category `myhomebuilder-portal` and no
   `sf_` custom arguments, so SendForge's event webhook skips them. Click, open and
-  subscription tracking are off per message so pay links are never rewritten.
+  subscription tracking are off per message so pay links are never rewritten. Mail goes out
+  through SendGrid's API, not a mailbox, so nothing shows in a Sent folder; what went where is on
+  each quote's or invoice's page (Email, History).
 - Optional overrides:
   - `MHB_SITE_URL` (default `https://myhomebuilderllc.com`), used for links in emails the webhook sends
   - `MHB_ALLOWED_ORIGINS` (default the apex and `www` origins)
@@ -328,8 +330,12 @@ projects. Each export is in the activity log.
   - **Save as template**, under Add another payment, opens the template's name; posting with a
     name saves the quote or invoice as a template too.
 - **A quote's or invoice's page** has its actions beside the heading (a quote's **Create
-  invoice** or its invoice, **Edit**, **Save as template**, **Mark void** while allowed, and the
-  trash button, whose page confirms what goes with it). Beside the document (above it on a phone)
+  invoice** or its invoice, **Edit**, **Save as template**, **Download**, **Mark void** while
+  allowed, and the trash button, whose page confirms what goes with it). **Download** saves it as
+  a PDF (`GET .../billing/<id>/pdf`, `Invoice 23 - <project>.pdf`): the letterhead, who it is
+  for, its lines, the total with each payment single spaced, what is due, and its notes and
+  terms (`billingPdf` in `export.js`, its rows from `totalRows`, as its page shows them). Emailing
+  a quote or invoice attaches the same PDF; receipts carry none. Beside the document (above it on a phone)
   are one-line folds, each with a short status at its end:
   - **Payment** (open to start on an open invoice): payments toward the balance, with Remove,
     and Add payment ("$568.00 due"); on a paid one, its payment to change and Mark as unpaid

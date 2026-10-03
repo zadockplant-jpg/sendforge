@@ -78,7 +78,8 @@ globalThis.fetch = async (input, init = {}) => {
       text: body.content.find((part) => part.type === "text/plain")?.value,
       html: body.content.find((part) => part.type === "text/html")?.value,
       categories: body.categories,
-      tracking: body.tracking_settings
+      tracking: body.tracking_settings,
+      attachments: body.attachments || []
     });
     return new Response(null, { status: 202, headers: { "X-Message-Id": id } });
   }
@@ -1948,7 +1949,8 @@ test("an invoice's page: its actions beside the heading, one-line folds with a s
 
   const open = await page();
   const actions = open.match(/<div class="billing-admin-actions">([\s\S]*?)<\/div>/u)[1];
-  assert.deepEqual([...actions.matchAll(/>(Edit|Save as template|Mark void)</gu)].map((match) => match[1]), ["Edit", "Save as template", "Mark void"]);
+  assert.deepEqual([...actions.matchAll(/>(Edit|Save as template|Download|Mark void)</gu)].map((match) => match[1]), ["Edit", "Save as template", "Download", "Mark void"]);
+  assert.match(actions, new RegExp(`<a class="button button-outline" href="${path}/pdf" download>Download</a>`, "u"));
   assert.match(actions, new RegExp(`<a class="billing-trash" href="${path}/delete" aria-label="Delete Invoice 1" title="Delete">`, "u"));
   const order = ['id="billing-payment"', 'id="billing-email"', 'id="billing-share"', 'id="billing-history"'].map((text) => open.indexOf(text));
   assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), "Payment, Email, Share, History");
@@ -4483,6 +4485,47 @@ test("Export Client to PDF downloads a breakdown of every project in the client 
   const accented = await pdfText(new Uint8Array(await (await request(`/clients/admin/clients/${smith}/export`, { headers: { Cookie: adminCookie } })).arrayBuffer()));
   assert.ok(accented.includes("Café Annex ?"));
   assert.equal((await request(`/clients/admin/clients/${smith}/export`, { method: "POST", headers: { Cookie: adminCookie } })).status, 405);
+});
+
+test("an invoice's Download is its PDF, and emailing it attaches the same PDF", async () => {
+  const adminCookie = await loginAsAdmin();
+  await setClientEmail(adminCookie, "pat@example.com");
+  const { item } = await postInvoice(adminCookie, { title: "Framing draw", description: "Due on receipt.", dueDate: "2026-12-31", ...lines(["Wall framing", "2", "2,250"]) });
+  const path = `/clients/admin/clients/muskegon-addition/billing/${item.id}`;
+  await request(`${path}/record-payment`, form({ amount: "1,000", method: "zelle", paidOn: "2026-09-20" }, adminCookie));
+  await request(`${path}/record-payment`, form({ amount: "500", method: "check", paidOn: "2026-09-24" }, adminCookie));
+
+  const download = await request(`${path}/pdf`, { headers: { Cookie: adminCookie } });
+  assert.equal(download.status, 200);
+  assert.equal(download.headers.get("Content-Type"), "application/pdf");
+  assert.equal(download.headers.get("Content-Disposition"), `attachment; filename="Invoice ${item.number} - Muskegon Addition.pdf"`);
+  const bytes = new Uint8Array(await download.arrayBuffer());
+  assert.equal(Buffer.from(bytes.subarray(0, 5)).toString(), "%PDF-");
+  assert.equal((await PDFDocument.load(bytes)).getTitle(), `Invoice ${item.number} · Framing draw`);
+  const text = await pdfText(bytes);
+  for (const shown of ["MY HOME BUILDER LLC", "INVOICE", "BILL TO", "Muskegon Addition", "Dec 31, 2026", "Partly paid", "Framing draw", "Wall framing", "$2,250.00", "$4,500.00",
+    "Paid Sep 20, 2026 · Zelle", "Paid Sep 24, 2026 · Check", "Balance due", "$3,000.00", "Notes and terms", "Due on receipt.", "License # 242601116", "Thank you for building with My Home Builder LLC."]) {
+    assert.ok(text.includes(shown), `the PDF shows ${shown}`);
+  }
+  assert.ok(!text.includes("pat@example.com"), "and not the client's email");
+  assert.equal((await request(`${path}/pdf`, { method: "POST", headers: { Cookie: adminCookie } })).status, 405);
+  assert.equal((await request(`${path}/pdf`)).status === 200, false, "only for the admin");
+
+  // Emailing the invoice attaches it.
+  await request(`${path}/send`, form({ to: "pat@example.com" }, adminCookie));
+  const [attachment, ...others] = email.delivered.at(-1).attachments;
+  assert.equal(others.length, 0);
+  assert.deepEqual([attachment.filename, attachment.type, attachment.disposition], [`Invoice ${item.number} - Muskegon Addition.pdf`, "application/pdf", "attachment"]);
+  const attached = Buffer.from(attachment.content, "base64");
+  assert.equal(attached.subarray(0, 5).toString(), "%PDF-");
+  assert.ok((await pdfText(attached)).includes("Paid Sep 24, 2026 · Check"));
+
+  // A quote's too, and other email (a receipt) carries none.
+  await request("/clients/admin/clients/muskegon-addition/billing", form({ kind: "quote", title: "Deck", sendNow: "yes", ...lines(["Deck", "1", "4,000"]) }, adminCookie));
+  assert.match(email.delivered.at(-1).attachments[0].filename, /^Quote \d+ - Muskegon Addition\.pdf$/u);
+  await request(`${path}/record-payment`, form({ method: "zelle", paidOn: "2026-09-30", sendReceipt: "yes" }, adminCookie));
+  assert.match(email.delivered.at(-1).subject, /^Receipt/u);
+  assert.deepEqual(email.delivered.at(-1).attachments, []);
 });
 
 // ---------- The live material designer ----------

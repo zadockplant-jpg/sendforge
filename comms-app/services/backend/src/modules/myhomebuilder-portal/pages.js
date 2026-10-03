@@ -215,7 +215,7 @@ export function loginPage(hasError = false, destination = "") {
     </div>`, { title: "Client Login" });
 }
 
-function billingStatus(item) {
+export function billingStatus(item) {
   if (item.status === "paid") return ["paid", "Paid"];
   if (item.status === "accepted") return ["paid", "Accepted"];
   if (item.status === "void") return ["void", "Void"];
@@ -555,6 +555,28 @@ function paymentSummary(item) {
   return [formatDate(item.paidAt), payment.label].filter(Boolean).join(" · ");
 }
 
+// The rows under a quote's or invoice's lines, for its page and its PDF: the total, each payment
+// toward it (`paid`), refunds, and what is due (`total`). { label, cents, paid, total }
+export function totalRows(item) {
+  const invoice = item.kind === "invoice";
+  const earlier = (item.installments || []).map((entry) => ({ label: `Paid ${[formatDate(entry.paidOn), entry.label].filter(Boolean).join(" · ")}`, cents: -entry.amountCents, paid: true }));
+  if (invoice && item.status === "paid") {
+    const paidCents = item.payment?.amountCents ?? item.amountCents - installmentsTotal(item);
+    return [
+      { label: "Total", cents: item.amountCents },
+      ...earlier,
+      { label: `Paid ${paymentSummary(item)}`, cents: -paidCents, paid: true },
+      ...liveRefunds(item).map((refund) => ({ label: `Refunded ${formatDate(refund.refundedAt)}`, cents: refund.amountCents, paid: true })),
+      { label: "Balance due", cents: balanceDue(item), total: true }
+    ];
+  }
+  if (invoice && earlier.length && item.status !== "void") {
+    return [{ label: "Total", cents: item.amountCents }, ...earlier, { label: "Balance due", cents: balanceDue(item), total: true }];
+  }
+  if (invoice) return [{ label: item.status === "void" ? "Total (void)" : "Amount due", cents: item.amountCents, total: true }];
+  return [{ label: "Quote total", cents: item.amountCents, total: true }];
+}
+
 export function billingDocument({ item, client }) {
   const [tone, label] = billingStatus(item);
   const invoice = item.kind === "invoice";
@@ -566,26 +588,7 @@ export function billingDocument({ item, client }) {
             </tr>`).join("");
 
   // The payments under the total are single spaced (billing-paid).
-  const totals = [];
-  const earlier = (item.installments || []).map((entry) => `<tr class="billing-paid"><th scope="row" colspan="3">Paid ${escapeHtml([formatDate(entry.paidOn), entry.label].filter(Boolean).join(" · "))}</th><td>${money(-entry.amountCents, item.currency)}</td></tr>`);
-  if (invoice && item.status === "paid") {
-    const paidCents = item.payment?.amountCents ?? item.amountCents - installmentsTotal(item);
-    totals.push(`<tr><th scope="row" colspan="3">Total</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
-    totals.push(...earlier);
-    totals.push(`<tr class="billing-paid"><th scope="row" colspan="3">Paid ${escapeHtml(paymentSummary(item))}</th><td>${money(-paidCents, item.currency)}</td></tr>`);
-    for (const refund of liveRefunds(item)) {
-      totals.push(`<tr class="billing-paid"><th scope="row" colspan="3">Refunded ${escapeHtml(formatDate(refund.refundedAt))}</th><td>${money(refund.amountCents, item.currency)}</td></tr>`);
-    }
-    totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Balance due</th><td>${money(balanceDue(item), item.currency)}</td></tr>`);
-  } else if (invoice && earlier.length && item.status !== "void") {
-    totals.push(`<tr><th scope="row" colspan="3">Total</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
-    totals.push(...earlier);
-    totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Balance due</th><td>${money(balanceDue(item), item.currency)}</td></tr>`);
-  } else if (invoice) {
-    totals.push(`<tr class="billing-total"><th scope="row" colspan="3">${item.status === "void" ? "Total (void)" : "Amount due"}</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
-  } else {
-    totals.push(`<tr class="billing-total"><th scope="row" colspan="3">Quote total</th><td>${money(item.amountCents, item.currency)}</td></tr>`);
-  }
+  const totals = totalRows(item).map((row) => `<tr${row.total ? ' class="billing-total"' : row.paid ? ' class="billing-paid"' : ""}><th scope="row" colspan="3">${escapeHtml(row.label)}</th><td>${money(row.cents, item.currency)}</td></tr>`);
 
   return `<article class="billing-doc" aria-label="${kindLabel(item)} ${escapeAttribute(item.number)}">
         <header class="billing-doc-head">
@@ -2124,8 +2127,8 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   folds.push(otherProjectFold({ base, client, item, projects }));
   folds.push(fold("billing-history", "History", activity(item, receipt)));
 
-  // Beside the heading: a quote's invoice, Edit, Save as template, Mark void and Delete (its page
-  // confirms what goes with it).
+  // Beside the heading: a quote's invoice, Edit, Save as template, Download (its PDF), Mark void
+  // and Delete (its page confirms what goes with it).
   const actions = [];
   if (!invoice && item.invoiceNumber) {
     actions.push(`<a class="button button-outline" href="/clients/admin/clients/${encodeURIComponent(client.slug)}/billing/${encodeURIComponent(item.invoiceId)}">Invoice ${escapeHtml(item.invoiceNumber)}</a>`);
@@ -2134,6 +2137,7 @@ export function adminBillingPage({ client, item, links, receipt = null, recipien
   }
   if (isEditable(item)) actions.push(`<a class="button ${!invoice && !item.invoiceNumber ? "button-outline" : "button-solid"}" href="${base}/edit">Edit</a>`);
   actions.push(`<form action="/clients/admin/templates/from-billing" method="post"><input type="hidden" name="client" value="${escapeAttribute(client.slug)}"><input type="hidden" name="id" value="${escapeAttribute(item.id)}"><button class="button button-outline" type="submit">Save as template</button></form>`);
+  actions.push(`<a class="button button-outline" href="${base}/pdf" download>Download</a>`);
   // An invoice with payments toward it is not voided (its payments would have nothing to apply to).
   if (item.status === "open" && !installmentsTotal(item)) actions.push(`<form action="${base}/void" method="post"><button class="button button-outline" type="submit">Mark void</button></form>`);
   actions.push(`<a class="billing-trash" href="${base}/delete" aria-label="Delete ${escapeAttribute(billingLabel(item))}" title="Delete">${TRASH_ICON}</a>`);

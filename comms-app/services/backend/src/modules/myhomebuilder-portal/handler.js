@@ -130,7 +130,7 @@ import { handleAdminBank, listBankAccounts, unfileExpenseMatch } from "./bank.js
 import { handleAdminTeam } from "./team.js";
 import { DESIGNER_PATH, handleDesigner, hasRenders } from "./designer.js";
 import { countSignInBlocks, guardAddress, liftSignInBlock, listSignInGuard, signInBlock, signInFailed, signInSucceeded } from "./guard.js";
-import { breakdownPdf, clientBreakdown } from "./export.js";
+import { billingPdf, breakdownPdf, clientBreakdown } from "./export.js";
 import { categoryName, deleteExpense, getExpense, listAllExpenses, listExpenses, paidToSuggestions, paidWithOptions, putExpense, resolveCategory } from "./expenses.js";
 import {
   adminArchivePage,
@@ -616,12 +616,27 @@ async function noteRenumbered(store, count) {
   await record(store, { actor: "system", action: "invoices.renumbered", summary: `Invoice numbers re-sorted by date: ${count} invoice${count === 1 ? "" : "s"} moved` });
 }
 
-// Emails a quote or invoice to a list of addresses, as one email. Returns the item with
-// sentAt/sentTo set for the caller to save.
+// "Invoice 23 - Paul and Cathy.pdf": a quote's or invoice's PDF, downloaded or attached.
+function billingFileName(item, client) {
+  return `${billingLabel(item)} - ${safeFileName(client.name)}.pdf`.replaceAll(/[^\x20-\x7e]/gu, "_");
+}
+
+// The quote or invoice as a PDF attachment, or none if it could not be drawn (the email still goes).
+async function billingAttachment(item, client) {
+  try {
+    return [{ filename: billingFileName(item, client), type: "application/pdf", content: await billingPdf({ item, client }) }];
+  } catch (error) {
+    console.error(JSON.stringify({ message: "billing pdf failed", error: error instanceof Error ? error.message : "Unknown error" }));
+    return [];
+  }
+}
+
+// Emails a quote or invoice to a list of addresses, as one email, with its PDF attached. Returns
+// the item with sentAt/sentTo set for the caller to save.
 async function emailBillingItem(env, store, item, client, to, origin) {
   const links = shareLinks(origin, item);
   const message = billingIssuedMessage({ item, client, viewUrl: links.view, payUrl: isPayable(item) && stripeConfigured(env) ? links.pay : "" });
-  const delivery = await sendEmail(env, { to, ...message, ...clientSender(env), category: item.kind });
+  const delivery = await sendEmail(env, { to, ...message, ...clientSender(env), category: item.kind, attachments: await billingAttachment(item, client) });
   if (!delivery.ok) return { ok: false, item };
   await rememberForProject(store, client, to);
   return { ok: true, item: { ...item, sentAt: new Date().toISOString(), sentTo: to.join(", ") } };
@@ -1781,6 +1796,16 @@ async function handleAdminBilling(context, store, target, id, action, readiness,
     await note({ action: `${item.kind}.deleted`, item, deleted: true, reason: "deleted", amountCents: item.amountCents, summary: `Deleted ${billingLabel(item)} · ${item.title} · ${money(item.amountCents, item.currency)}` });
     const renumbered = await keepInvoicesInDateOrder(store, item.kind);
     return redirectResponse(`/clients/admin?client=${encodeURIComponent(slug)}&notice=${item.kind}-deleted${renumbered ? "&also=renumbered" : ""}`);
+  }
+
+  // Download: the quote or invoice as a PDF.
+  if (action === "pdf") {
+    if (!isRead) return methodNotAllowedResponse(["GET", "HEAD"]);
+    const pdf = await billingPdf({ item, client: target });
+    const headers = responseHeaders("application/pdf");
+    headers.set("Content-Disposition", `attachment; filename="${billingFileName(item, target)}"`);
+    headers.set("Content-Length", String(pdf.byteLength));
+    return new Response(method === "HEAD" ? null : pdf, { status: 200, headers });
   }
 
   // A payment's page, the payment popup's form without scripts: ?installment=<id> for a payment

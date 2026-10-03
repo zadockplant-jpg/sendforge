@@ -85,7 +85,8 @@ function mailbox(value) {
 // SendGrid queues a message when it answers 202. Rate limits and server errors get one retry;
 // a network error does not, because SendGrid may already have accepted the message.
 // `to` is one address or a list; a list goes out as one email with every address in To.
-export async function sendEmail(env, { to, subject, text, html, from, replyTo, category = "portal" }) {
+// `attachments` are files sent with it: [{ filename, type, content }] (content as bytes).
+export async function sendEmail(env, { to, subject, text, html, from, replyTo, category = "portal", attachments = [] }) {
   if (!emailConfigured(env)) return { ok: false, reason: "email-not-configured" };
 
   const body = {
@@ -102,6 +103,9 @@ export async function sendEmail(env, { to, subject, text, html, from, replyTo, c
     }
   };
   if (replyTo) body.reply_to = mailbox(replyTo);
+  if (attachments.length) {
+    body.attachments = attachments.map((file) => ({ content: Buffer.from(file.content).toString("base64"), filename: file.filename, type: file.type, disposition: "attachment" }));
+  }
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     let response;
